@@ -15,6 +15,8 @@ web/build.sh --wasm32    # wasm32 on stable Rust, for browsers without memory64 
 web/build.sh --release   # thin LTO instead of the quicker `fast` profile
 ```
 
+On Windows, `web\build.bat` takes the same options (`--wasm32`, `--release`).
+
 The page and module land in `web/dist/`. When `wasm-opt` (binaryen) is on the
 `PATH` the module is optimized further.
 
