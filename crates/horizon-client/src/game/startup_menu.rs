@@ -71,7 +71,9 @@ impl StartupMenu {
         self.root = root;
         if self.title.is_none() {
             let mut title = Title::new(
-                std::env::current_dir().unwrap_or_default().join("saves"),
+                horizon_platform::env::current_dir()
+                    .unwrap_or_default()
+                    .join("saves"),
                 &self.root,
             );
             title.last_server = settings.file.string("lastServer");
@@ -215,7 +217,7 @@ pub(super) fn spawn_loader(
     let vanilla_root = vanilla_root.to_path_buf();
     let dev_mods = options.dev_mods.clone();
     let progress = progress.clone();
-    let handle = std::thread::Builder::new()
+    let handle = horizon_platform::thread::Builder::new()
         .name("resource-loader".into())
         .spawn(move || {
             let mut pack_error = None;
@@ -359,17 +361,17 @@ impl Loading {
                 }
                 Event::OpenPackFolder => {
                     let dir = packs::packs_dir();
-                    let _ = std::fs::create_dir_all(&dir);
+                    let _ = horizon_platform::fs::create_dir_all(&dir);
                     packs::open_folder(&dir);
                 }
                 Event::OpenModFolder => {
                     let dir = Game::options_path().with_file_name(horizon_client::mod_list::DIR);
-                    let _ = std::fs::create_dir_all(&dir);
+                    let _ = horizon_platform::fs::create_dir_all(&dir);
                     packs::open_folder(&dir);
                 }
                 Event::OpenShaderPackFolder => {
                     let dir = horizon_client::shader_pack::folder();
-                    let _ = std::fs::create_dir_all(&dir);
+                    let _ = horizon_platform::fs::create_dir_all(&dir);
                     packs::open_folder(&dir);
                 }
                 Event::Credits => {
@@ -706,12 +708,13 @@ mod tests {
 
     #[test]
     fn menu_is_usable_while_the_core_worker_is_blocked() {
-        let root = std::env::temp_dir().join("horizon-startup-menu-no-world-resources");
+        let root =
+            horizon_platform::env::temp_dir().join("horizon-startup-menu-no-world-resources");
         let (sender, receiver) = std::sync::mpsc::channel();
         let (release, wait) = std::sync::mpsc::channel();
         let (published, published_rx) = std::sync::mpsc::channel();
         let worker_root = root.clone();
-        let worker = std::thread::spawn(move || {
+        let worker = horizon_platform::thread::spawn(move || {
             sender
                 .send(LoaderMsg::Ui(gui(&worker_root), worker_root))
                 .unwrap();

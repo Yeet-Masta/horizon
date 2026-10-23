@@ -14,3 +14,7 @@ pub use content::Content;
 pub use manifest::{Capability, Manifest, Package, Side};
 #[cfg(feature = "runtime")]
 pub use runtime::*;
+#[cfg(not(feature = "runtime"))]
+mod runtime_off;
+#[cfg(not(feature = "runtime"))]
+pub use runtime_off::*;

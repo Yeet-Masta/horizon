@@ -1,9 +1,10 @@
 //! A Java shader pack's files: a folder or a zip holding a `shaders/` folder,
 //! found the way Iris finds it (`Iris.loadExternalZipShaderpack`).
 
+use horizon_platform::fs;
+use horizon_platform::fs::PathExt as _;
 use std::{
     collections::BTreeMap,
-    fs,
     io::Read,
     path::{Path, PathBuf},
 };
@@ -23,9 +24,9 @@ pub enum PackFiles {
 impl PackFiles {
     /// Open `path`, a pack folder (with `shaders/` in it) or a `.zip`.
     pub fn open(path: &Path) -> Result<Self, String> {
-        if path.is_dir() {
+        if path.fs_is_dir() {
             let shaders = path.join("shaders");
-            return if shaders.is_dir() {
+            return if shaders.fs_is_dir() {
                 Ok(Self::Folder(shaders))
             } else {
                 Err("no shaders folder".into())

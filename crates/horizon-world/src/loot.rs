@@ -9,10 +9,12 @@
 //! need an entity, tool or damage source fail when the context has none, as
 //! they do for containers.
 use horizon_core::random::{LegacyRandom, RandomSource};
+use horizon_platform::fs;
+use horizon_platform::fs::PathExt as _;
 use serde_json::Value;
 use std::{
     collections::{BTreeMap, HashMap},
-    fs, io,
+    io,
     path::Path,
 };
 
@@ -270,7 +272,7 @@ fn load_kind(data: &Path, kind: &str, out: &mut HashMap<String, Value>) -> io::R
     };
     let mut namespaces: Vec<String> = entries
         .flatten()
-        .filter(|e| e.path().is_dir())
+        .filter(|e| e.path().fs_is_dir())
         .filter_map(|e| e.file_name().to_str().map(str::to_owned))
         .collect();
     namespaces.sort();
@@ -294,7 +296,7 @@ fn load_dir(
         let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
             continue;
         };
-        if path.is_dir() {
+        if path.fs_is_dir() {
             load_dir(&path, namespace, &format!("{prefix}{stem}/"), out)?;
         } else if path.extension().is_some_and(|e| e == "json") {
             let value = serde_json::from_slice(&fs::read(&path)?)?;
@@ -1478,7 +1480,8 @@ mod namespace_tests {
     /// vanilla's, under their own namespaces.
     #[test]
     fn loads_every_namespace() {
-        let root = std::env::temp_dir().join(format!("horizon-loot-ns-{}", std::process::id()));
+        let root = horizon_platform::env::temp_dir()
+            .join(format!("horizon-loot-ns-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         let files = [
             ("items.json", r#"{"minecraft:bread": {}}"#),

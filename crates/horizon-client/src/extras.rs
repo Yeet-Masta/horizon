@@ -2,7 +2,9 @@
 //! settings, kept in `horizon-extras.txt` next to `options.txt` so that file
 //! stays exactly vanilla's, and the logic behind them. Every extra is off by
 //! default; see `docs/extras.md`.
-use std::{collections::VecDeque, fs, path::Path};
+use horizon_platform::fs;
+use horizon_platform::fs::PathExt as _;
+use std::{collections::VecDeque, path::Path};
 
 pub const FILE: &str = "horizon-extras.txt";
 /// The name the options screen uses while the zoom key waits for a key.
@@ -262,7 +264,7 @@ impl Extras {
     /// setup gains no file.
     pub fn save(&self, dir: &Path) {
         let path = dir.join(FILE);
-        if *self == Self::default() && !path.exists() {
+        if *self == Self::default() && !path.fs_exists() {
             return;
         }
         let _ = fs::write(path, self.serialize());

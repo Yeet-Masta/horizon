@@ -18,7 +18,7 @@ fn fixture() -> Option<&'static Fixture> {
     static FIXTURE: OnceLock<Option<Fixture>> = OnceLock::new();
     FIXTURE
         .get_or_init(|| {
-            let root = std::env::var_os("HORIZON_RESOURCES")
+            let root = horizon_platform::env::var_os("HORIZON_RESOURCES")
                 .map(PathBuf::from)
                 .unwrap_or_else(|| {
                     PathBuf::from(env!("CARGO_MANIFEST_DIR"))

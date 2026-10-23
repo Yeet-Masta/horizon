@@ -12,10 +12,10 @@ use crate::{
     worldgen::tags::TagDefinitions,
 };
 use horizon_core::geometry::{Aabb, Direction, ShapeOp, Vec3, VoxelShape};
+use horizon_platform::fs::{self, File};
 use serde_json::Value;
 use std::{
     collections::HashMap,
-    fs::{self, File},
     io::{self, BufReader},
     path::Path,
     sync::Arc,

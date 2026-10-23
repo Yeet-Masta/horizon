@@ -81,7 +81,7 @@ impl Game<'_> {
         }
     }
     pub(super) fn options_path() -> std::path::PathBuf {
-        std::env::current_dir()
+        horizon_platform::env::current_dir()
             .unwrap_or_default()
             .join("options.txt")
     }
@@ -229,17 +229,17 @@ impl Game<'_> {
                 }
                 Event::OpenPackFolder => {
                     let dir = super::packs::packs_dir();
-                    let _ = std::fs::create_dir_all(&dir);
+                    let _ = horizon_platform::fs::create_dir_all(&dir);
                     super::packs::open_folder(&dir);
                 }
                 Event::OpenModFolder => {
                     let dir = Self::options_path().with_file_name(horizon_client::mod_list::DIR);
-                    let _ = std::fs::create_dir_all(&dir);
+                    let _ = horizon_platform::fs::create_dir_all(&dir);
                     super::packs::open_folder(&dir);
                 }
                 Event::OpenShaderPackFolder => {
                     let dir = horizon_client::shader_pack::folder();
-                    let _ = std::fs::create_dir_all(&dir);
+                    let _ = horizon_platform::fs::create_dir_all(&dir);
                     super::packs::open_folder(&dir);
                 }
                 Event::Credits => self.open_win_screen(false, super::win::Finish::Options),

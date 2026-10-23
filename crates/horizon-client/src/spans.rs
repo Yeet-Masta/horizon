@@ -5,10 +5,10 @@
 //! thread's CPU time inside it, so a span that waited (for a lock, the GPU
 //! or a core on a busy machine) shows apart from one that worked. Costs two
 //! clock reads per span when enabled and a relaxed load otherwise.
+use horizon_platform::time::{Duration, Instant};
 use std::{
     cell::RefCell,
     sync::atomic::{AtomicBool, Ordering},
-    time::{Duration, Instant},
 };
 
 static ENABLED: AtomicBool = AtomicBool::new(false);
@@ -139,12 +139,12 @@ mod tests {
     #[test]
     fn thread_cpu_counts_work_not_sleep() {
         let start = super::thread_cpu().unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(50));
+        horizon_platform::thread::sleep(horizon_platform::time::Duration::from_millis(50));
         let slept = super::thread_cpu().unwrap() - start;
         // Busy until the clock shows 10 ms of work (a loaded machine gives
         // the thread less than its wall time).
         let mut x = 0u64;
-        let busy = std::time::Instant::now();
+        let busy = horizon_platform::time::Instant::now();
         let worked = loop {
             x = std::hint::black_box(x.wrapping_mul(31).wrapping_add(7));
             let worked = super::thread_cpu().unwrap() - start - slept;

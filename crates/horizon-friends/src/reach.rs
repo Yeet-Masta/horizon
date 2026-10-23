@@ -63,12 +63,30 @@ fn virtual_interface(name: &str) -> bool {
     .any(|p| name.starts_with(p))
 }
 
+/// `if_addrs::Interface`'s part `interface_addresses` reads, on the web build.
+#[cfg(target_family = "wasm")]
+struct Interface {
+    name: String,
+    ip: IpAddr,
+}
+#[cfg(target_family = "wasm")]
+impl Interface {
+    fn ip(&self) -> IpAddr {
+        self.ip
+    }
+}
+
 /// This machine's addresses worth offering, best first: private IPv4 (the
 /// LAN), shared IPv4 (Tailscale's 100.64/10, CGNAT), other IPv4, one global
 /// IPv6. No link-local or unique-local; loopback on request.
 pub fn interface_addresses(loopback: bool) -> Vec<IpAddr> {
     let mut found: Vec<(u8, IpAddr)> = Vec::new();
-    for i in if_addrs::get_if_addrs().unwrap_or_default() {
+    #[cfg(not(target_family = "wasm"))]
+    let interfaces = if_addrs::get_if_addrs().unwrap_or_default();
+    // A browser lists no interfaces.
+    #[cfg(target_family = "wasm")]
+    let interfaces: Vec<Interface> = Vec::new();
+    for i in interfaces {
         if virtual_interface(&i.name) {
             continue;
         }

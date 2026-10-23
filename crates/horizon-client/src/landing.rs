@@ -10,6 +10,7 @@ use horizon_core::{
     position::BlockPos,
     random::RandomSource,
 };
+use horizon_platform::fs;
 use horizon_world::{
     block_entity_push::BlockPushWorld,
     block_landing::{
@@ -23,7 +24,7 @@ use horizon_world::{
     movement_properties::MovementProperties,
     registry::BlockStateId,
 };
-use std::{collections::BTreeMap, fs, path::Path};
+use std::{collections::BTreeMap, path::Path};
 
 pub fn load(root: &Path, properties: &MovementProperties<'_>) -> Result<BlockLandingRegistry> {
     let raw: BTreeMap<String, serde_json::Value> =

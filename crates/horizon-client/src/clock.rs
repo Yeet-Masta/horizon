@@ -291,7 +291,7 @@ const SAMPLES: usize = 100;
 pub struct FixedStep {
     timer: Timer,
     manager: ServerTickRateManager,
-    now: std::time::Duration,
+    now: horizon_platform::time::Duration,
     pause: bool,
     sprint_checked: bool,
     sprint_report: Option<SprintReport>,
@@ -311,7 +311,7 @@ impl Default for FixedStep {
         Self {
             timer: Timer::new(20.0, 0),
             manager: ServerTickRateManager::default(),
-            now: std::time::Duration::ZERO,
+            now: horizon_platform::time::Duration::ZERO,
             pause: false,
             sprint_checked: false,
             sprint_report: None,
@@ -340,12 +340,14 @@ impl FixedStep {
         self.now.as_nanos() as i64
     }
     /// The length of one tick at the current rate.
-    pub fn tick_duration(&self) -> std::time::Duration {
-        std::time::Duration::from_nanos(self.manager.base.nanoseconds_per_tick().max(1) as u64)
+    pub fn tick_duration(&self) -> horizon_platform::time::Duration {
+        horizon_platform::time::Duration::from_nanos(
+            self.manager.base.nanoseconds_per_tick().max(1) as u64,
+        )
     }
     /// Feed one frame's elapsed time; returns the ticks to run (at most ten,
     /// or a sprint frame's worth).
-    pub fn advance(&mut self, elapsed: std::time::Duration) -> u32 {
+    pub fn advance(&mut self, elapsed: horizon_platform::time::Duration) -> u32 {
         self.now += elapsed;
         let now_ms = self.now_ms();
         if self.manager.is_sprinting() {
@@ -466,7 +468,7 @@ impl FixedStep {
     }
     /// Record how long a tick took (`MinecraftServer.tickServer` bookkeeping
     /// and `endTickWork`).
-    pub fn record(&mut self, took: std::time::Duration) {
+    pub fn record(&mut self, took: horizon_platform::time::Duration) {
         let took = took.as_nanos() as i64;
         let index = (self.tick_count % SAMPLES as i64) as usize;
         self.aggregated -= self.tick_times[index];
@@ -530,7 +532,7 @@ mod tests {
         let mut clock = FixedStep::default();
         clock.set_frozen(true);
         clock.world_runs();
-        clock.advance(std::time::Duration::from_millis(25));
+        clock.advance(horizon_platform::time::Duration::from_millis(25));
         clock.end_frame(false);
         assert_eq!(clock.fraction(), 1.0, "frozen entities stay put");
         assert_eq!(clock.camera_fraction(), 0.5, "the player does not");
@@ -551,7 +553,7 @@ mod tests {
     }
     #[test]
     fn a_servers_tick_rate_only_slows_its_client_down() {
-        let quarter = std::time::Duration::from_millis(250);
+        let quarter = horizon_platform::time::Duration::from_millis(250);
         let mut client = FixedStep::client();
         client.set_rate(40.0);
         assert_eq!(client.advance(quarter), 5, "still 20 a second");

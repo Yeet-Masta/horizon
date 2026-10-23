@@ -191,11 +191,11 @@ impl GameplayAttributes {
         use serde_json::Value;
         let data = root.join("data/minecraft");
         let read = |p: std::path::PathBuf| -> Option<Value> {
-            serde_json::from_slice(&std::fs::read(p).ok()?).ok()
+            serde_json::from_slice(&horizon_platform::fs::read(p).ok()?).ok()
         };
         let list = |dir: &str| -> Vec<(String, Value)> {
             let mut out = Vec::new();
-            if let Ok(entries) = std::fs::read_dir(data.join(dir)) {
+            if let Ok(entries) = horizon_platform::fs::read_dir(data.join(dir)) {
                 for e in entries.flatten() {
                     let path = e.path();
                     if let (Some(stem), Some(v)) = (
@@ -219,7 +219,7 @@ impl GameplayAttributes {
                 name.trim_start_matches('#')
                     .trim_start_matches("minecraft:")
             ));
-            let Some(v) = std::fs::read(file)
+            let Some(v) = horizon_platform::fs::read(file)
                 .ok()
                 .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
             else {

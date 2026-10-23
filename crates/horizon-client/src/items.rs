@@ -3,11 +3,12 @@
 //! for the condition, entry and modifier types used by block drops).
 use crate::{Result, blocks::BlockFacts};
 use horizon_core::random::RandomSource;
+use horizon_platform::fs;
+use horizon_platform::fs::PathExt as _;
 use horizon_world::registry::{BlockRegistry, BlockStateId};
 use serde_json::Value;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
-    fs,
     path::Path,
     sync::Arc,
 };
@@ -310,7 +311,7 @@ pub(crate) fn load_tag_lists(root: &Path, kind: &str) -> Result<HashMap<String, 
     ) -> Result<()> {
         for entry in fs::read_dir(dir)?.flatten() {
             let p = entry.path();
-            if p.is_dir() {
+            if p.fs_is_dir() {
                 walk(&p, base, namespace, raw)?;
             } else if p.extension().is_some_and(|e| e == "json") {
                 let name = format!(
@@ -335,7 +336,7 @@ pub(crate) fn load_tag_lists(root: &Path, kind: &str) -> Result<HashMap<String, 
     // Vanilla's tags; with content mods also the convention (`c`) tags and the mods' own.
     for namespace in crate::mod_content::tag_namespaces(root) {
         let dir = root.join(format!("data/{namespace}/tags/{kind}"));
-        if dir.exists() {
+        if dir.fs_exists() {
             walk(&dir, &dir, &namespace, &mut raw)?;
         }
     }
@@ -658,7 +659,7 @@ impl Items {
         ) -> Result<()> {
             for entry in fs::read_dir(dir)?.flatten() {
                 let p = entry.path();
-                if p.is_dir() {
+                if p.fs_is_dir() {
                     walk_loot(&p, base, namespace, loot)?;
                 } else if p.extension().is_some_and(|e| e == "json") {
                     let id = p
@@ -679,7 +680,7 @@ impl Items {
         // Content mods' tables (docs/modpacks.md): `<ns>:blocks/...`.
         for namespace in crate::mod_content::namespaces(root) {
             let dir = root.join(format!("data/{namespace}/loot_table"));
-            if dir.is_dir() {
+            if dir.fs_is_dir() {
                 walk_loot(&dir, &dir, &namespace, &mut loot)?;
             }
         }

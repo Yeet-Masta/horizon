@@ -5,6 +5,7 @@ use crate::{
     lod::{Column, Span, Surface},
     streaming::LodDetail,
 };
+use horizon_platform::thread;
 use horizon_world::{
     heightmap::HeightmapState,
     registry::BlockStateId,
@@ -17,7 +18,6 @@ use std::{
         atomic::{AtomicBool, Ordering},
         mpsc,
     },
-    thread,
 };
 
 mod vegetation;
@@ -477,7 +477,7 @@ mod tests {
     #[ignore = "requires prepared worldgen data in HORIZON_TEST_RESOURCES"]
     fn decorated_lod_refines_real_seed_canopies_and_all_dimensions() -> crate::Result<()> {
         let root = std::path::PathBuf::from(
-            std::env::var_os("HORIZON_TEST_RESOURCES").expect("resources"),
+            horizon_platform::env::var_os("HORIZON_TEST_RESOURCES").expect("resources"),
         );
         let assets = crate::assets::Assets::load(&root)?;
         let biomes = crate::biome::Biomes::load(&root)?;
@@ -541,17 +541,18 @@ mod tests {
         }
         let key = (-64, 0);
         sampler.request_detail(&[key], [-1024, 0]);
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let deadline = horizon_platform::time::Instant::now()
+            + horizon_platform::time::Duration::from_secs(30);
         let generated = loop {
             if let Some((_, columns)) = sampler.drain_details().into_iter().find(|(k, _)| *k == key)
             {
                 break columns;
             }
             assert!(
-                std::time::Instant::now() < deadline,
+                horizon_platform::time::Instant::now() < deadline,
                 "decoration worker stalled"
             );
-            std::thread::sleep(std::time::Duration::from_millis(5));
+            horizon_platform::thread::sleep(horizon_platform::time::Duration::from_millis(5));
         };
         let count = |suffix: &str| {
             generated
@@ -592,7 +593,7 @@ mod tests {
         );
         drop(sampler);
         let mut worker = terrain.generator.worker();
-        let started = std::time::Instant::now();
+        let started = horizon_platform::time::Instant::now();
         for x in 0..BATCH {
             for z in 0..BATCH {
                 decorated_region(&mut worker, (key.0 + x, key.1 + z), &AtomicBool::new(false))?
@@ -600,7 +601,7 @@ mod tests {
             }
         }
         let separate = started.elapsed();
-        let started = std::time::Instant::now();
+        let started = horizon_platform::time::Instant::now();
         let mut emitted = FxHashMap::default();
         let region = decorated_batch(&mut worker, key, BATCH, &AtomicBool::new(false), |chunk| {
             let pos = chunk.position();

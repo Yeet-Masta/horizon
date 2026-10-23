@@ -44,7 +44,7 @@ impl FogTables {
                 "data/minecraft/worldgen/biome/{}.json",
                 name.trim_start_matches("minecraft:")
             ));
-            let Ok(bytes) = std::fs::read(path) else {
+            let Ok(bytes) = horizon_platform::fs::read(path) else {
                 continue;
             };
             let Ok(json) = serde_json::from_slice::<serde_json::Value>(&bytes) else {

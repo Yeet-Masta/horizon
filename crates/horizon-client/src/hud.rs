@@ -2,9 +2,10 @@
 //! textures, and a batch of textured quads in GUI pixels (vanilla's automatic
 //! GUI scale is applied when drawing).
 use crate::Result;
+use horizon_platform::fs;
+use horizon_platform::fs::PathExt as _;
 use std::{
     collections::HashMap,
-    fs,
     path::{Path, PathBuf},
 };
 use wgpu::util::DeviceExt;
@@ -95,7 +96,7 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.is_dir() {
+        if path.fs_is_dir() {
             walk(&path, out);
         } else if path.extension().is_some_and(|e| e == "png") {
             out.push(path);
@@ -302,9 +303,9 @@ impl HudAtlas {
             (w <= 1024 && (h <= 512 || name.starts_with("font/")))
                 .then_some(((name, w, h, pixels), flags))
         };
-        let threads = std::thread::available_parallelism().map_or(2, |n| n.get());
+        let threads = horizon_platform::thread::available_parallelism().map_or(2, |n| n.get());
         let chunk = files.len().div_ceil(threads).max(1);
-        let decoded: Vec<_> = std::thread::scope(|scope| {
+        let decoded: Vec<_> = horizon_platform::thread::scope(|scope| {
             let handles: Vec<_> = files
                 .chunks(chunk)
                 .map(|part| {
@@ -1366,8 +1367,8 @@ mod tests {
 
     /// A synthetic default font: two 8x8 glyphs, 3 and 5 pixels wide.
     fn two_glyph_font(name: &str) -> std::path::PathBuf {
-        let root =
-            std::env::temp_dir().join(format!("horizon-fonts-{name}-{}", std::process::id()));
+        let root = horizon_platform::env::temp_dir()
+            .join(format!("horizon-fonts-{name}-{}", std::process::id()));
         let font = root.join("assets/minecraft/font");
         let textures = root.join("assets/minecraft/textures/font");
         fs::create_dir_all(&font).unwrap();
@@ -1426,8 +1427,8 @@ mod tests {
         use crate::{effects::EffectInstance, hud_layout, hud_overlays, inventory_effects};
         // A synthetic resource tree exercises loading and painting together.
         // No Minecraft installation or GPU is needed for this regression test.
-        let root =
-            std::env::temp_dir().join(format!("horizon-effect-icons-{}", std::process::id()));
+        let root = horizon_platform::env::temp_dir()
+            .join(format!("horizon-effect-icons-{}", std::process::id()));
         for (name, size) in [
             ("mob_effect/levitation", 18),
             ("gui/sprites/hud/effect_background", 24),

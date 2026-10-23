@@ -50,7 +50,7 @@ impl Game<'_> {
             return;
         }
         let path = self.options.resources.join("entity-types.json");
-        let types = std::fs::read(path)
+        let types = horizon_platform::fs::read(path)
             .ok()
             .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
             .and_then(|v| {

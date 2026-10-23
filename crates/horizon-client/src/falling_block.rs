@@ -265,7 +265,8 @@ mod tests {
     fn impact_hurts_only_living_intersecting_noninvulnerable_mobs() {
         use crate::mobs::{Mob, MobTypes};
         use std::{path::Path, sync::Arc};
-        let root = std::env::var_os("HORIZON_TEST_RESOURCES").expect("HORIZON_TEST_RESOURCES");
+        let root = horizon_platform::env::var_os("HORIZON_TEST_RESOURCES")
+            .expect("HORIZON_TEST_RESOURCES");
         let types = MobTypes::load(Path::new(&root)).unwrap();
         let cow = Arc::new(types.types["minecraft:cow"].clone());
         let mut mobs = vec![

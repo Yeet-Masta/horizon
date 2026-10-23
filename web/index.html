@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Horizon Web</title>
+<meta name="description" content="Horizon, Minecraft: Java Edition 26.3 rewritten in Rust, compiled to WebAssembly and drawn with WebGPU.">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<style>
+  @font-face { font-family: "Geist"; src: url("fonts/Geist-Regular.woff2") format("woff2"); font-weight: 400; font-display: swap; }
+  @font-face { font-family: "Geist"; src: url("fonts/Geist-Medium.woff2") format("woff2"); font-weight: 500; font-display: swap; }
+  @font-face { font-family: "Pixelify Sans"; src: url("fonts/PixelifySans-SemiBold.woff2") format("woff2"); font-weight: 600; font-display: swap; }
+  /* Horizon's dark palette (crates/horizon-theme); the game is always dark. */
+  :root {
+    --page: #0f0d17;
+    --plate: #2b2641;
+    --surface: #1a1727;
+    --rule: #342d52;
+    --ink: #ecedf3;
+    --ink-soft: #c5c7d1;
+    --muted: #a29cb8;
+    --accent: #9a86ff;
+    --danger: #f07a68;
+    --success: #45c27a;
+    --warn: #f0b84f;
+    --face: #5b3fd6;
+    --face-bevel: #8a74ff;
+    --face-lip: #3a2694;
+    --font: "Geist", ui-sans-serif, system-ui, sans-serif;
+    --pixel: "Pixelify Sans", "Geist", ui-sans-serif, sans-serif;
+    color-scheme: dark;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: #000; color: var(--ink); font: 15px/1.55 var(--font); }
+  body { overflow: hidden; }
+  canvas#horizon { position: fixed; inset: 0; width: 100vw; height: 100vh; display: block; outline: none; background: #000; touch-action: none; }
+  #shell {
+    position: fixed; inset: 0; display: grid; place-items: center; padding: 16px;
+    background: radial-gradient(ellipse at 50% 30%, #241d45 0%, var(--page) 70%);
+    overflow-y: auto;
+  }
+  #shell[hidden] { display: none; }
+  .card {
+    width: min(560px, 100%); background: var(--surface); border: 1px solid var(--rule);
+    border-radius: 12px; padding: 28px; box-shadow: 0 24px 60px rgba(0,0,0,.45);
+  }
+  h1 { margin: 0 0 4px; font: 600 44px/1 var(--pixel); letter-spacing: -0.01em; }
+  h1 small { font: 500 14px/1 var(--font); color: var(--accent); vertical-align: middle; margin-left: 8px; letter-spacing: 0.04em; text-transform: uppercase; }
+  .lede { margin: 0 0 20px; color: var(--muted); }
+  .checks { list-style: none; padding: 0; margin: 0 0 20px; display: grid; gap: 6px; font-size: 14px; }
+  .checks li { display: flex; gap: 10px; align-items: baseline; }
+  .checks .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; transform: translateY(-1px); background: var(--muted); }
+  .checks .ok .dot { background: var(--success); }
+  .checks .bad .dot { background: var(--danger); }
+  .checks .bad { color: var(--ink); }
+  .drop {
+    border: 1.5px dashed var(--rule); border-radius: 10px; padding: 18px; text-align: center;
+    color: var(--ink-soft); margin-bottom: 16px; transition: border-color .15s, background .15s;
+  }
+  .drop.over { border-color: var(--accent); background: rgba(154,134,255,.08); }
+  .drop strong { color: var(--ink); }
+  .drop .stored { color: var(--success); }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; }
+  button, .button {
+    font: 500 15px/1 var(--font); color: var(--ink); background: var(--plate);
+    border: 1px solid var(--rule); border-radius: 8px; padding: 11px 16px; cursor: pointer;
+  }
+  button:hover, .button:hover { border-color: var(--accent); }
+  button.primary { background: var(--face); border-color: var(--face-bevel); color: #fff; box-shadow: inset 0 -3px 0 var(--face-lip); }
+  button.primary:disabled { opacity: .45; cursor: not-allowed; }
+  button.link { background: none; border: none; padding: 0; color: var(--muted); font-size: 13px; text-decoration: underline; }
+  input[type=file] { display: none; }
+  details { margin-top: 18px; color: var(--muted); font-size: 13px; }
+  details summary { cursor: pointer; color: var(--ink-soft); }
+  label.field { display: grid; gap: 4px; margin-top: 10px; }
+  label.field input { font: 14px/1.4 ui-monospace, monospace; color: var(--ink); background: var(--page); border: 1px solid var(--rule); border-radius: 6px; padding: 8px; }
+  #status { margin-top: 16px; font-size: 14px; color: var(--ink-soft); min-height: 1.5em; white-space: pre-wrap; }
+  #status.error { color: var(--danger); }
+  .fine { margin-top: 18px; font-size: 12px; color: var(--muted); }
+  code { font: 13px ui-monospace, monospace; color: var(--ink-soft); }
+  #overlay {
+    position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); max-width: calc(100vw - 32px);
+    background: rgba(26,23,39,.94); border: 1px solid var(--rule); border-radius: 10px; padding: 12px 16px;
+    font-size: 14px; white-space: pre-wrap;
+  }
+  #overlay.error { border-color: var(--danger); color: var(--danger); }
+  #overlay[hidden] { display: none; }
+  .spinner { display: inline-block; width: 12px; height: 12px; border: 2px solid var(--muted); border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; margin-right: 8px; vertical-align: -1px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+<canvas id="horizon" tabindex="0"></canvas>
+
+<div id="shell">
+  <div class="card">
+    <h1>Horizon <small>web</small></h1>
+    <p class="lede">Minecraft: Java Edition 26.3 rewritten in Rust, compiled to WebAssembly and drawn with WebGPU. It plays on the resources prepared from your own copy of the game.</p>
+
+    <ul class="checks" id="checks"></ul>
+
+    <div class="drop" id="drop">
+      <div id="drop-text"><strong>Your prepared resources</strong><br>Drop a zip of the folder <code>horizon-prepare</code> made (<code>.local/horizon-client/26.3</code>, or <code>resources/</code> in a release), or pick it.</div>
+      <div class="row" style="justify-content:center;margin-top:12px">
+        <label class="button" for="pick-zip">Choose zip…</label>
+        <label class="button" for="pick-folder">Choose folder…</label>
+      </div>
+      <input type="file" id="pick-zip" accept=".zip,application/zip">
+      <input type="file" id="pick-folder" webkitdirectory directory multiple>
+    </div>
+
+    <div class="row">
+      <button class="primary" id="play" disabled>Play</button>
+      <button id="forget" hidden>Forget resources</button>
+    </div>
+
+    <details>
+      <summary>Options</summary>
+      <label class="field">Game arguments
+        <input id="args" placeholder="--world Survival --seed 5 --creative" spellcheck="false">
+      </label>
+      <p class="fine">Saves, options and worlds stay in this browser (IndexedDB). <button class="link" id="export">Download the game folder (.zip)</button> · <button class="link" id="wipe">Delete saved worlds and options</button></p>
+    </details>
+
+    <div id="status" role="status"></div>
+    <p class="fine">Not an official Minecraft product. Not approved by or associated with Mojang or Microsoft. Horizon ships no Minecraft code or assets: the resources come from your own legally obtained copy.</p>
+  </div>
+</div>
+
+<div id="overlay" hidden role="status"></div>
+
+<script type="module" src="horizon.js"></script>
+</body>
+</html>

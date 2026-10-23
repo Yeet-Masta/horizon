@@ -21,12 +21,13 @@ use horizon_client::{
     },
     text::Text,
 };
+use horizon_platform::fs::PathExt as _;
+use horizon_platform::time::{Duration, Instant};
 use horizon_protocol::text::translatable;
 use horizon_world::nbt::{JavaString, Tag};
 use std::{
     path::PathBuf,
     sync::{Arc, Mutex, OnceLock, mpsc},
-    time::{Duration, Instant},
 };
 
 mod status;
@@ -91,7 +92,7 @@ fn log_from(thread: &str, level: &str, message: &str) {
     // Log4j's %d{HH:mm:ss}: the local time, as in logs/latest.log.
     println!(
         "[{}] [{thread}/{level}]: {message}",
-        chrono::Local::now().format("%H:%M:%S")
+        horizon_client::logging::local_now().format("%H:%M:%S")
     );
 }
 
@@ -143,7 +144,7 @@ pub(super) fn preflight(options: &mut Options) -> Result<bool> {
             "serverId" | "pidFile" => {
                 let value = it.next().ok_or("missing value")?;
                 if name == "pidFile" {
-                    std::fs::write(value, std::process::id().to_string())?;
+                    horizon_platform::fs::write(value, std::process::id().to_string())?;
                 }
             }
             _ => return Err(format!("{arg} is not a recognized option").into()),
@@ -165,7 +166,8 @@ pub(super) fn preflight(options: &mut Options) -> Result<bool> {
         }
     };
     if init_settings {
-        let abs = |p: &PathBuf| std::env::current_dir().map_or(p.clone(), |d| d.join(p));
+        let abs =
+            |p: &PathBuf| horizon_platform::env::current_dir().map_or(p.clone(), |d| d.join(p));
         log(
             "INFO",
             &format!(
@@ -231,7 +233,7 @@ impl Lists {
         warn("operators list", l.ops.load());
         warn("white-list", l.white.load());
         let _ = l.ops.save();
-        if !l.white.file.exists() {
+        if !l.white.file.fs_exists() {
             let _ = l.white.save();
         }
         l
@@ -442,14 +444,16 @@ impl Game<'_> {
             .ok_or("dedicated server not prepared")?;
         // Main's WorldLoader: a new world's dimensions come from
         // server.properties before the server starts.
-        let world_dir = std::env::current_dir()?.join(&universe).join(&level_name);
-        let new_world = !world_dir.join("level.dat").exists();
+        let world_dir = horizon_platform::env::current_dir()?
+            .join(&universe)
+            .join(&level_name);
+        let new_world = !world_dir.join("level.dat").fs_exists();
         if new_world {
             self.write_world_gen(&world_dir, &props)?;
         }
         // The console thread starts first, as in initServer.
         let (tx, console) = mpsc::channel();
-        std::thread::Builder::new()
+        horizon_platform::thread::Builder::new()
             .name("Server console handler".into())
             .spawn(move || {
                 let stdin = std::io::stdin();
@@ -574,7 +578,7 @@ impl Game<'_> {
             gate_lists.lock().unwrap().can_login(address, &user)
         });
         let bypass_lists = lists.clone();
-        let favicon = std::fs::read("server-icon.png")
+        let favicon = horizon_platform::fs::read("server-icon.png")
             .ok()
             .filter(|b| png_size(b) == Some((64, 64)));
         let net = NetConfig {
@@ -710,7 +714,7 @@ impl Game<'_> {
             if Instant::now() > deadline {
                 return Err("the spawn area did not load".into());
             }
-            std::thread::sleep(Duration::from_millis(2));
+            horizon_platform::thread::sleep(Duration::from_millis(2));
         }
         self.player = None;
         Ok(())
@@ -1278,7 +1282,7 @@ impl Game<'_> {
                 );
             }
         }
-        std::thread::sleep(Duration::from_millis(100));
+        horizon_platform::thread::sleep(Duration::from_millis(100));
         log("INFO", "Saving worlds");
         self.save_game()?;
         self.log_saved_levels();

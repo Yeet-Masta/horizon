@@ -1,0 +1,72 @@
+# Horizon on the web
+
+The game compiled to WebAssembly and drawn with WebGPU, in a browser tab. It is
+the same `horizon-client` as the native game, built for
+`wasm64-unknown-unknown` (64-bit memory, the default) or `wasm32-unknown-unknown`.
+Like the native game, it plays on the resources prepared from **your own copy**
+of Minecraft: Java Edition 26.3. The page never downloads game files.
+
+## Build
+
+```sh
+cargo install wasm-bindgen-cli --version 0.2.129 --locked   # the version Cargo.lock pins
+web/build.sh             # wasm64: nightly Rust and -Zbuild-std (rustup installs rust-src)
+web/build.sh --wasm32    # wasm32 on stable Rust, for browsers without memory64 (Safari)
+web/build.sh --release   # thin LTO instead of the quicker `fast` profile
+```
+
+The page and module land in `web/dist/`. When `wasm-opt` (binaryen) is on the
+`PATH` the module is optimized further.
+
+## Play
+
+```sh
+cargo run --release -p horizon-prepare -- --prepare --server-jar ~/Downloads/server.jar
+web/pack-resources.sh    # .local/horizon-web-resources.zip (--no-sounds: smaller, silent)
+python3 web/serve.py     # http://localhost:8080/
+```
+
+On `localhost`, `serve.py` hands the page that zip, and the page keeps it in
+the browser's IndexedDB: later visits start without it. Anywhere else, drop the
+zip on the page, or pick the prepared folder itself. A release folder's
+`resources/` works as well as `.local/horizon-client/26.3/`.
+
+Game arguments go in the page's Options (`--world Survival --seed 5 --creative`,
+as on the command line). `?env=HORIZON_WEB_WORK_MS=12` sets `HORIZON_*` variables.
+
+The prepared resources are derived from Minecraft: never put the zip, or a page
+serving it, anywhere public.
+
+## Browsers
+
+- WebGPU: Chrome and Edge 113+, Firefox 141+ on Windows, Safari 26+.
+- The wasm64 build also needs memory64: Chrome and Edge 133+, Firefox 134+. Safari
+  needs the wasm32 build.
+
+The page checks both and says what is missing. No cross-origin isolation is
+needed: the game runs on the page's one thread.
+
+## What differs from the native game
+
+The web build is the native game with the operating system swapped out
+(`crates/horizon-platform`):
+
+- **Files**: an in-memory file system. The resources zip is mounted read-only at
+  `/app/resources` and read in place; the game folder (`/home/horizon`: options,
+  saves, screenshots) is kept in IndexedDB, written back every two seconds and as
+  the page is hidden. Options → *Download the game folder* exports it as a zip.
+- **Threads**: none. Chunk generation, lighting and meshing run between frames,
+  most urgent first, for 8 ms a frame (more while the level loads;
+  `HORIZON_WEB_WORK_MS` sets it). Loaders run where they are started, so
+  loading the resources holds the page for a while. Region files are written as
+  they are saved.
+- **Graphics**: WebGPU only. The device opens before the game starts. Block
+  textures are split across texture arrays at the adapter's layer limit.
+  Occlusion culling runs on the render thread. Far terrain (`lodDistance`) is off.
+- **Sound**: WebAudio, mixed by the game's own mixer between frames; it starts
+  at the first click or key press (browsers keep a page silent until then).
+  Sounds decode where they start, so the first play of a long track stutters.
+- **Off**: controllers, mods with code (content-only mods still load),
+  the system clipboard (copy and paste work inside the game), LAN, Play with
+  friends, multiplayer servers, account sign-in, skin downloads and telemetry.
+  A browser tab has no sockets.

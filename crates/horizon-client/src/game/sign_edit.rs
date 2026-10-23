@@ -7,7 +7,7 @@ use horizon_client::{
     hud::{HudBatch, rgba},
     signs::wood_type,
 };
-use std::time::Instant;
+use horizon_platform::time::Instant;
 use winit::{
     event::{ElementState, KeyEvent},
     keyboard::{KeyCode, PhysicalKey},

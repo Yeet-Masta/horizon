@@ -3,10 +3,10 @@
 //! online-mode servers need: authlib's MinecraftServicesSessionService.joinServer
 //! through the services discovery document. The access token stays in this
 //! process's memory: it is never logged, printed or written anywhere.
+use horizon_platform::time::{Duration, SystemTime};
 use std::{
     path::Path,
-    sync::{Arc, Mutex, OnceLock},
-    time::{Duration, SystemTime},
+    sync::{Arc, OnceLock},
 };
 
 /// MinecraftServicesEnvironment.PROD.
@@ -77,9 +77,10 @@ impl AuthSession {
     /// Read the session file the launcher wrote and delete it at once. It
     /// must be fresh and, on Unix, readable by its owner only.
     pub fn load(path: &Path) -> Result<Self, String> {
-        let meta = std::fs::metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let meta =
+            horizon_platform::fs::metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
         let refuse = |why: &str| {
-            let _ = std::fs::remove_file(path);
+            let _ = horizon_platform::fs::remove_file(path);
             Err(format!("{}: {why}", path.display()))
         };
         #[cfg(unix)]
@@ -97,8 +98,8 @@ impl AuthSession {
         if age > MAX_SESSION_FILE_AGE {
             return refuse("it is too old (start the game from the launcher)");
         }
-        let text = std::fs::read_to_string(path);
-        let _ = std::fs::remove_file(path);
+        let text = horizon_platform::fs::read_to_string(path);
+        let _ = horizon_platform::fs::remove_file(path);
         Self::parse(&text.map_err(|e| format!("{}: {e}", path.display()))?)
     }
 }
@@ -165,12 +166,13 @@ impl JoinError {
 /// The services discovery document URL: `HORIZON_API_DISCOVERY` overrides
 /// it like authlib's `-Dminecraft.api.discovery.host`.
 pub fn discovery_url() -> String {
-    std::env::var("HORIZON_API_DISCOVERY")
+    horizon_platform::env::var("HORIZON_API_DISCOVERY")
         .ok()
         .filter(|u| !u.is_empty())
         .unwrap_or_else(|| DEFAULT_DISCOVERY.to_owned())
 }
 
+#[cfg(not(target_family = "wasm"))]
 fn agent() -> ureq::Agent {
     ureq::AgentBuilder::new()
         .timeout(Duration::from_secs(15))
@@ -179,8 +181,9 @@ fn agent() -> ureq::Agent {
 }
 
 /// The discovery document, fetched once per game (a failure is retried next time).
+#[cfg(not(target_family = "wasm"))]
 fn discovery() -> Result<Arc<serde_json::Value>, JoinError> {
-    static CACHE: Mutex<Option<Arc<serde_json::Value>>> = Mutex::new(None);
+    static CACHE: std::sync::Mutex<Option<Arc<serde_json::Value>>> = std::sync::Mutex::new(None);
     if let Some(d) = CACHE.lock().unwrap().clone() {
         return Ok(d);
     }
@@ -215,6 +218,7 @@ pub fn join_request(session: &AuthSession, server_hash: &str) -> String {
 
 /// MinecraftServicesSessionService.joinServer: tell the session service this
 /// account is joining the server whose hash is `server_hash`.
+#[cfg(not(target_family = "wasm"))]
 pub fn join_server(session: &AuthSession, server_hash: &str) -> Result<(), JoinError> {
     let doc = discovery()?;
     let url = endpoint(&doc, "session", "join").ok_or(JoinError::Unavailable)?;
@@ -241,6 +245,7 @@ pub struct JoinedProfile {
 }
 
 /// HttpDiscoveryService.buildQuery: `URLEncoder.encode(value, UTF-8)`.
+#[cfg(not(target_family = "wasm"))]
 fn url_encode(text: &str) -> String {
     let mut out = String::new();
     for b in text.bytes() {
@@ -259,6 +264,7 @@ fn url_encode(text: &str) -> String {
 /// whether `name` joined with `server_hash` (and from `ip`, when the server
 /// prevents proxy connections). `Ok(None)`: it didn't, or the service said
 /// no; `Err(Unavailable)`: no answer.
+#[cfg(not(target_family = "wasm"))]
 pub fn has_joined(
     name: &str,
     server_hash: &str,
@@ -288,6 +294,20 @@ pub fn has_joined(
         Err(ureq::Error::Transport(_)) => return Err(JoinError::Unavailable),
     };
     Ok(parse_joined(&body))
+}
+
+/// The web build has no sockets of its own: the session service never answers there.
+#[cfg(target_family = "wasm")]
+pub fn join_server(_session: &AuthSession, _server_hash: &str) -> Result<(), JoinError> {
+    Err(JoinError::Unavailable)
+}
+#[cfg(target_family = "wasm")]
+pub fn has_joined(
+    _name: &str,
+    _server_hash: &str,
+    _ip: Option<std::net::IpAddr>,
+) -> Result<Option<JoinedProfile>, JoinError> {
+    Err(JoinError::Unavailable)
 }
 
 /// HasJoinedMinecraftServerResponse: `id` and `properties`; no id is no profile.
@@ -321,11 +341,15 @@ mod tests {
 
     fn write(dir: &Path, text: &str, mode: u32) -> std::path::PathBuf {
         let path = dir.join("session.json");
-        std::fs::write(&path, text).unwrap();
+        horizon_platform::fs::write(&path, text).unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+            horizon_platform::fs::set_permissions(
+                &path,
+                horizon_platform::fs::Permissions::from_mode(mode),
+            )
+            .unwrap();
         }
         let _ = mode;
         path
@@ -347,8 +371,9 @@ mod tests {
 
     #[test]
     fn session_files_are_read_once_and_must_be_private() {
-        let dir = std::env::temp_dir().join(format!("horizon-auth-test-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = horizon_platform::env::temp_dir()
+            .join(format!("horizon-auth-test-{}", std::process::id()));
+        horizon_platform::fs::create_dir_all(&dir).unwrap();
         let text = r#"{"name":"Notch","uuid":"069a79f4-44e9-4726-a5be-fca90e38aaf5","access_token":"mock-token","user_type":"msa"}"#;
         let path = write(&dir, text, 0o600);
         let s = AuthSession::load(&path).unwrap();
@@ -365,7 +390,7 @@ mod tests {
             );
             assert!(!path.exists());
         }
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = horizon_platform::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -134,7 +134,7 @@ pub(super) struct GuestSwap {
         Option<super::respawn_anchor::RespawnConfig>,
         Option<[f64; 3]>,
     ),
-    message: Option<(String, std::time::Instant)>,
+    message: Option<(String, horizon_platform::time::Instant)>,
     host_ender: Option<(i32, i32, i32)>,
     adv_loaded: bool,
     last_inventory: u64,

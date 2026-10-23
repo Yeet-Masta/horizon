@@ -2,7 +2,7 @@
 //! Controls, Key Binds, Mouse Settings, Chat Settings, Accessibility,
 //! Language and Resource Packs, laid out like vanilla's HeaderAndFooter /
 //! OptionsList screens and drawn with the shared widgets.
-use std::time::Instant;
+use horizon_platform::time::Instant;
 
 use crate::{
     gamepad::{self, GlyphStyle},
@@ -3032,9 +3032,10 @@ mod tests {
         let mut s = Settings::default();
         let mut ui = OptionsUi::default();
         let size = (480.0, 240.0);
-        let dir = std::env::temp_dir().join(format!("horizon-shaderpacks-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = horizon_platform::env::temp_dir()
+            .join(format!("horizon-shaderpacks-{}", std::process::id()));
+        let _ = horizon_platform::fs::remove_dir_all(&dir);
+        horizon_platform::fs::create_dir_all(&dir).unwrap();
         let find = |ui: &mut OptionsUi, s: &Settings, act: &dyn Fn(&Act) -> bool| {
             ui.layout(s, size.0, size.1)
                 .0
@@ -3081,7 +3082,7 @@ mod tests {
             vec![Event::ButtonClick, Event::OpenShaderPackFolder]
         );
 
-        std::fs::write(dir.join("Pack.zip"), b"").unwrap();
+        horizon_platform::fs::write(dir.join("Pack.zip"), b"").unwrap();
         ui.shader_packs = Default::default();
         ui.shader_packs.poll(dir.clone());
         let pack = find(&mut ui, &s, &|a| *a == Act::ToggleShaderPack(0)).unwrap();
@@ -3123,7 +3124,7 @@ mod tests {
             false,
         );
         assert_eq!(s.horizon.shader_pack, "", "a second click turns it off");
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = horizon_platform::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -3262,7 +3263,8 @@ mod tests {
     #[ignore = "requires prepared language data in HORIZON_TEST_RESOURCES; run alone"]
     fn classic_hover_draws_the_selected_options_wrapped_tooltip() {
         let root = std::path::PathBuf::from(
-            std::env::var_os("HORIZON_TEST_RESOURCES").expect("HORIZON_TEST_RESOURCES"),
+            horizon_platform::env::var_os("HORIZON_TEST_RESOURCES")
+                .expect("HORIZON_TEST_RESOURCES"),
         );
         lang::set(lang::Language::load(&[&root], "en_us"));
         let atlas = atlas();
@@ -3738,7 +3740,7 @@ mod tests {
         ui.slider_value = Some((
             Opt::RenderDistance,
             0.51,
-            Instant::now() - std::time::Duration::from_millis(600),
+            Instant::now() - horizon_platform::time::Duration::from_millis(600),
         ));
         assert_eq!(ui.slider_shown(Opt::RenderDistance, 0.5), 0.5);
     }

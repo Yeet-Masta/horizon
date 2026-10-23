@@ -595,7 +595,7 @@ impl Game<'_> {
         }
         host.hub.disconnect_all();
         // Give the writer threads a moment to flush the disconnect packets.
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        horizon_platform::thread::sleep(horizon_platform::time::Duration::from_millis(100));
         self.world.block_log = None;
         self.world.light_log = None;
         self.audio.capture = None;
@@ -647,10 +647,10 @@ impl Game<'_> {
             .advancements
             .to_json(&self.adv.tree, horizon_world::DATA_VERSION);
         if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
+            let _ = horizon_platform::fs::create_dir_all(dir);
         }
         if let Ok(text) = serde_json::to_string_pretty(&json) {
-            let _ = std::fs::write(path, text);
+            let _ = horizon_platform::fs::write(path, text);
         }
         if let Some(play) = host.play.get(&guest.conn) {
             play.stats
@@ -670,7 +670,7 @@ impl Game<'_> {
         };
         let tree = self.advancement_tree();
         let path = super::stats::player_json(&self.world_root, "advancements", uuid);
-        let saved = std::fs::read_to_string(path)
+        let saved = horizon_platform::fs::read_to_string(path)
             .ok()
             .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok());
         if let Some(g) = host.hub.guest_mut(conn)

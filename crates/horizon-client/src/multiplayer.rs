@@ -6,12 +6,12 @@ use crate::hud::{HudAtlas, HudBatch, rgba};
 use crate::lan::discovery::Scanner;
 use crate::text::{DARK_GRAY, GRAY, Text, format_translation};
 use crate::title::confirm_top;
+use horizon_platform::time::Duration;
 use horizon_protocol::servers::{self, ServerEntry};
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
-    time::Duration,
 };
 
 /// The result of pinging one address.
@@ -134,7 +134,7 @@ fn ping_all(servers: &[ServerEntry], pings: &Pings, icons: &Icons, file: &Path) 
             icons.lock().unwrap().insert(address.clone(), pixels);
         }
         let (pings, icons, file) = (pings.clone(), icons.clone(), file.to_owned());
-        let _ = std::thread::Builder::new()
+        let _ = horizon_platform::thread::Builder::new()
             .name("horizon-ping".into())
             .spawn(move || {
                 let result = match crate::net::ping(&address, Duration::from_secs(5)) {
@@ -651,8 +651,8 @@ impl Screen {
                 let icons = icons.lock().unwrap();
                 // The row under the pointer (`isHovered`).
                 let hovered = row_at(servers.len(), games.len(), cursor, (w, h), scroll.amount);
-                let millis = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
+                let millis = horizon_platform::time::SystemTime::now()
+                    .duration_since(horizon_platform::time::UNIX_EPOCH)
                     .map_or(0, |d| d.as_millis());
                 let gray = rgba(128, 128, 128, 255);
                 for (i, row) in rows(servers.len(), games.len()).enumerate() {
@@ -955,7 +955,7 @@ impl Screen {
                     centered(batch, line, h / 2.0 - 16.0 + i as f32 * 9.0, u32::MAX);
                 }
                 if let Some(r) = retry {
-                    let text = r.text(std::time::Instant::now());
+                    let text = r.text(horizon_platform::time::Instant::now());
                     centered(batch, &text, h / 2.0 + 16.0, rgba(170, 170, 170, 255));
                 }
             }
@@ -1250,7 +1250,7 @@ impl Screen {
         let Self::Disconnected { retry, .. } = self else {
             return None;
         };
-        if !retry.as_ref()?.due(std::time::Instant::now()) {
+        if !retry.as_ref()?.due(horizon_platform::time::Instant::now()) {
             return None;
         }
         retry.take()
@@ -1518,9 +1518,10 @@ mod tests {
 
     #[test]
     fn icon_arrows_join_and_move_servers() {
-        let dir = std::env::temp_dir().join(format!("horizon-mp-arrows-{}", std::process::id()));
+        let dir = horizon_platform::env::temp_dir()
+            .join(format!("horizon-mp-arrows-{}", std::process::id()));
         let saves = dir.join("saves");
-        std::fs::create_dir_all(&saves).unwrap();
+        horizon_platform::fs::create_dir_all(&saves).unwrap();
         let file = servers_file(&saves);
         let names = ["a", "b", "c"];
         let list: Vec<ServerEntry> = names
@@ -1569,14 +1570,15 @@ mod tests {
             Outcome::Connect(address) => assert_eq!(address, list[2].ip),
             _ => panic!("the join arrow connects"),
         }
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = horizon_platform::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn delete_asks_before_removing_the_server() {
-        let dir = std::env::temp_dir().join(format!("horizon-mp-delete-{}", std::process::id()));
+        let dir = horizon_platform::env::temp_dir()
+            .join(format!("horizon-mp-delete-{}", std::process::id()));
         let saves = dir.join("saves");
-        std::fs::create_dir_all(&saves).unwrap();
+        horizon_platform::fs::create_dir_all(&saves).unwrap();
         let file = servers_file(&saves);
         let list = vec![
             ServerEntry::new("Keep", "127.0.0.1:2"),
@@ -1635,6 +1637,6 @@ mod tests {
             matches!(&screen, Screen::List { selected: None, servers, .. } if servers.len() == 1)
         );
         assert_eq!(names(), ["Keep"]);
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = horizon_platform::fs::remove_dir_all(&dir);
     }
 }

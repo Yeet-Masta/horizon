@@ -3,9 +3,10 @@
 //! banners, and the loom rules of `LoomMenu` (selectable patterns, the
 //! six-layer limit and the result stack).
 use crate::{block_entity_render::DYES, item_data, items::ItemStack, items::Items};
+use horizon_platform::fs;
 use horizon_world::nbt::Tag;
 use serde_json::Value;
-use std::{collections::HashMap, fs, path::Path, sync::Arc};
+use std::{collections::HashMap, path::Path, sync::Arc};
 
 /// `BannerPatternLayers.Layer`: a pattern id and the dye name it is painted in.
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -24,6 +24,7 @@ pub mod tracking;
 pub mod waypoints;
 
 pub use conn::{Holding, PlayerSender, flush_all};
+use horizon_platform::{thread::JoinHandle, time::Duration};
 use horizon_protocol::packets::play;
 use horizon_protocol::{
     GAME_VERSION, PROTOCOL_VERSION, crypto::uuid_string, packets::configuration::ClientInformation,
@@ -38,8 +39,6 @@ use std::{
         atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicUsize, Ordering},
         mpsc::{Receiver, Sender, channel},
     },
-    thread::JoinHandle,
-    time::Duration,
 };
 
 /// IntegratedServer.MAX_PLAYERS.
@@ -182,7 +181,7 @@ impl SecureChat {
         enforce: bool,
         fetch: impl FnOnce() -> Vec<horizon_protocol::rsa::RsaPublicKey> + Send + 'static,
     ) -> Self {
-        let handle = std::thread::Builder::new()
+        let handle = horizon_platform::thread::Builder::new()
             .name("Services keys".into())
             .spawn(fetch)
             .ok();
@@ -252,12 +251,12 @@ impl Shared {
         }
         if self.is_online(uuid) {
             let _ = self.events.send(NetEvent::Duplicate(uuid));
-            let deadline = std::time::Instant::now() + Duration::from_secs(30);
+            let deadline = horizon_platform::time::Instant::now() + Duration::from_secs(30);
             while self.is_online(uuid) {
-                if std::time::Instant::now() > deadline {
+                if horizon_platform::time::Instant::now() > deadline {
                     return Some(translatable("multiplayer.disconnect.slow_login", &[]));
                 }
-                std::thread::sleep(Duration::from_millis(10));
+                horizon_platform::thread::sleep(Duration::from_millis(10));
             }
         }
         self.online.lock().unwrap().push((uuid, name.to_owned()));
@@ -462,7 +461,7 @@ impl Lan {
         let port = listener.local_addr()?.port();
         let stop = Arc::new(AtomicBool::new(false));
         let (accept_shared, accept_stop) = (self.shared.clone(), stop.clone());
-        let thread = std::thread::Builder::new()
+        let thread = horizon_platform::thread::Builder::new()
             .name("horizon-lan-accept".into())
             .spawn(move || accept_loop(listener, accept_shared, &accept_stop))?;
         self._pinger = if announce {
@@ -494,11 +493,11 @@ impl Lan {
     pub fn connect_local(&self) -> io::Result<horizon_protocol::connection::Pipe> {
         let (client, server) = horizon_protocol::connection::Pipe::pair();
         let shared = self.shared.clone();
-        std::thread::Builder::new()
+        horizon_platform::thread::Builder::new()
             .name("horizon-local-conn".into())
             .spawn(move || {
                 if let Err(e) = conn::serve_local(server, shared)
-                    && std::env::var_os("HORIZON_NET_DEBUG").is_some()
+                    && horizon_platform::env::var_os("HORIZON_NET_DEBUG").is_some()
                 {
                     log::warn!("[lan] local: {e}");
                 }
@@ -532,21 +531,21 @@ fn accept_loop(listener: TcpListener, shared: Arc<Shared>, stop: &AtomicBool) {
         match listener.accept() {
             Ok((stream, addr)) => {
                 let shared = shared.clone();
-                let _ = std::thread::Builder::new()
+                let _ = horizon_platform::thread::Builder::new()
                     .name("horizon-lan-conn".into())
                     .spawn(move || handle(stream, addr, shared));
             }
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-                std::thread::sleep(Duration::from_millis(25));
+                horizon_platform::thread::sleep(Duration::from_millis(25));
             }
-            Err(_) => std::thread::sleep(Duration::from_millis(100)),
+            Err(_) => horizon_platform::thread::sleep(Duration::from_millis(100)),
         }
     }
 }
 fn handle(stream: TcpStream, addr: SocketAddr, shared: Arc<Shared>) {
     let _ = stream.set_nonblocking(false);
     if let Err(e) = conn::serve(stream, addr, shared)
-        && std::env::var_os("HORIZON_NET_DEBUG").is_some()
+        && horizon_platform::env::var_os("HORIZON_NET_DEBUG").is_some()
     {
         log::warn!("[lan] {addr}: {e}");
     }

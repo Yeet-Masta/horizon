@@ -1,6 +1,7 @@
 //! Minimal read-only ZIP archive support (stored and deflated entries), used
 //! for resource packs and the unifont glyph archive.
-use std::{collections::BTreeMap, fs, io, path::Path};
+use horizon_platform::fs;
+use std::{collections::BTreeMap, io, path::Path};
 
 /// One archive held in memory with its central directory indexed by name.
 pub struct Zip {

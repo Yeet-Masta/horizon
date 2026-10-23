@@ -25,7 +25,7 @@ use horizon_client::{
     osk::{self, Keyboard},
     widgets::{self, Kind, Target},
 };
-use std::time::Instant;
+use horizon_platform::time::Instant;
 use winit::{
     application::ApplicationHandler,
     dpi::PhysicalPosition,

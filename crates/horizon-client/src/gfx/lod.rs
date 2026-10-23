@@ -7,7 +7,7 @@ use crate::{
     mesher::SectionMesh,
 };
 use glam::{DVec3, Vec3};
-use std::time::{Duration, Instant};
+use horizon_platform::time::{Duration, Instant};
 
 /// Finished tile meshes not uploaded yet, the tiles they replace (removed
 /// once every mesh is in) and the columns they leave out.

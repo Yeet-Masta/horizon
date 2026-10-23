@@ -163,6 +163,8 @@ mod ui_control;
 mod vault;
 mod villagers;
 mod wandering_trader;
+#[cfg(target_family = "wasm")]
+pub(crate) mod web;
 mod win;
 mod wind;
 mod wither;
@@ -210,6 +212,11 @@ use horizon_core::{
     position::BlockPos,
 };
 use horizon_core::{geometry::Vec3, random::RandomSource};
+use horizon_platform::fs::PathExt as _;
+use horizon_platform::{
+    thread::JoinHandle,
+    time::{Duration, Instant},
+};
 use horizon_world::{
     block_collision::BlockCollisionRegistry,
     collision_context::{CollisionContext, CollisionEntity, CollisionItem},
@@ -229,8 +236,6 @@ use std::{
         atomic::{AtomicU32, Ordering},
         mpsc::{Receiver, TryRecvError},
     },
-    thread::JoinHandle,
-    time::{Duration, Instant},
 };
 use winit::{
     application::ApplicationHandler,
@@ -238,6 +243,14 @@ use winit::{
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
     keyboard::{KeyCode, PhysicalKey},
     window::{CursorGrabMode, Window, WindowId},
+};
+
+/// The event loop between frames: it polls natively; on the web the page's
+/// requestAnimationFrame brings the next frame (`request_redraw`), so it waits.
+const RUNNING: ControlFlow = if horizon_platform::WEB {
+    ControlFlow::Wait
+} else {
+    ControlFlow::Poll
 };
 
 #[derive(Clone)]
@@ -297,19 +310,19 @@ impl Options {
     /// next to options.txt (created on first use).
     fn player_name(&self) -> String {
         self.player_name.clone().unwrap_or_else(|| {
-            std::env::current_dir().map_or_else(
+            horizon_platform::env::current_dir().map_or_else(
                 |_| horizon_client::offline_name::generate(0),
                 |dir| horizon_client::offline_name::load_or_create(&dir),
             )
         })
     }
     fn read() -> Result<Option<Self>> {
-        let sibling = std::env::current_exe()?
+        let sibling = horizon_platform::env::current_exe()?
             .parent()
             .ok_or("missing executable directory")?
             .join("resources");
         let mut o = Self {
-            resources: if sibling.join("horizon-resources.json").exists() {
+            resources: if sibling.join("horizon-resources.json").fs_exists() {
                 sibling
             } else {
                 std::path::Path::new(".local/horizon-client").join(horizon_core::VANILLA_VERSION)
@@ -333,11 +346,11 @@ impl Options {
             control: None,
             offscreen: false,
             window_size: [1280, 720],
-            spikes: std::env::var("HORIZON_SPIKES")
+            spikes: horizon_platform::env::var("HORIZON_SPIKES")
                 .ok()
                 .and_then(|v| v.parse().ok()),
             server: None,
-            player_name: std::env::var("HORIZON_PLAYER_NAME")
+            player_name: horizon_platform::env::var("HORIZON_PLAYER_NAME")
                 .ok()
                 .filter(|n| !n.is_empty()),
             dedicated: None,
@@ -345,12 +358,13 @@ impl Options {
             dev_mods: Vec::new(),
             // The command harness (HORIZON_COMMAND_SCRIPT) drives the world
             // itself, without the event loop: it stays in the frame.
-            server_thread: std::env::var("HORIZON_SERVER_THREAD").is_ok_and(|v| v == "1")
-                && std::env::var_os("HORIZON_COMMAND_SCRIPT").is_none(),
+            server_thread: horizon_platform::env::var("HORIZON_SERVER_THREAD")
+                .is_ok_and(|v| v == "1")
+                && horizon_platform::env::var_os("HORIZON_COMMAND_SCRIPT").is_none(),
             integrated: false,
         };
-        let mut session_file = std::env::var("HORIZON_SESSION_FILE").ok();
-        let mut args = std::env::args().skip(1);
+        let mut session_file = horizon_platform::env::var("HORIZON_SESSION_FILE").ok();
+        let mut args = horizon_platform::env::args().skip(1);
         while let Some(arg) = args.next() {
             match arg.as_str() {
                 "--help" | "-h" => {
@@ -1162,7 +1176,7 @@ struct Game<'a> {
     /// The Mouse Tweaks extra's drag and wheel (`tweaks`).
     tweaks: tweaks::Tweaks,
     /// The last inventory click, for the double click that gathers a stack.
-    last_inv_click: Option<(std::time::Instant, usize, bool)>,
+    last_inv_click: Option<(horizon_platform::time::Instant, usize, bool)>,
     /// `lastQuickMoved`: what the last Shift click moved, which a Shift
     /// double click moves every stack of.
     last_quick_moved: Option<ItemStack>,
@@ -4557,6 +4571,8 @@ impl Game<'_> {
                 .set_cursor_grab(CursorGrabMode::Locked)
                 .or_else(|_| window.set_cursor_grab(CursorGrabMode::Confined))
                 .is_ok();
+            #[cfg(target_family = "wasm")]
+            horizon_client::window::pointer_lock::asked();
             #[cfg(not(target_os = "macos"))]
             if self.captured && self.focused {
                 warp(window);
@@ -4583,6 +4599,26 @@ impl Game<'_> {
             self.captured = false;
         }
         window.set_cursor_visible(!self.captured);
+    }
+    /// The game holds the pointer only while the page's lock does: a lock
+    /// let go is Escape (the pause menu); one the browser didn't give (it
+    /// was asked for outside a click) leaves the pointer free for a click
+    /// to take.
+    #[cfg(target_family = "wasm")]
+    fn follow_pointer_lock(&mut self) {
+        use horizon_client::window::pointer_lock::{self, Lock};
+        if !self.captured {
+            return;
+        }
+        match pointer_lock::state() {
+            Lock::Held | Lock::Pending => {}
+            Lock::Lost if self.screen == Screen::Playing && self.player.is_some() => {
+                self.screen = Screen::Paused;
+                self.pause_menu = true;
+                self.capture(false);
+            }
+            Lock::Lost | Lock::Refused => self.capture(false),
+        }
     }
     /// LevelLoadingScreen.onClose -> Gui.setScreen(null) -> grabMouse.
     fn capture_loaded_world(&mut self) {
@@ -6022,7 +6058,7 @@ impl Game<'_> {
             && shift
             && slot != 200
         {
-            let now = std::time::Instant::now();
+            let now = horizon_platform::time::Instant::now();
             let double = self.last_inv_click.is_some_and(|(at, last, was_right)| {
                 last == slot && was_right == right && now.duration_since(at).as_millis() < 250
             });
@@ -6063,7 +6099,7 @@ impl Game<'_> {
         {
             // An item tab's display slots take no drags or PICKUP_ALL.
             let display = slot >= Creative::DISPLAY;
-            let now = std::time::Instant::now();
+            let now = horizon_platform::time::Instant::now();
             let double = !right
                 && !display
                 && self.carried.is_some()
@@ -7421,7 +7457,9 @@ impl Game<'_> {
             return Ok(());
         }
         self.join_world_rest()?;
-        let save_root = std::env::current_dir()?.join("saves").join(folder);
+        let save_root = horizon_platform::env::current_dir()?
+            .join("saves")
+            .join(folder);
         if integrated::wanted(&self.options, &save_root) {
             return self.open_integrated(folder, name, seed, creative, create);
         }
@@ -7437,7 +7475,7 @@ impl Game<'_> {
         if self.window.is_some() {
             if self.title.is_none() {
                 self.title = Some(Title::new(
-                    std::env::current_dir()?.join("saves"),
+                    horizon_platform::env::current_dir()?.join("saves"),
                     &self.options.resources,
                 ));
             }
@@ -7825,7 +7863,7 @@ impl Game<'_> {
         while self.pending_save.is_some() {
             self.poll_closing_save()?;
             if self.pending_save.is_some() {
-                std::thread::sleep(Duration::from_millis(1));
+                horizon_platform::thread::sleep(Duration::from_millis(1));
             }
         }
         if self.title.is_some() || self.saved_for_exit {
@@ -7876,7 +7914,7 @@ impl Game<'_> {
             r.clear_sections();
         }
         self.title = Some(Title::new(
-            std::env::current_dir()?.join("saves"),
+            horizon_platform::env::current_dir()?.join("saves"),
             &self.options.resources,
         ));
         if let Some(title) = &mut self.title {
@@ -10407,7 +10445,9 @@ impl Game<'_> {
         }
     }
     fn prepare_lod(&mut self) {
-        let enabled = self.settings.horizon.lod_distance > 0
+        // Far terrain samples and meshes on threads of its own: the web build has none.
+        let enabled = !horizon_platform::WEB
+            && self.settings.horizon.lod_distance > 0
             && self.renderer.is_some()
             && self.player.is_some()
             && self.title.is_none()
@@ -10597,7 +10637,7 @@ impl Game<'_> {
                 // A finished job can hold hundreds of tiles: spread them
                 // over frames rather than stall one.
                 horizon_client::spans::time("lod_upload", || {
-                    renderer.upload_lods(std::time::Duration::from_millis(2))
+                    renderer.upload_lods(horizon_platform::time::Duration::from_millis(2))
                 });
             }
         }
@@ -10620,11 +10660,11 @@ impl ApplicationHandler for Game<'_> {
         let attributes = winit::platform::wayland::WindowAttributesExtWayland::with_name(
             attributes, "horizon", "horizon",
         );
-        let window = match event_loop.create_window(
+        let window = match event_loop.create_window(horizon_client::window::on_page(
             attributes
                 .with_inner_size(winit::dpi::LogicalSize::new(size[0], size[1]))
                 .with_fullscreen(fullscreen.then_some(winit::window::Fullscreen::Borderless(None))),
-        ) {
+        )) {
             Ok(w) => Arc::new(w),
             Err(e) => {
                 self.error = Some(e.into());
@@ -11458,6 +11498,8 @@ impl ApplicationHandler for Game<'_> {
             return;
         }
         self.poll_pads(event_loop);
+        #[cfg(target_family = "wasm")]
+        self.follow_pointer_lock();
         if self.options.frames.is_some() && self.started.elapsed() > self.options.timeout {
             self.error = Some("frame-limited run timed out".into());
             event_loop.exit();
@@ -11473,7 +11515,7 @@ impl ApplicationHandler for Game<'_> {
                 w.request_redraw();
             }
         }
-        event_loop.set_control_flow(ControlFlow::Poll);
+        event_loop.set_control_flow(RUNNING);
     }
     /// The application is ending. On macOS, Quit (Cmd+Q) ends it through
     /// applicationWillTerminate without a CloseRequested; vanilla's GLFW
@@ -11528,7 +11570,7 @@ impl<'a> Game<'a> {
         streaming.paused = true;
         let level = Level::default();
         let save = Arc::new(SaveDir::new(
-            std::env::current_dir()?
+            horizon_platform::env::current_dir()?
                 .join("saves")
                 .join(".horizon-title"),
         ));
@@ -11749,7 +11791,7 @@ impl<'a> Game<'a> {
             dragon_model: prepared.dragon_model,
             map_patches: Vec::new(),
             skin_downloads: RefCell::new(horizon_client::skins::Downloader::new(
-                std::env::current_dir()
+                horizon_platform::env::current_dir()
                     .unwrap_or_default()
                     .join("assets/skins"),
             )),
@@ -11958,7 +12000,7 @@ impl Game<'_> {
         self.perf.world_opening();
         if self.title.is_none() {
             self.title = Some(Title::new(
-                std::env::current_dir()?.join("saves"),
+                horizon_platform::env::current_dir()?.join("saves"),
                 &self.options.resources,
             ));
         }
@@ -12026,7 +12068,7 @@ impl Game<'_> {
             while self.rest_loader.is_some() {
                 self.poll_world_rest()?;
                 if self.rest_loader.is_some() {
-                    std::thread::sleep(Duration::from_millis(10));
+                    horizon_platform::thread::sleep(Duration::from_millis(10));
                 }
             }
             log::info!(
@@ -12081,10 +12123,10 @@ fn synchronous_startup(options: &Options) -> bool {
         || options.benchmark.is_some()
         || options.control.is_some()
         || options.dedicated.is_some()
-        || std::env::var_os("HORIZON_DISPENSE_FIXTURE").is_some()
-        || std::env::var_os("HORIZON_SCULK_FIXTURE").is_some()
-        || std::env::var_os("HORIZON_COMMAND_SCRIPT").is_some()
-        || std::env::var_os("HORIZON_NET_REPORT").is_some()
+        || horizon_platform::env::var_os("HORIZON_DISPENSE_FIXTURE").is_some()
+        || horizon_platform::env::var_os("HORIZON_SCULK_FIXTURE").is_some()
+        || horizon_platform::env::var_os("HORIZON_COMMAND_SCRIPT").is_some()
+        || horizon_platform::env::var_os("HORIZON_NET_REPORT").is_some()
 }
 
 /// The synchronous launch loads both phases; an ordinary launch returns the
@@ -12161,7 +12203,7 @@ fn load_resources(
     log::info!("load assets: {:.2}s", started.elapsed().as_secs_f32());
     progress.set(1);
     let behaviour_json: serde_json::Value = serde_json::from_reader(std::io::BufReader::new(
-        std::fs::File::open(root.join("block-behaviours.json"))?,
+        horizon_platform::fs::File::open(root.join("block-behaviours.json"))?,
     ))?;
     // The block facts, the biomes and the environment are independent reads:
     // run them together, within the worker budget the settings allow.
@@ -12173,7 +12215,7 @@ fn load_resources(
     let load_biomes = || Biomes::load(&root).map_err(|e| e.to_string());
     let load_environment = || Environment::load(&root).map_err(|e| e.to_string());
     let (facts, biomes, environment) = if threads > 1 {
-        std::thread::scope(|scope| {
+        horizon_platform::thread::scope(|scope| {
             let facts = scope.spawn(load_facts);
             let biomes = scope.spawn(load_biomes);
             let environment = scope.spawn(load_environment);
@@ -12248,7 +12290,7 @@ fn load_resources(
         let root = root.clone();
         let rest_progress = progress.clone();
         let progress = progress.clone();
-        let handle = std::thread::Builder::new()
+        let handle = horizon_platform::thread::Builder::new()
             .name("world-rest-loader".into())
             .spawn(move || {
                 let rest = load_world_rest(
@@ -12399,7 +12441,7 @@ fn build_renderer(
 ) -> Result<Renderer> {
     let assets = &pack.render;
     let atlas = &gui.atlas;
-    let mut renderer = pollster::block_on(Renderer::new(
+    let mut renderer = horizon_platform::block_on(Renderer::new(
         window,
         offscreen,
         &assets.pixels,
@@ -12445,7 +12487,7 @@ fn loading_renderer(
         Some(atlas) => (atlas.pixels.as_slice(), atlas.width, atlas.height),
         None => (EMPTY_HUD.as_slice(), 1, 1),
     };
-    let mut renderer = pollster::block_on(Renderer::new(
+    let mut renderer = horizon_platform::block_on(Renderer::new(
         window,
         offscreen,
         &[255, 255, 255, 255],
@@ -12548,7 +12590,7 @@ fn start_game<'a>(
     let handoff = prepared.is_some();
     let mut settings = match settings {
         Some(settings) => settings,
-        None => Settings::load(&std::env::current_dir()?.join("options.txt")),
+        None => Settings::load(&horizon_platform::env::current_dir()?.join("options.txt")),
     };
     if let Some(d) = options.distance_override {
         settings.render_distance = d;
@@ -12594,15 +12636,15 @@ fn start_game<'a>(
                 vsync: false,
                 fps_cap: None,
                 offscreen: game.options.offscreen,
-                game_dir: std::env::current_dir()?,
+                game_dir: horizon_platform::env::current_dir()?,
             },
         );
     }
-    if let Ok(spec) = std::env::var("HORIZON_DISPENSE_FIXTURE") {
+    if let Ok(spec) = horizon_platform::env::var("HORIZON_DISPENSE_FIXTURE") {
         game.dispense_fixture(&spec)?;
         return Ok(None);
     }
-    if let Ok(spec) = std::env::var("HORIZON_SCULK_FIXTURE") {
+    if let Ok(spec) = horizon_platform::env::var("HORIZON_SCULK_FIXTURE") {
         game.sculk_fixture(&spec)?;
         return Ok(None);
     }
@@ -12617,21 +12659,21 @@ fn start_game<'a>(
                 game.options.player_name(),
             );
             game.connect_server(&address, &name)?;
-            if let Some(report) = std::env::var_os("HORIZON_NET_REPORT") {
+            if let Some(report) = horizon_platform::env::var_os("HORIZON_NET_REPORT") {
                 game.run_net_harness(report.as_ref())?;
                 return Ok(None);
             }
         }
         Some(folder) => {
             let (seed, creative) = (game.options.seed, game.options.creative);
-            if std::env::var_os("HORIZON_COMMAND_SCRIPT").is_some() {
+            if horizon_platform::env::var_os("HORIZON_COMMAND_SCRIPT").is_some() {
                 // The command harness runs before entering the window loop.
                 game.open_world(&folder, None, Some(seed), creative, None)?;
             } else {
                 // Start after the window is handed over, so --world uses the
                 // same responsive initialization path as the title screen.
                 game.title = Some(Title::new(
-                    std::env::current_dir()?.join("saves"),
+                    horizon_platform::env::current_dir()?.join("saves"),
                     &game.options.resources,
                 ));
                 game.pending_entry = Some(PendingWorldEntry::Local {
@@ -12646,7 +12688,7 @@ fn start_game<'a>(
         None if handoff => {}
         None => {
             let mut title = Title::new(
-                std::env::current_dir()?.join("saves"),
+                horizon_platform::env::current_dir()?.join("saves"),
                 &game.options.resources,
             );
             title.last_server = game.settings.file.string("lastServer");
@@ -12654,8 +12696,8 @@ fn start_game<'a>(
         }
     }
     if let (Some(script), Some(output)) = (
-        std::env::var_os("HORIZON_COMMAND_SCRIPT"),
-        std::env::var_os("HORIZON_COMMAND_OUTPUT"),
+        horizon_platform::env::var_os("HORIZON_COMMAND_SCRIPT"),
+        horizon_platform::env::var_os("HORIZON_COMMAND_OUTPUT"),
     ) {
         game.run_command_harness(script.as_ref(), output.as_ref())?;
         return Ok(None);
@@ -12663,6 +12705,8 @@ fn start_game<'a>(
     Ok(Some(game))
 }
 
+// The page's event loop never returns to write it.
+#[cfg(not(target_family = "wasm"))]
 fn write_report(game: &Game<'_>) -> Result<()> {
     if let Some(path) = &game.options.report {
         let report = serde_json::json!({
@@ -12674,11 +12718,18 @@ fn write_report(game: &Game<'_>) -> Result<()> {
             "player": game.player.as_ref().map(|p| [p.position.x, p.position.y, p.position.z]),
             "error": game.error.as_ref().map(|e| e.to_string()),
         });
-        std::fs::write(path, serde_json::to_vec_pretty(&report)?)?;
+        horizon_platform::fs::write(path, serde_json::to_vec_pretty(&report)?)?;
     }
     Ok(())
 }
 
+#[cfg(target_family = "wasm")]
+fn run_event_loop(game: Game<'static>) -> Result<()> {
+    // The page's event loop runs the game after this returns.
+    winit::platform::web::EventLoopExtWebSys::spawn_app(EventLoop::new()?, game);
+    Ok(())
+}
+#[cfg(not(target_family = "wasm"))]
 fn run_event_loop(mut game: Game<'_>) -> Result<()> {
     EventLoop::new()?.run_app(&mut game)?;
     write_report(&game)?;
@@ -12729,11 +12780,11 @@ impl Loading {
         let attributes = winit::platform::wayland::WindowAttributesExtWayland::with_name(
             attributes, "horizon", "horizon",
         );
-        let window = match event_loop.create_window(
+        let window = match event_loop.create_window(horizon_client::window::on_page(
             attributes
                 .with_inner_size(winit::dpi::LogicalSize::new(size[0], size[1]))
                 .with_fullscreen(fullscreen.then_some(winit::window::Fullscreen::Borderless(None))),
-        ) {
+        )) {
             Ok(w) => Arc::new(w),
             Err(e) => {
                 self.error = Some(e.into());
@@ -12820,7 +12871,7 @@ impl Loading {
                 w.request_redraw();
             }
         }
-        event_loop.set_control_flow(ControlFlow::Poll);
+        event_loop.set_control_flow(RUNNING);
     }
     fn draw(&mut self) {
         let Some(size) = self
@@ -13001,6 +13052,16 @@ impl ApplicationHandler for App {
         if let App::Ready(game) = self {
             game.exiting(event_loop);
         }
+        // Natively `run_loading` reports the error once the loop returns; the
+        // page's loop never returns.
+        #[cfg(target_family = "wasm")]
+        {
+            let error = match self {
+                App::Ready(game) => game.error.take(),
+                App::Loading(loading) => loading.error.take(),
+            };
+            web::stopped(error.as_deref());
+        }
     }
 }
 
@@ -13036,18 +13097,25 @@ fn run_loading(
         menu,
         error: None,
     };
-    let mut app = App::Loading(Box::new(loading));
-    EventLoop::new()?.run_app(&mut app)?;
-    match app {
-        App::Ready(mut game) => {
-            write_report(&game)?;
-            if let Some(e) = game.error.take() {
-                return Err(e);
+    let app = App::Loading(Box::new(loading));
+    // The page's event loop runs the game after this returns.
+    #[cfg(target_family = "wasm")]
+    winit::platform::web::EventLoopExtWebSys::spawn_app(EventLoop::new()?, app);
+    #[cfg(not(target_family = "wasm"))]
+    {
+        let mut app = app;
+        EventLoop::new()?.run_app(&mut app)?;
+        match app {
+            App::Ready(mut game) => {
+                write_report(&game)?;
+                if let Some(e) = game.error.take() {
+                    return Err(e);
+                }
             }
-        }
-        App::Loading(loading) => {
-            if let Some(e) = loading.error {
-                return Err(e);
+            App::Loading(loading) => {
+                if let Some(e) = loading.error {
+                    return Err(e);
+                }
             }
         }
     }
@@ -13085,10 +13153,10 @@ pub fn run() -> Result<()> {
     let started = Instant::now();
     horizon_client::spans::enable(options.spikes.is_some());
     let vanilla_root = options.resources.clone();
-    let early_settings = Settings::load(&std::env::current_dir()?.join("options.txt"));
+    let early_settings = Settings::load(&horizon_platform::env::current_dir()?.join("options.txt"));
     // Snapshots of derived tables live in the game folder, never beside the
     // shared resources.
-    Behaviours::set_cache_dir(std::env::current_dir()?.join(".horizon-cache"));
+    Behaviours::set_cache_dir(horizon_platform::env::current_dir()?.join(".horizon-cache"));
     if !synchronous_startup(&options) {
         return run_loading(options, early_settings, vanilla_root, None, started);
     }
@@ -13120,9 +13188,14 @@ pub fn run() -> Result<()> {
     } else {
         Audio::new(&options.resources)
     };
-    let resources = loaded.resources;
+    // The page's event loop outlives `run`: the web build keeps the resources
+    // for good, as `Loading::finish` does.
+    #[cfg(target_family = "wasm")]
+    let resources: &Arc<Resources> = Box::leak(Box::new(loaded.resources));
+    #[cfg(not(target_family = "wasm"))]
+    let resources = &loaded.resources;
     let game = start_game(
-        &resources,
+        resources,
         loaded.pack,
         gui,
         options,
@@ -13162,9 +13235,10 @@ mod startup_cpu_tests {
 
     #[test]
     fn worker_prepares_owned_models_and_inventory_before_handoff() {
-        let root = std::env::temp_dir().join(format!("horizon-startup-cpu-{}", std::process::id()));
-        std::fs::create_dir_all(&root).unwrap();
-        std::fs::write(
+        let root = horizon_platform::env::temp_dir()
+            .join(format!("horizon-startup-cpu-{}", std::process::id()));
+        horizon_platform::fs::create_dir_all(&root).unwrap();
+        horizon_platform::fs::write(
             root.join("entity-models.json"),
             r#"{
             "minecraft:end_crystal#main": {}, "minecraft:ender_dragon#main": {},
@@ -13173,7 +13247,7 @@ mod startup_cpu_tests {
         }"#,
         )
         .unwrap();
-        std::fs::write(
+        horizon_platform::fs::write(
             root.join("creative-tabs.json"),
             r#"[{
             "id":"minecraft:building_blocks", "items":["minecraft:stone"]
@@ -13181,13 +13255,13 @@ mod startup_cpu_tests {
         )
         .unwrap();
         let worker_root = root.clone();
-        let prepared = std::thread::spawn(move || {
+        let prepared = horizon_platform::thread::spawn(move || {
             GameCpuResources::load(&worker_root).map_err(|error| error.to_string())
         })
         .join()
         .unwrap()
         .unwrap();
-        std::fs::remove_dir_all(&root).unwrap();
+        horizon_platform::fs::remove_dir_all(&root).unwrap();
         assert!(prepared.crystal_model.is_some());
         assert!(prepared.dragon_model.is_some());
         assert!(prepared.arrow_model.is_some());
@@ -13265,7 +13339,7 @@ mod tests {
         let (release, wait) = std::sync::mpsc::channel();
         let loader = WorldRestLoader {
             progress: Progress::new(),
-            handle: std::thread::spawn(move || {
+            handle: horizon_platform::thread::spawn(move || {
                 wait.recv().unwrap();
                 Ok(())
             }),
@@ -13280,7 +13354,7 @@ mod tests {
         let (release, wait) = std::sync::mpsc::channel();
         let loader = WorldRestLoader {
             progress: Progress::new(),
-            handle: std::thread::spawn(move || {
+            handle: horizon_platform::thread::spawn(move || {
                 wait.recv().unwrap();
                 Ok(())
             }),
@@ -13289,7 +13363,7 @@ mod tests {
         assert!(!loader.ready().unwrap());
         release.send(()).unwrap();
         while !loader.ready().unwrap() {
-            std::thread::sleep(Duration::from_millis(1));
+            horizon_platform::thread::sleep(Duration::from_millis(1));
         }
         loader.finish().unwrap();
     }
@@ -13298,7 +13372,7 @@ mod tests {
     fn world_rest_worker_failure_reaches_the_client() {
         let loader = WorldRestLoader {
             progress: Progress::new(),
-            handle: std::thread::spawn(|| Err("missing world table".to_owned())),
+            handle: horizon_platform::thread::spawn(|| Err("missing world table".to_owned())),
         };
         assert_eq!(
             loader.finish().unwrap_err().to_string(),
@@ -13310,7 +13384,7 @@ mod tests {
     fn world_rest_worker_panic_reaches_the_client() {
         let loader = WorldRestLoader {
             progress: Progress::new(),
-            handle: std::thread::spawn(|| panic!("broken loader")),
+            handle: horizon_platform::thread::spawn(|| panic!("broken loader")),
         };
         assert_eq!(
             loader.finish().unwrap_err().to_string(),

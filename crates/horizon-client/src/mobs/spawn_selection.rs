@@ -20,8 +20,9 @@ use horizon_core::{
     geometry::{Aabb, Vec3},
     random::RandomSource,
 };
+use horizon_platform::fs;
 use serde_json::Value;
-use std::{collections::HashMap, fs, path::Path};
+use std::{collections::HashMap, path::Path};
 
 /// A `natural_mob_spawns` / `spawn_overrides` entry list.
 pub fn parse_entries(list: &Value) -> Vec<SpawnEntry> {

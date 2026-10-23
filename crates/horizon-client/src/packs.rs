@@ -7,10 +7,12 @@ mod cache;
 pub mod pattern;
 use crate::text::Style;
 use crate::{text::Text, zip::Zip};
+use horizon_platform::fs;
+use horizon_platform::fs::PathExt as _;
 use pattern::Pattern;
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs, io,
+    io,
     path::{Path, PathBuf},
 };
 
@@ -271,7 +273,7 @@ fn pack(id: String, title: Text, source: Source) -> Option<Pack> {
     let meta = read_meta(&source)?;
     let (raw_description, description_style) = component_root(&meta["pack"]["description"]);
     let icon = match &source {
-        Source::Dir(d) => d.join("pack.png").is_file(),
+        Source::Dir(d) => d.join("pack.png").fs_is_file(),
         Source::Zip(z) => Zip::open(z).is_ok_and(|z| z.read("pack.png").is_ok()),
     };
     Some(Pack {
@@ -297,7 +299,7 @@ pub fn discover(resources: &Path, packs_dir: &Path) -> Vec<Pack> {
         ("high_contrast", "resourcePack.high_contrast.name"),
     ] {
         let z = resources.join(format!("assets/minecraft/resourcepacks/{id}.zip"));
-        if z.exists()
+        if z.fs_exists()
             && let Some(p) = pack(id.into(), Text::translate(key, &[]), Source::Zip(z))
         {
             out.push(p);
@@ -310,7 +312,7 @@ pub fn discover(resources: &Path, packs_dir: &Path) -> Vec<Pack> {
         .filter_map(|e| {
             let path = e.path();
             let name = e.file_name().to_string_lossy().into_owned();
-            let source = if path.is_dir() {
+            let source = if path.fs_is_dir() {
                 Source::Dir(path)
             } else if name.ends_with(".zip") {
                 Source::Zip(path)
@@ -344,7 +346,7 @@ fn pack_files(pack: &Pack) -> io::Result<BTreeMap<String, Provided>> {
                     };
                     for e in entries.flatten() {
                         let p = e.path();
-                        if p.is_dir() {
+                        if p.fs_is_dir() {
                             stack.push(p);
                         } else if let Ok(rel) = p.strip_prefix(&base) {
                             let rel = rel.to_string_lossy().replace('\\', "/");
@@ -375,7 +377,7 @@ fn link(target: &Path, at: &Path) -> io::Result<()> {
 }
 #[cfg(not(unix))]
 fn link(target: &Path, at: &Path) -> io::Result<()> {
-    if target.is_dir() {
+    if target.fs_is_dir() {
         Ok(())
     } else {
         fs::copy(target, at).map(|_| ())
@@ -393,7 +395,7 @@ fn build_overlay_uncached(
     out: &Path,
     dependencies: &mut cache::Dependencies,
 ) -> io::Result<()> {
-    if out.exists() {
+    if out.fs_exists() {
         fs::remove_dir_all(out)?;
     }
     fs::create_dir_all(out)?;
@@ -515,7 +517,7 @@ fn build_overlay_uncached(
                     }
                 }
             } else if touched.contains(&child)
-                || (vanilla.join(&child).is_dir() && !filters.is_empty())
+                || (vanilla.join(&child).fs_is_dir() && !filters.is_empty())
             {
                 mirror(
                     &child,
@@ -532,7 +534,7 @@ fn build_overlay_uncached(
                 // Hidden by a pack's filter.
             } else {
                 #[cfg(not(unix))]
-                if vanilla.join(&child).is_file() {
+                if vanilla.join(&child).fs_is_file() {
                     dependencies.file(&vanilla.join(&child));
                 }
                 link(&vanilla.join(&child), &out.join(&child))?;
@@ -927,7 +929,8 @@ mod tests {
     }
     #[test]
     fn overlay_layers_packs_over_vanilla() {
-        let base = std::env::temp_dir().join(format!("horizon-packs-{}", std::process::id()));
+        let base =
+            horizon_platform::env::temp_dir().join(format!("horizon-packs-{}", std::process::id()));
         let _ = fs::remove_dir_all(&base);
         let vanilla = base.join("vanilla");
         fs::create_dir_all(vanilla.join("assets/minecraft/textures/block")).unwrap();
@@ -996,7 +999,8 @@ mod tests {
             {"min_format":97,"max_format":[97,5],"directory":"also"},
             {"formats":50,"directory":"no"}]}}"#);
         assert_eq!(overlays_of(&meta), ["new", "also"]);
-        let base = std::env::temp_dir().join(format!("horizon-packs-ov-{}", std::process::id()));
+        let base = horizon_platform::env::temp_dir()
+            .join(format!("horizon-packs-ov-{}", std::process::id()));
         let _ = fs::remove_dir_all(&base);
         let vanilla = base.join("vanilla");
         fs::create_dir_all(vanilla.join("assets/minecraft/textures/block")).unwrap();

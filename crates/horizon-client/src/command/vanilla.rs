@@ -544,7 +544,7 @@ fn apply_vanilla_order(d: &mut Dispatcher) {
 /// `HORIZON_DEV_COMMANDS` set the development one
 /// (SharedConstants.DEBUG_DEV_COMMANDS).
 pub fn game_dispatcher() -> &'static Dispatcher {
-    if std::env::var_os("HORIZON_DEV_COMMANDS").is_some() {
+    if horizon_platform::env::var_os("HORIZON_DEV_COMMANDS").is_some() {
         dispatcher()
     } else {
         release_dispatcher()

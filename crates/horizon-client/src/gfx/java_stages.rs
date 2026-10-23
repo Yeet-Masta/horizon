@@ -226,8 +226,8 @@ pub struct JavaStages {
     folders: Vec<Folder>,
     folder_for: [Option<usize>; 3],
     bound: Option<Bound>,
-    started: std::time::Instant,
-    last: Option<std::time::Instant>,
+    started: horizon_platform::time::Instant,
+    last: Option<horizon_platform::time::Instant>,
     frames: u32,
     previous: Option<(Mat4, Mat4, Vec3)>,
     uniforms: CustomUniforms,
@@ -278,7 +278,7 @@ impl JavaStages {
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
-        if let Some(error) = pollster::block_on(scope.pop()) {
+        if let Some(error) = horizon_platform::block_on_or(scope.pop(), None) {
             return Err(error.to_string());
         }
         Ok(Self {
@@ -288,7 +288,7 @@ impl JavaStages {
             folders,
             folder_for,
             bound: None,
-            started: std::time::Instant::now(),
+            started: horizon_platform::time::Instant::now(),
             last: None,
             frames: 0,
             previous: None,
@@ -322,7 +322,7 @@ impl JavaStages {
         {
             self.bound = Some(self.bind(device, queue, folder, color, depth, size, post));
         }
-        let now = std::time::Instant::now();
+        let now = horizon_platform::time::Instant::now();
         let frame_time = self.last.map_or(0.0, |t| (now - t).as_secs_f32());
         self.last = Some(now);
         let directives = self.folders[folder].directives;

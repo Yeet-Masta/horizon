@@ -78,7 +78,7 @@ impl CommandTree {
     /// commands.json next to registries.json (the data generator's reports).
     pub fn load(resources: &Path) -> Option<Self> {
         let dir = Builtin::find(resources)?.parent()?.to_path_buf();
-        let text = std::fs::read_to_string(dir.join("commands.json")).ok()?;
+        let text = horizon_platform::fs::read_to_string(dir.join("commands.json")).ok()?;
         Some(Self {
             root: serde_json::from_str(&text).ok()?,
         })

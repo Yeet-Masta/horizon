@@ -6,8 +6,9 @@ use crate::{
     json::{self, Json},
     user_lists::NameAndId,
 };
+#[cfg(not(target_family = "wasm"))]
+use horizon_platform::time::Duration;
 use horizon_protocol::rsa::RsaPublicKey;
-use std::time::Duration;
 
 /// Mojang's services discovery document.
 pub const DEFAULT_DISCOVERY: &str = "https://discovery.minecraftservices.com/minecraft/client";
@@ -15,7 +16,7 @@ pub const DEFAULT_DISCOVERY: &str = "https://discovery.minecraftservices.com/min
 /// The discovery document's URL: `HORIZON_API_DISCOVERY` overrides it like
 /// authlib's `-Dminecraft.api.discovery.host`.
 pub fn discovery_url() -> String {
-    std::env::var("HORIZON_API_DISCOVERY")
+    horizon_platform::env::var("HORIZON_API_DISCOVERY")
         .ok()
         .filter(|u| !u.is_empty())
         .unwrap_or_else(|| DEFAULT_DISCOVERY.to_owned())
@@ -42,6 +43,7 @@ pub fn resolve(name: &str, online: bool) -> Option<NameAndId> {
 /// MinecraftServicesProfileRepository.findProfileByName: the account named
 /// `name` (any case), or None when there is none or the services don't
 /// answer (vanilla logs both as "Couldn't find profile with name").
+#[cfg(not(target_family = "wasm"))]
 pub fn find_by_name(discovery: &str, name: &str) -> Option<NameAndId> {
     let agent = ureq::AgentBuilder::new()
         .timeout(Duration::from_secs(15))
@@ -57,6 +59,7 @@ pub fn find_by_name(discovery: &str, name: &str) -> Option<NameAndId> {
 /// profile-key keys (`playerCertificateKeys`, ServicesKeyType.PROFILE_KEY)
 /// sign the players' chat keys; secure chat checks them. The error is the
 /// line vanilla logs, after which it has no keys.
+#[cfg(not(target_family = "wasm"))]
 pub fn fetch_profile_key_keys(discovery: &str) -> Result<Vec<RsaPublicKey>, &'static str> {
     const FAILED: &str = "Failed to request Minecraft Services public key";
     let agent = ureq::AgentBuilder::new()
@@ -69,6 +72,16 @@ pub fn fetch_profile_key_keys(discovery: &str) -> Result<Vec<RsaPublicKey>, &'st
         .ok_or(FAILED)?;
     let url = endpoint(&doc, "authentication", "getPublicKeys").ok_or(FAILED)?;
     profile_key_keys(&get(&url).ok_or(FAILED)?)
+}
+
+/// The web build has no sockets of its own: the services never answer there.
+#[cfg(target_family = "wasm")]
+pub fn find_by_name(_discovery: &str, _name: &str) -> Option<NameAndId> {
+    None
+}
+#[cfg(target_family = "wasm")]
+pub fn fetch_profile_key_keys(_discovery: &str) -> Result<Vec<RsaPublicKey>, &'static str> {
+    Err("Failed to request Minecraft Services public key")
 }
 
 /// The key set answer: `{"profilePropertyKeys": [...], "playerCertificateKeys":
@@ -104,6 +117,7 @@ pub fn profile_key_keys(answer: &str) -> Result<Vec<RsaPublicKey>, &'static str>
 }
 
 /// MinecraftServicesDiscoveryService.getUrl(service, endpoint).
+#[cfg(not(target_family = "wasm"))]
 fn endpoint(doc: &Json, service: &str, name: &str) -> Option<String> {
     doc.get("discovery")?
         .get(service)?

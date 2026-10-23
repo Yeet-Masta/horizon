@@ -1144,7 +1144,7 @@ impl Hub {
         if g.left_reason.is_empty() {
             g.left_reason = reason.to_owned();
         }
-        if std::env::var_os("HORIZON_NET_DEBUG").is_some() {
+        if horizon_platform::env::var_os("HORIZON_NET_DEBUG").is_some() {
             log::info!("[lan] {} left: {reason}", g.name);
         }
         if !g.placed {
@@ -1739,8 +1739,8 @@ impl Hub {
             // ServerPlayer.tick's CriteriaTriggers.TICK, then flushDirty. A
             // player who has been here has had the tick's criteria already.
             if !g.advancements_loaded {
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
+                let now = horizon_platform::time::SystemTime::now()
+                    .duration_since(horizon_platform::time::UNIX_EPOCH)
                     .map_or(0, |d| d.as_millis() as i64);
                 let sync = self.sync.clone();
                 let g = &mut self.guests[i];
@@ -2605,7 +2605,7 @@ mod tests {
             ] {
                 let sent = FxHashSet::default();
                 let mut queue = Vec::new();
-                let start = std::time::Instant::now();
+                let start = horizon_platform::time::Instant::now();
                 let moves = 200;
                 for step in 0..moves {
                     // Nothing sent yet (an explorer waiting on generation).

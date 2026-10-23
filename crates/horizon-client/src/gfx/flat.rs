@@ -75,7 +75,7 @@ const MIN_DRAWS: usize = 4096;
 /// shaders can read storage buffers large enough for an index page.
 /// `HORIZON_FLAT_DRAWS=1` draws every frame flat, `0` none.
 pub fn wanted(adapter: &wgpu::Adapter, device: &wgpu::Device) -> bool {
-    match std::env::var("HORIZON_FLAT_DRAWS").as_deref() {
+    match horizon_platform::env::var("HORIZON_FLAT_DRAWS").as_deref() {
         Ok("0") => return false,
         Ok("1") => return supported(adapter, device),
         _ => {}
@@ -252,7 +252,7 @@ impl Flat {
             empty: buffer(device, "No sorted indices", 16, storage_usage),
             calls: Vec::new(),
             solid_calls: 0,
-            min_draws: if std::env::var("HORIZON_FLAT_DRAWS").as_deref() == Ok("1") {
+            min_draws: if horizon_platform::env::var("HORIZON_FLAT_DRAWS").as_deref() == Ok("1") {
                 0
             } else {
                 MIN_DRAWS

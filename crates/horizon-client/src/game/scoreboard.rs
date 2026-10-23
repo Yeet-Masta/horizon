@@ -17,6 +17,7 @@ use horizon_client::{
     tab_list::TabPlayer,
     text::Text,
 };
+use horizon_platform::fs::PathExt as _;
 use horizon_world::nbt::Tag;
 use std::collections::HashSet;
 
@@ -87,7 +88,7 @@ impl Game<'_> {
         }
         let path = self.scoreboard_path();
         let board = &self.score.board;
-        if board == &Scoreboard::default() && !path.exists() {
+        if board == &Scoreboard::default() && !path.fs_exists() {
             return;
         }
         let _ = save::write_dat(

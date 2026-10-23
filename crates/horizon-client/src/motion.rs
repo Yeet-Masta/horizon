@@ -8,6 +8,7 @@ use horizon_core::{
     position::BlockPos,
     random::RandomSource,
 };
+use horizon_platform::fs;
 use horizon_world::{
     attribute_map::ValueKind,
     attributes::{Modifier, Operation, entity::Catalog, live::LiveAttributes},
@@ -37,7 +38,7 @@ use horizon_world::{
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs, io,
+    io,
     path::Path,
     sync::Arc,
 };
@@ -2147,7 +2148,7 @@ mod tests {
 
     #[test]
     fn sword_sweep_requires_charge_ground_and_slow_horizontal_movement() {
-        let root = std::env::var_os("HORIZON_TEST_RESOURCES")
+        let root = horizon_platform::env::var_os("HORIZON_TEST_RESOURCES")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| {
                 Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -2183,7 +2184,7 @@ mod tests {
 
     #[test]
     fn player_stands_walks_sneaks_and_jumps_on_ghast() {
-        let root = std::env::var_os("HORIZON_TEST_RESOURCES")
+        let root = horizon_platform::env::var_os("HORIZON_TEST_RESOURCES")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| {
                 Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -2427,7 +2428,7 @@ mod tests {
 
     #[test]
     fn creative_and_spectator_preserve_hunger_when_switching_from_survival() {
-        let root = std::env::var_os("HORIZON_TEST_RESOURCES")
+        let root = horizon_platform::env::var_os("HORIZON_TEST_RESOURCES")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| {
                 Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -2496,7 +2497,7 @@ mod tests {
 
     #[test]
     fn player_fire_damage_queues_hurt_sound_only_for_fresh_hits() {
-        let root = std::env::var_os("HORIZON_TEST_RESOURCES")
+        let root = horizon_platform::env::var_os("HORIZON_TEST_RESOURCES")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| {
                 Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -2851,7 +2852,7 @@ mod tests {
 
     #[test]
     fn resident_water_and_lava_are_not_treated_as_air() {
-        let root = std::env::var_os("HORIZON_TEST_RESOURCES")
+        let root = horizon_platform::env::var_os("HORIZON_TEST_RESOURCES")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| {
                 Path::new(env!("CARGO_MANIFEST_DIR"))

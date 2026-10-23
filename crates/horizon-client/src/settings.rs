@@ -3,7 +3,8 @@
 //! The option screens live in `options_ui`.
 use crate::keybinds::KeyBinds;
 use crate::options_file::{OptionsFile, V};
-use std::{fs, path::Path};
+use horizon_platform::fs;
+use std::path::Path;
 
 /// SoundSource names in vanilla order.
 pub const SOUND_SOURCES: [&str; 11] = [

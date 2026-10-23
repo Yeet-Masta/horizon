@@ -7,14 +7,14 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 /// Threads take the next item as they finish one, so a run of slow items
 /// doesn't hold back the others.
 pub fn par_map<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<R> {
-    let threads = std::thread::available_parallelism()
+    let threads = horizon_platform::thread::available_parallelism()
         .map_or(1, |n| n.get())
         .min(items.len());
     if threads <= 1 {
         return items.iter().map(f).collect();
     }
     let next = AtomicUsize::new(0);
-    let mut out: Vec<(usize, R)> = std::thread::scope(|scope| {
+    let mut out: Vec<(usize, R)> = horizon_platform::thread::scope(|scope| {
         let workers: Vec<_> = (0..threads)
             .map(|_| {
                 scope.spawn(|| {

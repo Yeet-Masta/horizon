@@ -7,6 +7,7 @@
 //! (crate::auth): the login joins the server through the session service and
 //! encrypts the connection (ClientHandshakePacketListenerImpl.handleHello).
 use crate::auth::AuthSession;
+use horizon_platform::{thread::JoinHandle, time::Duration};
 use horizon_protocol::{
     PROTOCOL_VERSION,
     connection::{ConnReader, ConnWriter, Connection, Counters},
@@ -17,13 +18,9 @@ use horizon_protocol::{
     servers::parse_address,
     text::{Language, plain, translatable},
 };
-use std::{
-    sync::{
-        Arc, Mutex,
-        mpsc::{Receiver, Sender, channel},
-    },
-    thread::JoinHandle,
-    time::Duration,
+use std::sync::{
+    Arc, Mutex,
+    mpsc::{Receiver, Sender, channel},
 };
 
 /// What the network thread reports to the game.
@@ -95,7 +92,7 @@ impl Session {
         let counters = Arc::new(Mutex::new(None));
         let (thread_writer, thread_counters) = (writer.clone(), counters.clone());
         let (address_owned, name_owned) = (address.to_owned(), name.to_owned());
-        let thread = std::thread::Builder::new()
+        let thread = horizon_platform::thread::Builder::new()
             .name("horizon-net".into())
             .spawn(move || {
                 let result = run(
@@ -120,7 +117,7 @@ impl Session {
                 });
             })
             .ok();
-        let debug = std::env::var_os("HORIZON_NET_DEBUG").is_some();
+        let debug = horizon_platform::env::var_os("HORIZON_NET_DEBUG").is_some();
         Self {
             events,
             writer,
@@ -190,14 +187,14 @@ pub fn shown_address(address: &str) -> String {
 /// The relay the player set (`friendsRelay` in horizon.txt, beside
 /// options.txt), else `HORIZON_RELAY_URL`. None by default.
 pub fn friends_relay_setting() -> Option<String> {
-    let dir = std::env::current_dir().ok()?;
+    let dir = horizon_platform::env::current_dir().ok()?;
     crate::ui_theme::preference(&dir, "friendsRelay")
         .filter(|r| !r.is_empty())
         .or_else(horizon_friends::relay_url)
 }
 /// Remember the relay typed on Join a friend (empty forgets it).
 pub fn save_friends_relay(relay: &str) {
-    if let Ok(dir) = std::env::current_dir() {
+    if let Ok(dir) = horizon_platform::env::current_dir() {
         crate::ui_theme::set_preference(&dir, "friendsRelay", (!relay.is_empty()).then_some(relay));
     }
 }
@@ -548,7 +545,7 @@ pub fn json_text(v: &serde_json::Value, lang: &Language) -> String {
 
 /// en_us.json from the prepared resources.
 pub fn load_language(resources: &std::path::Path) -> Language {
-    std::fs::read(resources.join("assets/minecraft/lang/en_us.json"))
+    horizon_platform::fs::read(resources.join("assets/minecraft/lang/en_us.json"))
         .ok()
         .and_then(|b| serde_json::from_slice(&b).ok())
         .unwrap_or_default()
@@ -583,7 +580,7 @@ pub fn ping(address: &str, timeout: Duration) -> Result<(serde_json::Value, u128
         }
         _ => return Err("unexpected status reply".into()),
     };
-    let start = std::time::Instant::now();
+    let start = horizon_platform::time::Instant::now();
     c.send(&status::Serverbound::PingRequest(status::Ping { time: 1 }).encode())
         .map_err(e)?;
     let _ = c.recv().map_err(e)?;
@@ -601,7 +598,7 @@ mod tests {
         let writer = Arc::new(Mutex::new(Some(writer)));
         let (send, events) = channel();
         let thread_writer = writer.clone();
-        let thread = std::thread::spawn(move || {
+        let thread = horizon_platform::thread::spawn(move || {
             receive_play(&mut reader, &thread_writer, &Language::new(), &send)
         });
         let mut server = Connection::local(server);

@@ -1,0 +1,26 @@
+[package]
+name = "horizon-platform"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version = "1.85"
+description = "The OS services the game reads (files, clocks, the environment, threads): std on native targets, the browser on the web build"
+
+[dependencies]
+pollster = "0.4"
+
+# The web build (web/README.md): wasm32- or wasm64-unknown-unknown in a browser.
+[target.'cfg(target_family = "wasm")'.dependencies]
+web-time = "1.1"
+wasm-bindgen = "0.2.129"
+wasm-bindgen-futures = "0.4.79"
+js-sys = "0.3.106"
+# The prepared resources arrive as one zip, read in place.
+zip = { version = "2", default-features = false, features = ["deflate"] }
+# The browser's crypto.getRandomValues for getrandom 0.3 (`getrandom_backend = "custom"`,
+# .cargo/config.toml) and 0.2 (its `custom` feature).
+getrandom = "0.3"
+getrandom02 = { package = "getrandom", version = "0.2", features = ["custom"] }
+
+[lints]
+workspace = true

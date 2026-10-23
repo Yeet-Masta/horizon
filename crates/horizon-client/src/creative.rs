@@ -2,8 +2,10 @@
 //! contents as built by the game's own display generators
 //! (`creative-inventory.json`), a 9x5 scrolling grid and the search tab.
 use crate::{Result, items::ItemStack};
+use horizon_platform::fs;
+use horizon_platform::fs::PathExt as _;
 use serde_json::Value;
-use std::{collections::HashMap, fs, path::Path};
+use std::{collections::HashMap, path::Path};
 
 #[derive(Clone, Debug)]
 pub struct Tab {
@@ -38,7 +40,7 @@ pub struct Creative {
     pub search: String,
     /// When the search box took the focus (`EditBox.setFocused`): its
     /// cursor blinks from then.
-    pub search_focused: std::time::Instant,
+    pub search_focused: horizon_platform::time::Instant,
     /// The search tab's stacks, in its display order.
     search_items: Vec<ItemStack>,
     search_index: Vec<SearchEntry>,
@@ -133,7 +135,7 @@ impl Creative {
     /// prepared before it fall back to `creative-tabs.json`'s item ids.
     pub fn load(root: &Path) -> Result<Self> {
         let path = root.join("creative-inventory.json");
-        if path.exists() {
+        if path.fs_exists() {
             Self::from_json(&serde_json::from_slice(&fs::read(path)?)?)
         } else {
             Self::from_legacy(&serde_json::from_slice(&fs::read(
@@ -243,7 +245,7 @@ impl Creative {
             scroll: 0.0,
             scrolling: false,
             search: String::new(),
-            search_focused: std::time::Instant::now(),
+            search_focused: horizon_platform::time::Instant::now(),
             search_items,
             search_index,
         }
@@ -269,7 +271,7 @@ impl Creative {
         self.selected = tab;
         self.scroll = 0.0;
         if self.tab().search {
-            self.search_focused = std::time::Instant::now();
+            self.search_focused = horizon_platform::time::Instant::now();
         }
     }
     /// The search tab's stacks.

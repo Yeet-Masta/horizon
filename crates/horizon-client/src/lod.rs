@@ -8,6 +8,7 @@ use crate::{
     streaming::{LodSource, WorkerContext},
 };
 mod mesh;
+use horizon_platform::thread;
 use horizon_world::registry::BlockStateId;
 use std::{
     collections::VecDeque,
@@ -16,7 +17,6 @@ use std::{
         atomic::{AtomicBool, Ordering},
         mpsc,
     },
-    thread,
 };
 
 const CELLS: usize = 16;
@@ -28,7 +28,8 @@ const SAMPLE_JOBS: usize = 4;
 /// While the near terrain loads on a machine with four threads or fewer, far
 /// terrain starts one sample job at most this often and no detail: it would
 /// otherwise take the cores the near chunks and the frame need.
-const HELD_SAMPLE_STEP: std::time::Duration = std::time::Duration::from_millis(500);
+const HELD_SAMPLE_STEP: horizon_platform::time::Duration =
+    horizon_platform::time::Duration::from_millis(500);
 /// The coarsest tile level: `Plan` roots cover at most 1024 chunks around.
 const MAX_LEVEL: u8 = 10;
 /// Top solid face and optional fluid face, in absolute block coordinates.
@@ -538,13 +539,13 @@ pub struct Lod {
     sample_nearby: bool,
     detail_masks: FxHashMap<TileKey, [u64; 4]>,
     detail_request_pending: bool,
-    detail_request_at: std::time::Instant,
+    detail_request_at: horizon_platform::time::Instant,
     /// Four threads or fewer: far work waits for the near terrain (`hold`).
     small: bool,
     /// The near terrain is loading (`set_near_loading`).
     near_loading: bool,
     /// When `request_samples` last started a job while held.
-    held_sample_at: std::time::Instant,
+    held_sample_at: horizon_platform::time::Instant,
     /// Each tile's samples, shared with mesh jobs in flight.
     ready: FxHashMap<TileKey, Arc<Vec<Column>>>,
     active: FxHashSet<TileKey>,
@@ -642,7 +643,10 @@ impl Lod {
                         {
                             jobs = worker
                                 .wake
-                                .wait_timeout(jobs, std::time::Duration::from_millis(100))
+                                .wait_timeout(
+                                    jobs,
+                                    horizon_platform::time::Duration::from_millis(100),
+                                )
                                 .unwrap()
                                 .0;
                         }
@@ -735,10 +739,10 @@ impl Lod {
             sample_nearby: true,
             detail_masks: FxHashMap::default(),
             detail_request_pending: false,
-            detail_request_at: std::time::Instant::now(),
+            detail_request_at: horizon_platform::time::Instant::now(),
             small: thread::available_parallelism().map_or(1, |n| n.get()) <= 4,
             near_loading: false,
-            held_sample_at: std::time::Instant::now(),
+            held_sample_at: horizon_platform::time::Instant::now(),
             ready: FxHashMap::default(),
             active: FxHashSet::default(),
             dirty: FxHashSet::default(),
@@ -957,11 +961,11 @@ impl Lod {
     fn request_detail(&mut self, camera: [i32; 2]) {
         if self.held()
             || self.detail_request_pending
-            || self.detail_request_at.elapsed() < std::time::Duration::from_millis(250)
+            || self.detail_request_at.elapsed() < horizon_platform::time::Duration::from_millis(250)
         {
             return;
         }
-        self.detail_request_at = std::time::Instant::now();
+        self.detail_request_at = horizon_platform::time::Instant::now();
         let mut keys: Vec<_> = self
             .active
             .iter()
@@ -1220,7 +1224,7 @@ impl Lod {
             return;
         }
         if self.held() {
-            self.held_sample_at = std::time::Instant::now();
+            self.held_sample_at = horizon_platform::time::Instant::now();
         }
         // Load desired nearby leaves directly, alongside broad fallback coverage.
         // Waiting for every ancestor/sibling made full detail take minutes to appear.
@@ -1653,7 +1657,8 @@ mod tests {
             testgen::TestTerrain,
         };
         let root = std::path::PathBuf::from(
-            std::env::var_os("HORIZON_TEST_RESOURCES").expect("HORIZON_TEST_RESOURCES"),
+            horizon_platform::env::var_os("HORIZON_TEST_RESOURCES")
+                .expect("HORIZON_TEST_RESOURCES"),
         );
         let assets = Arc::new(Assets::load(&root)?);
         let render = Arc::new(assets.reload(&root)?);
@@ -1781,7 +1786,7 @@ mod tests {
         let receive_observed = |lod: &mut Lod| {
             let Done::Observed(key, columns) = lod
                 .results
-                .recv_timeout(std::time::Duration::from_secs(5))
+                .recv_timeout(horizon_platform::time::Duration::from_secs(5))
                 .unwrap()
             else {
                 panic!("expected the observed chunk's summary");
@@ -1868,14 +1873,18 @@ mod tests {
         // As a replan does (`update` only selects after a change).
         lod.reselect = true;
         let await_meshes = |lod: &mut Lod| {
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            let deadline = horizon_platform::time::Instant::now()
+                + horizon_platform::time::Duration::from_secs(5);
             loop {
                 let meshes = lod.update(camera, 0.0, 2, 64, None);
                 if !meshes.is_empty() {
                     return meshes;
                 }
-                assert!(std::time::Instant::now() < deadline, "mesh worker stalled");
-                std::thread::sleep(std::time::Duration::from_millis(1));
+                assert!(
+                    horizon_platform::time::Instant::now() < deadline,
+                    "mesh worker stalled"
+                );
+                horizon_platform::thread::sleep(horizon_platform::time::Duration::from_millis(1));
             }
         };
         let uploaded = await_meshes(&mut lod);
@@ -1916,17 +1925,18 @@ mod tests {
         lod.covered.insert((-1, -2));
         lod.reselect = true;
         lod.replanned = true;
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let deadline =
+            horizon_platform::time::Instant::now() + horizon_platform::time::Duration::from_secs(5);
         loop {
             lod.update(camera, 0., 2, 64, None);
             if !lod.meshing && lod.active.is_empty() {
                 break;
             }
             assert!(
-                std::time::Instant::now() < deadline,
+                horizon_platform::time::Instant::now() < deadline,
                 "covered normal chunk remained an active LOD mask"
             );
-            std::thread::sleep(std::time::Duration::from_millis(1));
+            horizon_platform::thread::sleep(horizon_platform::time::Duration::from_millis(1));
         }
         assert_eq!(lod.progress(), (1, 1));
 
@@ -2028,7 +2038,8 @@ mod tests {
         lod.detail_masks.clear();
         lod.covered = [(0, 0)].into_iter().collect();
         lod.detail_request_pending = false;
-        lod.detail_request_at = std::time::Instant::now() - std::time::Duration::from_secs(1);
+        lod.detail_request_at =
+            horizon_platform::time::Instant::now() - horizon_platform::time::Duration::from_secs(1);
         lod.request_detail([0, 0]);
         let Some(Job::RequestDetail { chunks, .. }) = lod.shared.jobs.lock().unwrap().pop_front()
         else {

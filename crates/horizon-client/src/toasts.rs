@@ -1,6 +1,6 @@
 //! `ToastManager`'s slide, shared by the game's toasts and the title
 //! screens' system toasts.
-use std::time::Instant;
+use horizon_platform::time::Instant;
 
 /// `ToastManager.ToastInstance`: slides a toast in and out over 600 ms,
 /// eased by the square, and counts how long it has been fully shown.

@@ -109,7 +109,7 @@ impl Stats {
             loaded: true,
             ..Self::default()
         };
-        let Some(json) = std::fs::read_to_string(path)
+        let Some(json) = horizon_platform::fs::read_to_string(path)
             .ok()
             .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
         else {
@@ -147,10 +147,10 @@ impl Stats {
             "DataVersion": horizon_world::DATA_VERSION,
         });
         if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
+            let _ = horizon_platform::fs::create_dir_all(dir);
         }
         if let Ok(text) = serde_json::to_string_pretty(&json) {
-            let _ = std::fs::write(path, text);
+            let _ = horizon_platform::fs::write(path, text);
         }
     }
 }

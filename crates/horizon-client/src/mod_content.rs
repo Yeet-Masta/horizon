@@ -16,11 +16,13 @@
 //! content mod the root is the base root itself.
 use crate::{Result, blocks::MAP_COLORS};
 use horizon_mods::content::{Block, Content, Rarity};
+use horizon_platform::fs;
+use horizon_platform::fs::PathExt as _;
 use horizon_world::nbt::{self, JavaString, Limits, Tag};
 use serde::{Deserialize, Serialize, de};
 use std::{
     collections::BTreeMap,
-    fmt, fs,
+    fmt,
     ops::Range,
     path::{Path, PathBuf},
 };
@@ -867,7 +869,7 @@ fn link(target: &Path, at: &Path) -> std::io::Result<()> {
 }
 #[cfg(not(unix))]
 fn link(target: &Path, at: &Path) -> std::io::Result<()> {
-    if target.is_dir() {
+    if target.fs_is_dir() {
         fs::create_dir_all(at)?;
         for entry in fs::read_dir(target)?.flatten() {
             link(&entry.path(), &at.join(entry.file_name()))?;
@@ -916,7 +918,7 @@ impl Known {
         }
         items.extend(plan.items.iter().map(|i| i.rename.to.clone()));
         let keys = |name: &str| -> Result<std::collections::BTreeSet<String>> {
-            Ok(match base.join(name).exists() {
+            Ok(match base.join(name).fs_exists() {
                 true => match read_json(&base.join(name))? {
                     J::Obj(o) => o.into_iter().map(|(k, _)| k).collect(),
                     _ => Default::default(),
@@ -1065,8 +1067,8 @@ fn tables(base: &Path, plan: &Plan, overlay: &Overlay<'_>) -> Result<()> {
         overlay.write(name, &bytes)
     };
     let next = std::sync::atomic::AtomicUsize::new(0);
-    let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
-    std::thread::scope(|scope| {
+    let threads = horizon_platform::thread::available_parallelism().map_or(1, |n| n.get());
+    horizon_platform::thread::scope(|scope| {
         let workers: Vec<_> = (0..threads.min(TABLE_THREADS))
             .map(|_| {
                 scope.spawn(|| -> std::result::Result<(), String> {
@@ -1159,7 +1161,7 @@ pub fn build(base: &Path, mods: &[ContentMod], out: &Path) -> Result<Vec<String>
     }
     let mut bundles: Vec<(&str, J)> = Vec::new();
     for name in TAG_BUNDLES {
-        if base.join(name).exists() {
+        if base.join(name).fs_exists() {
             bundles.push((name, read_json(&base.join(name))?));
         }
     }
@@ -1202,7 +1204,7 @@ pub fn build(base: &Path, mods: &[ContentMod], out: &Path) -> Result<Vec<String>
             Some((format!("{ns}:{}", path.strip_suffix(".json")?), merge))
         })
         .collect();
-    if !biome_tags.is_empty() && base.join(BIOME_TAGS).exists() {
+    if !biome_tags.is_empty() && base.join(BIOME_TAGS).fs_exists() {
         let mut doc = read_json(&base.join(BIOME_TAGS))?;
         for (id, merge) in biome_tags {
             let text = match doc.get(&id) {
@@ -1217,7 +1219,7 @@ pub fn build(base: &Path, mods: &[ContentMod], out: &Path) -> Result<Vec<String>
     // Structures and the pools, sets, processors and features they use, then
     // what mods add to sets and pools, in mod and file order.
     for (bundle, entries) in &worldgen {
-        if !base.join(bundle).exists() {
+        if !base.join(bundle).fs_exists() {
             continue;
         }
         let mut doc = read_json(&base.join(bundle))?;
@@ -1295,7 +1297,7 @@ fn stamp(base: &Path, mods: &[ContentMod]) -> Result<String> {
         let m = fs::metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
         let modified = m
             .modified()?
-            .duration_since(std::time::UNIX_EPOCH)
+            .duration_since(horizon_platform::time::UNIX_EPOCH)
             .unwrap_or_default();
         Ok(format!(
             "{} {} {}",
@@ -1305,20 +1307,20 @@ fn stamp(base: &Path, mods: &[ContentMod]) -> Result<String> {
         ))
     };
     let mut parts = vec!["horizon mod content 1".to_owned()];
-    parts.push(meta(&std::env::current_exe()?)?);
+    parts.push(meta(&horizon_platform::env::current_exe()?)?);
     let base = std::path::absolute(base)?;
     parts.push(
         String::from_utf8_lossy(&fs::read(base.join("horizon-resources.json"))?).into_owned(),
     );
     for name in JSON_TABLES.iter().chain(&NBT_TABLES).chain(&TAG_BUNDLES) {
-        if base.join(name).exists() {
+        if base.join(name).fs_exists() {
             parts.push(meta(&base.join(name))?);
         }
     }
     for m in mods {
         parts.push(m.id.clone());
         let source = m.content.source();
-        if source.is_dir() {
+        if source.fs_is_dir() {
             for file in &m.content.files {
                 parts.push(meta(&source.join(file))?);
             }

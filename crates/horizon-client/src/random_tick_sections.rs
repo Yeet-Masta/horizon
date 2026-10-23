@@ -262,7 +262,7 @@ mod tick_parity {
 
     #[test]
     fn actual_random_ticks_match_a_block_scan() {
-        let root = std::env::var_os("HORIZON_RESOURCES")
+        let root = horizon_platform::env::var_os("HORIZON_RESOURCES")
             .map(PathBuf::from)
             .unwrap_or_else(|| {
                 let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));

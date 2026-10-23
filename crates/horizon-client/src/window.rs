@@ -3,6 +3,77 @@
 //! `FramerateLimiter`, the vsync present-mode choice and the fullscreen
 //! request/state pair.
 
+/// The window's attributes for where it opens. On the web build that is the
+/// page's `<canvas id="horizon">` (a new canvas on the page without one): the
+/// page sizes it, so no size or fullscreen of its own.
+pub fn on_page(attributes: winit::window::WindowAttributes) -> winit::window::WindowAttributes {
+    #[cfg(target_family = "wasm")]
+    {
+        use wasm_bindgen::JsCast;
+        use winit::platform::web::WindowAttributesExtWebSys;
+        let mut attributes = attributes;
+        attributes.inner_size = None;
+        attributes.fullscreen = None;
+        let canvas = web_sys::window()
+            .and_then(|w| w.document())
+            .and_then(|d| d.get_element_by_id("horizon"))
+            .and_then(|e| e.dyn_into::<web_sys::HtmlCanvasElement>().ok());
+        let append = canvas.is_none();
+        attributes
+            .with_canvas(canvas)
+            .with_append(append)
+            .with_prevent_default(true)
+            .with_focusable(true)
+    }
+    #[cfg(not(target_family = "wasm"))]
+    attributes
+}
+
+/// The page's pointer lock, which the browser gives or not: it refuses one
+/// asked for outside a click, and lets go of one on Escape without the page
+/// seeing the key.
+#[cfg(target_family = "wasm")]
+pub mod pointer_lock {
+    use horizon_platform::time::{Duration, Instant};
+    use std::sync::Mutex;
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Lock {
+        Held,
+        /// Asked for, not given yet.
+        Pending,
+        /// Held, then let go (Escape).
+        Lost,
+        /// Not given within a second of asking.
+        Refused,
+    }
+    /// When the game last asked, and whether the browser has given it since.
+    static ASKED: Mutex<Option<(Instant, bool)>> = Mutex::new(None);
+
+    /// The game asked for the lock (`set_cursor_grab(Locked)`).
+    pub fn asked() {
+        *ASKED.lock().unwrap() = Some((Instant::now(), false));
+    }
+    /// What became of the lock the game last asked for.
+    pub fn state() -> Lock {
+        let held = web_sys::window()
+            .and_then(|w| w.document())
+            .is_some_and(|d| d.pointer_lock_element().is_some());
+        let mut asked = ASKED.lock().unwrap();
+        match (&mut *asked, held) {
+            (Some((_, given)), true) => {
+                *given = true;
+                Lock::Held
+            }
+            (Some((_, true)), false) => Lock::Lost,
+            (Some((at, false)), false) if at.elapsed() > Duration::from_secs(1) => Lock::Refused,
+            (Some(_), false) => Lock::Pending,
+            (None, true) => Lock::Held,
+            (None, false) => Lock::Refused,
+        }
+    }
+}
+
 /// `Window.calculateScale`: the largest scale that leaves at least 320x240
 /// GUI pixels, capped by `max_scale` (0 = automatic); an odd result is bumped
 /// to even when unicode is enforced.
@@ -168,12 +239,12 @@ pub trait LimiterClock {
 /// `LockSupport.parkNanos` and a CPU spin hint for `Thread.onSpinWait`.
 #[derive(Clone, Copy, Debug)]
 pub struct SystemClock {
-    origin: std::time::Instant,
+    origin: horizon_platform::time::Instant,
 }
 impl Default for SystemClock {
     fn default() -> Self {
         Self {
-            origin: std::time::Instant::now(),
+            origin: horizon_platform::time::Instant::now(),
         }
     }
 }
@@ -182,7 +253,9 @@ impl LimiterClock for SystemClock {
         i64::try_from(self.origin.elapsed().as_nanos()).unwrap_or(i64::MAX)
     }
     fn park(&mut self, nanos: i64) {
-        std::thread::sleep(std::time::Duration::from_nanos(nanos.max(0) as u64));
+        horizon_platform::thread::sleep(horizon_platform::time::Duration::from_nanos(
+            nanos.max(0) as u64
+        ));
     }
     fn spin(&mut self) {
         std::hint::spin_loop();
@@ -202,7 +275,7 @@ impl LimiterClock for SleepingClock {
         self.0.park(nanos);
     }
     fn spin(&mut self) {
-        std::thread::sleep(std::time::Duration::from_micros(50));
+        horizon_platform::thread::sleep(horizon_platform::time::Duration::from_micros(50));
     }
 }
 
@@ -213,7 +286,8 @@ pub fn end_frame(
     framerate_limit: i32,
     clock: &mut impl LimiterClock,
 ) {
-    if framerate_limit < 260 {
+    // The web build's frames are paced by the page's requestAnimationFrame.
+    if framerate_limit < 260 && !horizon_platform::WEB {
         limiter.limit_display_fps(framerate_limit, clock);
     }
 }

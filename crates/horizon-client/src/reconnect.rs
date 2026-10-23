@@ -2,7 +2,7 @@
 //! connection may be retried, and when. Only lost connections and the
 //! server's own shutdown or restart are retried, never kicks, bans or
 //! refusals; attempts back off and stop after a few.
-use std::time::{Duration, Instant};
+use horizon_platform::time::{Duration, Instant};
 
 /// Seconds before each attempt; there are no more after the last.
 pub const DELAYS: [u64; 5] = [5, 10, 20, 40, 60];

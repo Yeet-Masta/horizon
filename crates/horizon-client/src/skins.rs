@@ -312,11 +312,11 @@ impl Downloader {
             .join(if digest.len() > 2 { &digest[..2] } else { "xx" })
             .join(&digest);
         let (url, send) = (url.to_owned(), self.send.clone());
-        std::thread::spawn(move || {
-            let bytes = std::fs::read(&file).ok().or_else(|| {
+        horizon_platform::thread::spawn(move || {
+            let bytes = horizon_platform::fs::read(&file).ok().or_else(|| {
                 let body = http_get(&url)?;
-                let _ = std::fs::create_dir_all(file.parent()?);
-                let _ = std::fs::write(&file, &body);
+                let _ = horizon_platform::fs::create_dir_all(file.parent()?);
+                let _ = horizon_platform::fs::write(&file, &body);
                 Some(body)
             });
             let image = bytes
@@ -337,10 +337,11 @@ impl Downloader {
 
 /// A GET over HTTP or HTTPS (textures.minecraft.net serves both; vanilla
 /// uses https): the body of a 2xx answer, 16 MiB at most, after redirects.
+#[cfg(not(target_family = "wasm"))]
 fn http_get(url: &str) -> Option<Vec<u8>> {
     use std::io::Read;
     let response = ureq::AgentBuilder::new()
-        .timeout(std::time::Duration::from_secs(15))
+        .timeout(horizon_platform::time::Duration::from_secs(15))
         .user_agent("Java")
         .build()
         .get(url)
@@ -353,6 +354,12 @@ fn http_get(url: &str) -> Option<Vec<u8>> {
         .read_to_end(&mut body)
         .ok()?;
     Some(body)
+}
+
+/// The web build has no sockets of its own: skins come from the cache only.
+#[cfg(target_family = "wasm")]
+fn http_get(_url: &str) -> Option<Vec<u8>> {
+    None
 }
 
 /// SHA-1 (FIPS 180-4).
@@ -433,7 +440,7 @@ mod tests {
         use std::io::{BufRead, BufReader, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
-        std::thread::spawn(move || {
+        horizon_platform::thread::spawn(move || {
             for stream in listener.incoming().take(2) {
                 let mut stream = stream.unwrap();
                 let mut line = String::new();

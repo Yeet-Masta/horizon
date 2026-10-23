@@ -12,12 +12,12 @@ use horizon_client::{
     widgets,
 };
 use horizon_core::geometry::Vec3;
+use horizon_platform::time::{Duration, Instant};
 use horizon_world::registry::BlockStateId;
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     sync::mpsc::Sender,
-    time::{Duration, Instant},
 };
 use winit::{
     application::ApplicationHandler,

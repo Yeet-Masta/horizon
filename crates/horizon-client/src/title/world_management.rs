@@ -1,9 +1,10 @@
 //! World-list operations. Metadata edits preserve every other NBT field;
 //! backups use vanilla's ZIP layout and never include the session lock.
 use crate::save::{read_dat, write_dat};
+use horizon_platform::fs;
 use horizon_world::nbt::Tag;
 use std::{
-    fs, io,
+    io,
     path::{Path, PathBuf},
 };
 
@@ -56,7 +57,7 @@ pub fn delete(saves: &Path, folder: &str) -> crate::Result<()> {
             Err(e) if attempt >= 5 => return Err(e.into()),
             Err(e) => {
                 log::warn!("Failed to delete {}: {e}", world.display());
-                std::thread::sleep(std::time::Duration::from_millis(500));
+                horizon_platform::thread::sleep(horizon_platform::time::Duration::from_millis(500));
             }
         }
     }
@@ -106,7 +107,7 @@ pub(super) fn open_folder(path: &Path) -> crate::Result<()> {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()?;
-    std::thread::spawn(move || {
+    horizon_platform::thread::spawn(move || {
         let _ = child.wait();
     });
     Ok(())
@@ -118,7 +119,7 @@ pub fn backup(saves: &Path, folder: &str) -> crate::Result<u64> {
     fs::create_dir_all(&backups)?;
     let base = format!(
         "{}_{}",
-        chrono::Local::now().format("%Y-%m-%d_%H-%M-%S"),
+        crate::logging::local_now().format("%Y-%m-%d_%H-%M-%S"),
         folder
     );
     let mut index = 0;

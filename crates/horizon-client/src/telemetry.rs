@@ -3,14 +3,18 @@
 //! summary, in the outbox. It never sends those itself: the launcher does, at its next start (the
 //! game's only sending is the anonymous "I'm playing" ping, `heartbeat.rs`).
 //! Without the player's yes for that kind nothing is kept, and crash-reports/ stays local.
+use horizon_platform::time::Instant;
 use std::path::Path;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Mutex, OnceLock};
-use std::time::Instant;
 
 use horizon_telemetry::payload::{Crash, Display, Perf, Settings, System, Timings};
 use horizon_telemetry::scrub::Scrubber;
 use horizon_telemetry::{Item, Payload, Source, outbox};
+
+/// Whether the game keeps anything for the launcher to send. Never on the web build: it
+/// collects nothing, keeps nothing and sends nothing (nor the ping, `heartbeat.rs`).
+pub const ENABLED: bool = !horizon_platform::WEB;
 
 /// A session shorter than this says too little to keep.
 const MIN_SECONDS: f32 = 60.0;
@@ -127,7 +131,7 @@ pub fn gpu_kind(device_type: &str) -> &'static str {
 /// This machine, with the GPU and the screen once the renderer knows them. The drive is the one
 /// under the game folder (the current folder).
 pub fn system() -> System {
-    let home = std::env::current_dir().ok();
+    let home = horizon_platform::env::current_dir().ok();
     let mut system = System::detect_in(home.as_deref());
     if let Some(gpu) = GPU.lock().unwrap_or_else(|e| e.into_inner()).clone() {
         system.vram_mb = match gpu.kind.as_str() {
@@ -203,6 +207,9 @@ pub fn crash_item(report: &crate::crash::Report) -> Item {
 
 /// Keeps the crash for the launcher to send, if the player allows crash reports.
 pub fn keep_crash(home: &Path, report: &crate::crash::Report) {
+    if !ENABLED {
+        return;
+    }
     if let Err(e) = outbox::push(home, &crash_item(report)) {
         log::warn!("Horizon: could not keep the crash report to send: {e}");
     }
@@ -211,6 +218,9 @@ pub fn keep_crash(home: &Path, report: &crate::crash::Report) {
 /// Keeps a benchmark report (`--benchmark`) for the launcher to send, if the player allows
 /// benchmark uploads: the report as docs/benchmark-report.md defines it, dated to the day.
 pub fn keep_benchmark(home: &Path, report: &horizon_bench::Report) {
+    if !ENABLED {
+        return;
+    }
     let Ok(data) = serde_json::to_value(report.for_upload()) else {
         return;
     };
@@ -296,7 +306,8 @@ impl Session {
     /// Keeps the session's summary for the launcher to send, if the player allows performance
     /// statistics, and starts the next session (the time to the title goes with the first).
     pub fn finish(&mut self, home: &Path, settings: Settings) {
-        if horizon_telemetry::Consent::load(home).allows(horizon_telemetry::Kind::Perf)
+        if ENABLED
+            && horizon_telemetry::Consent::load(home).allows(horizon_telemetry::Kind::Perf)
             && let Some(perf) = self.summary(settings)
         {
             let item = Item::new(Source::Game, version(), Payload::Perf(perf));
@@ -314,7 +325,7 @@ impl Session {
 /// The game's resident memory: the peak on Linux, what it uses now elsewhere.
 fn peak_ram_mb() -> u32 {
     let kib = if cfg!(target_os = "linux") {
-        std::fs::read_to_string("/proc/self/status")
+        horizon_platform::fs::read_to_string("/proc/self/status")
             .ok()
             .and_then(|t| {
                 t.lines()
@@ -347,12 +358,12 @@ mod tests {
     use horizon_telemetry::{Choices, Consent, Kind};
 
     fn home(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!(
+        let dir = horizon_platform::env::temp_dir().join(format!(
             "horizon-client-telemetry-{name}-{}",
             std::process::id()
         ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let _ = horizon_platform::fs::remove_dir_all(&dir);
+        horizon_platform::fs::create_dir_all(&dir).unwrap();
         dir
     }
 
@@ -364,7 +375,7 @@ mod tests {
 
     fn report() -> crate::crash::Report {
         crate::crash::Report {
-            time: chrono::Local::now(),
+            time: crate::logging::local_now(),
             description: "Unexpected error".into(),
             error:
                 "panicked at src/save.rs:10:5:\nno level.dat in /Users/ana/horizon/saves/Ana's Base"

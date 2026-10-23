@@ -17,7 +17,7 @@ use std::{cell::RefCell, collections::HashMap, path::Path};
 /// (`key:value` lines), so vanilla's options file stays exactly as vanilla
 /// writes it.
 pub fn preference(dir: &Path, key: &str) -> Option<String> {
-    let text = std::fs::read_to_string(dir.join("horizon.txt")).ok()?;
+    let text = horizon_platform::fs::read_to_string(dir.join("horizon.txt")).ok()?;
     text.lines().find_map(|l| {
         let (k, v) = l.split_once(':')?;
         (k.trim() == key).then(|| v.trim().to_owned())
@@ -25,7 +25,7 @@ pub fn preference(dir: &Path, key: &str) -> Option<String> {
 }
 /// Set (or with None remove) one preference, keeping the others.
 pub(crate) fn set_preference(dir: &Path, key: &str, value: Option<&str>) {
-    let text = std::fs::read_to_string(dir.join("horizon.txt")).unwrap_or_default();
+    let text = horizon_platform::fs::read_to_string(dir.join("horizon.txt")).unwrap_or_default();
     let mut lines: Vec<String> = text
         .lines()
         .filter(|l| l.split_once(':').is_none_or(|(k, _)| k.trim() != key))
@@ -36,7 +36,7 @@ pub(crate) fn set_preference(dir: &Path, key: &str, value: Option<&str>) {
     }
     let mut out = lines.join("\n");
     out.push('\n');
-    let _ = std::fs::write(dir.join("horizon.txt"), out);
+    let _ = horizon_platform::fs::write(dir.join("horizon.txt"), out);
 }
 
 /// The dark palette (`horizon_theme::DARK`) in the HUD's colour encoding, plus the

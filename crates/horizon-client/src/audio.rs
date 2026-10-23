@@ -12,9 +12,9 @@ use crate::sound_events::{Sound, SoundRegistry};
 #[cfg(feature = "audio")]
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use horizon_core::random::{LegacyRandom, RandomSource};
+use horizon_platform::fs;
 use std::{
     collections::HashMap,
-    fs,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
@@ -66,6 +66,7 @@ pub struct MixerBackend {
     root: PathBuf,
     cache: Arc<Mutex<SoundCache>>,
     /// The decoder thread for static sounds, started with the first one.
+    #[cfg(not(target_family = "wasm"))]
     decoder: Option<std::sync::mpsc::Sender<Decode>>,
     next: ChannelId,
     live: bool,
@@ -116,6 +117,7 @@ impl SoundCache {
     }
 }
 /// A static sound to decode for a channel waiting on it.
+#[cfg(not(target_family = "wasm"))]
 struct Decode {
     key: String,
     file: PathBuf,
@@ -137,10 +139,12 @@ fn attach(mixer: &Mutex<Mixer>, channel: ChannelId, samples: Samples, looping: b
     }
 }
 /// The open output stream. A build without the `audio` feature (the server build, which must not
-/// need libasound) never has one.
-#[cfg(feature = "audio")]
+/// need libasound) never has one; the web build's is the page's WebAudio.
+#[cfg(all(feature = "audio", not(target_family = "wasm")))]
 type Stream = cpal::Stream;
-#[cfg(not(feature = "audio"))]
+#[cfg(target_family = "wasm")]
+type Stream = web_output::Output;
+#[cfg(all(not(feature = "audio"), not(target_family = "wasm")))]
 type Stream = std::convert::Infallible;
 pub struct Audio {
     _stream: Option<Stream>,
@@ -167,7 +171,11 @@ fn decode(path: &Path) -> Option<(Vec<f32>, u32)> {
         audio::SampleBuffer, codecs::DecoderOptions, formats::FormatOptions, io::MediaSourceStream,
         meta::MetadataOptions, probe::Hint,
     };
+    #[cfg(not(target_family = "wasm"))]
     let file = fs::File::open(path).ok()?;
+    // symphonia reads std's files; the web build's are read whole.
+    #[cfg(target_family = "wasm")]
+    let file = std::io::Cursor::new(fs::read(path).ok()?);
     let stream = MediaSourceStream::new(Box::new(file), Default::default());
     let mut hint = Hint::new();
     hint.with_extension("ogg");
@@ -269,7 +277,7 @@ impl Backend for MixerBackend {
         if sound.stream {
             // A streamed sound loops by restarting its stream.
             let mixer = self.mixer.clone();
-            std::thread::spawn(move || {
+            horizon_platform::thread::spawn(move || {
                 let samples = decode(&file).map(|(s, r)| (Arc::new(s), r));
                 attach(&mixer, channel, samples, looping);
             });
@@ -281,29 +289,41 @@ impl Backend for MixerBackend {
             attach(&self.mixer, channel, samples, false);
             return;
         }
-        let decoder = self.decoder.get_or_insert_with(|| {
-            let (send, receive) = std::sync::mpsc::channel::<Decode>();
-            let (mixer, cache) = (self.mixer.clone(), self.cache.clone());
-            std::thread::Builder::new()
-                .name("sound decoder".into())
-                .spawn(move || {
-                    for job in receive {
-                        // Queued twice before the first decode finished.
-                        let cached = cache.lock().ok().and_then(|mut c| c.get(&job.key));
-                        let samples = cached.unwrap_or_else(|| {
-                            let samples = decode(&job.file).map(|(s, r)| (Arc::new(s), r));
-                            if let Ok(mut c) = cache.lock() {
-                                c.insert(job.key, samples.clone());
-                            }
-                            samples
-                        });
-                        attach(&mixer, job.channel, samples, false);
-                    }
-                })
-                .expect("sound decoder thread");
-            send
-        });
-        let _ = decoder.send(Decode { key, file, channel });
+        // The web build has no decoder thread: the sound is decoded here.
+        #[cfg(target_family = "wasm")]
+        {
+            let samples = decode(&file).map(|(s, r)| (Arc::new(s), r));
+            if let Ok(mut c) = self.cache.lock() {
+                c.insert(key, samples.clone());
+            }
+            attach(&self.mixer, channel, samples, false);
+        }
+        #[cfg(not(target_family = "wasm"))]
+        {
+            let decoder = self.decoder.get_or_insert_with(|| {
+                let (send, receive) = std::sync::mpsc::channel::<Decode>();
+                let (mixer, cache) = (self.mixer.clone(), self.cache.clone());
+                horizon_platform::thread::Builder::new()
+                    .name("sound decoder".into())
+                    .spawn(move || {
+                        for job in receive {
+                            // Queued twice before the first decode finished.
+                            let cached = cache.lock().ok().and_then(|mut c| c.get(&job.key));
+                            let samples = cached.unwrap_or_else(|| {
+                                let samples = decode(&job.file).map(|(s, r)| (Arc::new(s), r));
+                                if let Ok(mut c) = cache.lock() {
+                                    c.insert(job.key, samples.clone());
+                                }
+                                samples
+                            });
+                            attach(&mixer, job.channel, samples, false);
+                        }
+                    })
+                    .expect("sound decoder thread");
+                send
+            });
+            let _ = decoder.send(Decode { key, file, channel });
+        }
     }
     /// `alSourceStop`: any state becomes stopped, an initial source too (a
     /// sound still decoding then never starts).
@@ -583,6 +603,7 @@ impl Audio {
                 mixer,
                 root: root.to_owned(),
                 cache: Arc::default(),
+                #[cfg(not(target_family = "wasm"))]
                 decoder: None,
                 next: 0,
                 live,
@@ -597,13 +618,17 @@ impl Audio {
             heard: Default::default(),
         }
     }
-    #[cfg(not(feature = "audio"))]
+    #[cfg(all(not(feature = "audio"), not(target_family = "wasm")))]
     fn open(_: Arc<Mutex<Mixer>>) -> Result<Stream> {
         Err("this build has no sound output (built without the `audio` feature)".into())
     }
-    #[cfg(feature = "audio")]
+    #[cfg(target_family = "wasm")]
     fn open(mixer: Arc<Mutex<Mixer>>) -> Result<Stream> {
-        if let Some(reason) = output_disabled(|name| std::env::var_os(name)) {
+        web_output::Output::open(mixer)
+    }
+    #[cfg(all(feature = "audio", not(target_family = "wasm")))]
+    fn open(mixer: Arc<Mutex<Mixer>>) -> Result<Stream> {
+        if let Some(reason) = output_disabled(|name| horizon_platform::env::var_os(name)) {
             return Err(reason.into());
         }
         let host = cpal::default_host();
@@ -1068,5 +1093,89 @@ mod tests {
         let mut data = [0.0; 2];
         mix(&mut m, &mut data, 1, 48_000);
         assert_eq!(data, [0.5; 2]);
+    }
+}
+
+/// The web build's output: the page's WebAudio, a ScriptProcessor pulling
+/// stereo from the mixer between frames, on the page's thread. The context
+/// starts when the player first clicks or presses a key (browsers keep a
+/// page silent until then).
+#[cfg(target_family = "wasm")]
+mod web_output {
+    use super::{Mixer, Result, mix};
+    use std::sync::{Arc, Mutex};
+    use wasm_bindgen::{JsCast, closure::Closure};
+
+    /// Frames per callback: about 43 ms at 48 kHz.
+    const FRAMES: u32 = 2048;
+
+    pub struct Output {
+        context: web_sys::AudioContext,
+        _node: web_sys::ScriptProcessorNode,
+        _process: Closure<dyn FnMut(web_sys::AudioProcessingEvent)>,
+        _resume: Closure<dyn FnMut()>,
+    }
+    impl Output {
+        pub fn open(mixer: Arc<Mutex<Mixer>>) -> Result<Self> {
+            let js = |e: wasm_bindgen::JsValue| format!("WebAudio: {e:?}");
+            let context = web_sys::AudioContext::new().map_err(js)?;
+            let rate = context.sample_rate() as u32;
+            let node = context
+                .create_script_processor_with_buffer_size_and_number_of_input_channels_and_number_of_output_channels(
+                    FRAMES, 0, 2,
+                )
+                .map_err(js)?;
+            let mut scratch = Vec::new();
+            let mut channel = Vec::new();
+            let process = Closure::<dyn FnMut(web_sys::AudioProcessingEvent)>::new(
+                move |event: web_sys::AudioProcessingEvent| {
+                    let Ok(buffer) = event.output_buffer() else {
+                        return;
+                    };
+                    let frames = buffer.length() as usize;
+                    scratch.resize(frames * 2, 0.0f32);
+                    match mixer.lock() {
+                        Ok(mut m) => mix(&mut m, &mut scratch, 2, rate),
+                        Err(_) => scratch.fill(0.0),
+                    }
+                    channel.resize(frames, 0.0f32);
+                    for side in 0..2 {
+                        for (i, s) in channel.iter_mut().enumerate() {
+                            *s = scratch[i * 2 + side];
+                        }
+                        let _ = buffer.copy_to_channel(&channel, side as i32);
+                    }
+                },
+            );
+            node.set_onaudioprocess(Some(process.as_ref().unchecked_ref()));
+            node.connect_with_audio_node(&context.destination())
+                .map_err(js)?;
+            let resume = {
+                let context = context.clone();
+                Closure::<dyn FnMut()>::new(move || {
+                    if context.state() != web_sys::AudioContextState::Running {
+                        let _ = context.resume();
+                    }
+                })
+            };
+            if let Some(document) = web_sys::window().and_then(|w| w.document()) {
+                for event in ["pointerdown", "keydown"] {
+                    let _ = document
+                        .add_event_listener_with_callback(event, resume.as_ref().unchecked_ref());
+                }
+            }
+            log::info!("Horizon: audio output WebAudio ({rate} Hz, 2 channels)");
+            Ok(Self {
+                context,
+                _node: node,
+                _process: process,
+                _resume: resume,
+            })
+        }
+    }
+    impl Drop for Output {
+        fn drop(&mut self) {
+            let _ = self.context.close();
+        }
     }
 }

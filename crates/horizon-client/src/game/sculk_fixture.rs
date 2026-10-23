@@ -159,8 +159,8 @@ impl Game<'_> {
         let (input, output) = spec
             .split_once(',')
             .ok_or("HORIZON_SCULK_FIXTURE=SCENARIOS,OUTPUT")?;
-        let text = std::fs::read_to_string(input)?;
-        let mut out = std::io::BufWriter::new(std::fs::File::create(output)?);
+        let text = horizon_platform::fs::read_to_string(input)?;
+        let mut out = std::io::BufWriter::new(horizon_platform::fs::File::create(output)?);
         for s in parse(&text) {
             writeln!(out, "== {}", s.name)?;
             match self.sculk_scenario(&s) {

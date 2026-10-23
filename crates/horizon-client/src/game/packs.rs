@@ -12,12 +12,12 @@ use std::path::{Path, PathBuf};
 
 /// Where overlay roots are built (beside options.txt).
 pub fn cache_dir() -> PathBuf {
-    std::env::current_dir()
+    horizon_platform::env::current_dir()
         .unwrap_or_default()
         .join(".horizon-cache/resourcepacks")
 }
 pub fn packs_dir() -> PathBuf {
-    std::env::current_dir()
+    horizon_platform::env::current_dir()
         .unwrap_or_default()
         .join("resourcepacks")
 }

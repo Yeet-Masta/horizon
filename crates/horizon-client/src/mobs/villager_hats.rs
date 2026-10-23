@@ -3,7 +3,8 @@ use super::{
     anim::Poses,
     render::{PROFESSIONS, VILLAGER_TYPES},
 };
-use std::{collections::HashMap, fs, path::Path};
+use horizon_platform::fs;
+use std::{collections::HashMap, path::Path};
 
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
 enum Hat {
@@ -70,7 +71,8 @@ mod tests {
     #[ignore = "requires prepared 26.3 models and textures in HORIZON_TEST_RESOURCES"]
     fn metadata_head_visibility_matches_exported_no_hat_models() {
         use crate::mobs::{load_model, render::draw};
-        let root = std::env::var_os("HORIZON_TEST_RESOURCES").expect("HORIZON_TEST_RESOURCES");
+        let root = horizon_platform::env::var_os("HORIZON_TEST_RESOURCES")
+            .expect("HORIZON_TEST_RESOURCES");
         let mut hats = VillagerHats::load(Path::new(&root));
         assert_eq!(hats.0["entity/villager/profession/farmer"], Hat::Full);
         assert_eq!(hats.0["entity/villager/type/plains"], Hat::None);

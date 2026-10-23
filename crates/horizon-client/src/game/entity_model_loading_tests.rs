@@ -1,8 +1,9 @@
 //! Model-batch equivalence tests and an opt-in benchmark of the actual loaders.
 use super::{armor_stands::ArmorStandAssets, boats::BoatModels, minecarts::CartModels};
 use horizon_client::mobs::{EntityModelDocument, Part, load_model};
+use horizon_platform::{fs, time::Instant};
 use serde_json::{Value, json};
-use std::{collections::BTreeMap, fs, hint::black_box, path::Path, time::Instant};
+use std::{collections::BTreeMap, hint::black_box, path::Path};
 
 const WOODS: [&str; 11] = [
     "oak",
@@ -61,7 +62,7 @@ impl FixtureRoot {
     fn new() -> Self {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let next = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let root = std::env::temp_dir().join(format!(
+        let root = horizon_platform::env::temp_dir().join(format!(
             "horizon-entity-models-{}-{next}",
             std::process::id()
         ));
@@ -227,13 +228,13 @@ fn armor_equipment_loads_without_an_entity_model_document() {
 #[test]
 #[ignore = "opt-in benchmark; requires ENTITY_MODEL_BENCH_DOCUMENT"]
 fn entity_model_document_benchmark() {
-    let input = std::env::var("ENTITY_MODEL_BENCH_DOCUMENT").unwrap();
+    let input = horizon_platform::env::var("ENTITY_MODEL_BENCH_DOCUMENT").unwrap();
     let root = FixtureRoot::new();
     let bytes = fs::read(&input).unwrap();
     fs::write(root.0.join("entity-models.json"), &bytes).unwrap();
     assert_equivalent(&root.0);
     let model_count = optimized(&root.0).len();
-    let repetitions: usize = std::env::var("ENTITY_MODEL_BENCH_REPETITIONS")
+    let repetitions: usize = horizon_platform::env::var("ENTITY_MODEL_BENCH_REPETITIONS")
         .unwrap_or_else(|_| "15".into())
         .parse()
         .unwrap();

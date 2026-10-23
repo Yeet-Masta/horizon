@@ -399,7 +399,7 @@ impl Pools {
                     match PoolElement::decode(&entry["element"], resources, bindings, None) {
                         Ok(element) => Arc::new(element),
                         Err(error) => {
-                            if std::env::var_os("HORIZON_JIGSAW_DEBUG").is_some() {
+                            if horizon_platform::env::var_os("HORIZON_JIGSAW_DEBUG").is_some() {
                                 eprintln!("pool {name}: {error}");
                             }
                             return None;

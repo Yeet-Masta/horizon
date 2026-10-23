@@ -677,14 +677,18 @@ impl RecipeIndex {
     pub fn load(root: &std::path::Path) -> Self {
         let mut recipes = std::collections::BTreeMap::new();
         let dir = root.join("data/minecraft/recipe");
-        for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        for entry in horizon_platform::fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
             let path = entry.path();
             if path.extension().is_none_or(|e| e != "json") {
                 continue;
             }
             let (Some(stem), Some(v)) = (
                 path.file_stem().and_then(|s| s.to_str()),
-                std::fs::read(&path)
+                horizon_platform::fs::read(&path)
                     .ok()
                     .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok()),
             ) else {
@@ -893,9 +897,10 @@ mod tests {
     }
     #[test]
     fn the_index_knows_each_recipes_toast_station_and_result() {
-        let root = std::env::temp_dir().join(format!("horizon-toast-index-{}", std::process::id()));
+        let root = horizon_platform::env::temp_dir()
+            .join(format!("horizon-toast-index-{}", std::process::id()));
         let dir = root.join("data/minecraft/recipe");
-        std::fs::create_dir_all(&dir).unwrap();
+        horizon_platform::fs::create_dir_all(&dir).unwrap();
         for (name, json) in [
             (
                 "stick",
@@ -918,10 +923,10 @@ mod tests {
                 r#"{"type":"minecraft:smithing_trim","pattern":"minecraft:coast"}"#,
             ),
         ] {
-            std::fs::write(dir.join(format!("{name}.json")), json).unwrap();
+            horizon_platform::fs::write(dir.join(format!("{name}.json")), json).unwrap();
         }
         let index = RecipeIndex::load(&root);
-        std::fs::remove_dir_all(&root).unwrap();
+        horizon_platform::fs::remove_dir_all(&root).unwrap();
         let toast = |id: &str| (index.toast_station(id), index.result(id));
         assert_eq!(
             toast("minecraft:stick"),

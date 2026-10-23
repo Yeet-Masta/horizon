@@ -2,7 +2,8 @@
 //! `horizon-graphics.txt` next to `options.txt` so that file stays exactly
 //! vanilla's. Every default reproduces vanilla's rendering; only choices the
 //! player makes here depart from it.
-use std::{fs, path::Path};
+use horizon_platform::fs;
+use std::path::Path;
 
 pub const FILE: &str = "horizon-graphics.txt";
 
@@ -128,7 +129,7 @@ impl GraphicsApi {
     }
     /// `HORIZON_GRAPHICS_API` (auto, vulkan or dx12) if set, else the setting.
     pub fn with_env(self) -> Self {
-        std::env::var("HORIZON_GRAPHICS_API")
+        horizon_platform::env::var("HORIZON_GRAPHICS_API")
             .ok()
             .and_then(|v| Self::from_name(&v))
             .unwrap_or(self)
@@ -392,7 +393,7 @@ impl Graphics {
         // thread by default) each need one, and a pool that fills every core
         // starves them: the frame rate collapses to single digits while the
         // workers saturate the CPU and its memory bandwidth.
-        let auto = std::thread::available_parallelism()
+        let auto = horizon_platform::thread::available_parallelism()
             .map_or(2, |n| n.get())
             .saturating_sub(2)
             .max(1);
@@ -557,7 +558,7 @@ mod tests {
     fn automatic_workers_leave_cores_for_the_render_and_server_threads() {
         let g = Graphics::default();
         assert_eq!(g.workers, 0);
-        let cores = std::thread::available_parallelism().map_or(2, |n| n.get());
+        let cores = horizon_platform::thread::available_parallelism().map_or(2, |n| n.get());
         assert_eq!(g.worker_threads(), cores.saturating_sub(2).max(1));
         // A manual count is the player's own choice, kept as asked.
         let manual = Graphics { workers: 3, ..g };

@@ -6,11 +6,9 @@
 use super::Game;
 use horizon_client::shader_pack::{self, ShaderPack, Stamp};
 use horizon_client::text::Text;
+use horizon_platform::time::{Duration, Instant};
 use horizon_shaderpack::properties::SkyDirectives;
-use std::{
-    path::PathBuf,
-    time::{Duration, Instant},
-};
+use std::path::PathBuf;
 
 #[derive(Default)]
 pub(super) struct ShaderPacks {

@@ -1042,9 +1042,9 @@ pub struct SubtitleFrame {
 }
 /// Milliseconds on a monotonic clock (`Util.getMillis`).
 pub fn now_ms() -> i64 {
-    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    static START: std::sync::OnceLock<horizon_platform::time::Instant> = std::sync::OnceLock::new();
     START
-        .get_or_init(std::time::Instant::now)
+        .get_or_init(horizon_platform::time::Instant::now)
         .elapsed()
         .as_millis() as i64
 }

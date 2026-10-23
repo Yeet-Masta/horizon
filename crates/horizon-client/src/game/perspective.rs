@@ -733,7 +733,8 @@ mod preview_tests {
     #[ignore = "requires prepared model data in HORIZON_TEST_RESOURCES"]
     fn player_render_transform_uses_vanilla_avatar_scale() {
         let root = std::path::PathBuf::from(
-            std::env::var_os("HORIZON_TEST_RESOURCES").expect("HORIZON_TEST_RESOURCES"),
+            horizon_platform::env::var_os("HORIZON_TEST_RESOURCES")
+                .expect("HORIZON_TEST_RESOURCES"),
         );
         let mut m = Mob::new(1, player_type(&root).unwrap(), Vec3::ZERO, 0.0);
         for (id, expected) in [("minecraft:player", 0.9375), ("minecraft:zombie", 1.0)] {

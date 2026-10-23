@@ -12,10 +12,8 @@ use horizon_client::{
     text::{self, Text},
 };
 use horizon_mods::{Clock, Mods, Output, Player, Snapshot, Status};
-use std::{
-    path::PathBuf,
-    time::{Duration, Instant},
-};
+use horizon_platform::time::{Duration, Instant};
+use std::path::PathBuf;
 
 #[derive(Default)]
 pub(super) struct ModsState {
@@ -58,7 +56,7 @@ pub(super) fn content_root(
 ) -> std::path::PathBuf {
     use horizon_client::mod_content::{self, ContentMod};
     use horizon_mods::{Capability, Content, Package};
-    let here = std::env::current_dir().unwrap_or_default();
+    let here = horizon_platform::env::current_dir().unwrap_or_default();
     let mut paths = horizon_mods::find(&here.join(mod_list::DIR));
     paths.retain(|p| !dev.contains(p));
     paths.extend(dev.iter().cloned());

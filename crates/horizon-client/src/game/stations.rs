@@ -146,7 +146,7 @@ pub(super) struct Station {
     /// Anvil on a server: the name last sent (the client menu's `itemName`).
     pub(super) anvil_sent: Option<String>,
     /// When the screen opened: the rename box has the focus from then.
-    opened: std::time::Instant,
+    opened: horizon_platform::time::Instant,
     pub(super) last_sound: u64,
     /// Villager trading state.
     pub(super) merchant: Option<Box<super::trading::MerchantState>>,
@@ -173,7 +173,7 @@ impl Station {
             start: 0,
             anvil_last: None,
             anvil_sent: None,
-            opened: std::time::Instant::now(),
+            opened: horizon_platform::time::Instant::now(),
             last_sound: 0,
             merchant: None,
             beacon: [None; 2],

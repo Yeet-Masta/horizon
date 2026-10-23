@@ -1,11 +1,13 @@
 //! Overlay reuse validated by source topology and filesystem stamps.
 //! Published output is an owned cache artifact; hits do not traverse its tree.
 use super::{Pack, Source, build_overlay_uncached};
+use horizon_platform::fs;
+use horizon_platform::fs::PathExt as _;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 #[cfg(any(test, not(unix)))]
 use std::io::Read;
-use std::{collections::BTreeSet, fs, io, path::Path, path::PathBuf};
+use std::{collections::BTreeSet, io, path::Path, path::PathBuf};
 
 // Bump when overlay/merge semantics change. Markers are disposable cache data.
 const VERSION: u32 = 3;
@@ -161,7 +163,7 @@ fn tree_inner(
             return Ok(());
         }
     }
-    if path.is_dir() {
+    if path.fs_is_dir() {
         let canonical = if pack.is_some() {
             let canonical = fs::canonicalize(path)?;
             if !active.insert(canonical.clone()) {
@@ -254,7 +256,7 @@ fn absolute(path: &Path) -> io::Result<PathBuf> {
     if path.is_absolute() {
         Ok(path.into())
     } else {
-        std::env::current_dir().map(|cwd| cwd.join(path))
+        horizon_platform::env::current_dir().map(|cwd| cwd.join(path))
     }
 }
 
@@ -285,7 +287,7 @@ pub(super) fn build(vanilla: &Path, packs: &[Pack], out: &Path) -> io::Result<()
         && marker.vanilla == vanilla_key
         && marker.packs == *signature
         && marker.dependencies.valid()
-        && out.is_dir()
+        && out.fs_is_dir()
     {
         return Ok(());
     }
@@ -333,7 +335,7 @@ mod tests {
     impl Fixture {
         fn new() -> Self {
             static NEXT: AtomicUsize = AtomicUsize::new(0);
-            let path = std::env::temp_dir().join(format!(
+            let path = horizon_platform::env::temp_dir().join(format!(
                 "horizon-overlay-cache-{}-{}",
                 std::process::id(),
                 NEXT.fetch_add(1, Ordering::Relaxed)
@@ -708,7 +710,8 @@ mod tests {
 
     #[test]
     fn concurrent_selections_wait_and_never_publish_mismatched_markers() {
-        use std::{sync::mpsc, time::Duration};
+        use horizon_platform::time::Duration;
+        use std::sync::mpsc;
         let f = Fixture::new();
         let name = "assets/minecraft/lang/en_us.json";
         f.write(&format!("vanilla/{name}"), br#"{"v":1}"#);
@@ -727,7 +730,7 @@ mod tests {
         held.lock().unwrap();
         let (started, starts) = mpsc::channel();
         let (done, finishes) = mpsc::channel();
-        std::thread::scope(|scope| {
+        horizon_platform::thread::scope(|scope| {
             for pack in [&a, &b] {
                 let started = started.clone();
                 let done = done.clone();
@@ -771,7 +774,7 @@ mod tests {
         let mut pack = f.dir_pack("pack");
         let name = "assets/minecraft/textures/a";
         f.write(&format!("pack/{name}"), b"pack");
-        let cwd = std::env::current_dir().unwrap();
+        let cwd = horizon_platform::env::current_dir().unwrap();
         let mut relative = PathBuf::new();
         for component in cwd.components() {
             if matches!(component, std::path::Component::Normal(_)) {
@@ -804,11 +807,15 @@ mod tests {
     #[test]
     #[ignore = "requires prepared resources and real pack paths in environment"]
     fn benchmark_real_resource_root() {
-        use std::{hint::black_box, time::Instant};
-        let vanilla = PathBuf::from(std::env::var("HORIZON_OVERLAY_BENCH_VANILLA").unwrap());
+        use horizon_platform::time::Instant;
+        use std::hint::black_box;
+        let vanilla =
+            PathBuf::from(horizon_platform::env::var("HORIZON_OVERLAY_BENCH_VANILLA").unwrap());
         assert!(vanilla.join("horizon-resources.json").is_file());
-        let paths: Vec<PathBuf> =
-            serde_json::from_str(&std::env::var("HORIZON_OVERLAY_BENCH_PACKS").unwrap()).unwrap();
+        let paths: Vec<PathBuf> = serde_json::from_str(
+            &horizon_platform::env::var("HORIZON_OVERLAY_BENCH_PACKS").unwrap(),
+        )
+        .unwrap();
         // The original resource_root selection/cache-key path, with its original builder.
         fn original(vanilla: &Path, packs: &[Pack], cache: &Path) -> PathBuf {
             let key = packs

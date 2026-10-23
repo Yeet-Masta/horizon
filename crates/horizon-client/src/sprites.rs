@@ -1,13 +1,8 @@
 //! Shared nearest-sampled sprite array for block and item textures.
 use crate::Result;
 use horizon_assets::animation::{AnimationClip, AnimationMetadata};
-use std::{
-    collections::BTreeMap,
-    fs::{self, File},
-    io::BufReader,
-    path::Path,
-    sync::Arc,
-};
+use horizon_platform::fs::{self, File};
+use std::{collections::BTreeMap, io::BufReader, path::Path, sync::Arc};
 
 #[derive(Clone)]
 pub struct SpriteAnimation {
@@ -347,8 +342,8 @@ mod tests {
     use super::*;
     #[test]
     fn identical_still_textures_share_a_layer() {
-        let root =
-            std::env::temp_dir().join(format!("horizon-sprite-share-{}", std::process::id()));
+        let root = horizon_platform::env::temp_dir()
+            .join(format!("horizon-sprite-share-{}", std::process::id()));
         let directory = root.join("assets/a/textures/block");
         fs::create_dir_all(&directory).unwrap();
         let write = |name: &str, red: u8| {
@@ -462,11 +457,11 @@ mod tests {
 
     #[test]
     fn native_32_pixel_animation_frames_keep_every_texel() {
-        let root = std::env::temp_dir().join(format!(
+        let root = horizon_platform::env::temp_dir().join(format!(
             "horizon-sprite-detail-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
+            horizon_platform::time::SystemTime::now()
+                .duration_since(horizon_platform::time::UNIX_EPOCH)
                 .unwrap()
                 .as_nanos()
         ));

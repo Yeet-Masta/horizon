@@ -277,8 +277,10 @@ fn try_create(device: &wgpu::Device, size: u64, usage: wgpu::BufferUsages) -> Op
         usage,
         mapped_at_creation: false,
     });
-    // Native error scopes resolve at once.
-    pollster::block_on(scope.pop()).is_none().then_some(buffer)
+    // Native error scopes resolve at once; the web's later, read as no error.
+    horizon_platform::block_on_or(scope.pop(), None)
+        .is_none()
+        .then_some(buffer)
 }
 
 #[cfg(test)]

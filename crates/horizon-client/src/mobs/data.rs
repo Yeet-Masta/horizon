@@ -6,8 +6,9 @@
 use super::keyframes::Animation;
 use super::path::PathType;
 use crate::blocks::{BlockFacts, Fluid};
+use horizon_platform::fs;
 use serde_json::Value;
-use std::{collections::HashMap, fs, path::Path};
+use std::{collections::HashMap, path::Path};
 
 pub const LAND: u16 = 1;
 pub const WATER: u16 = 2;

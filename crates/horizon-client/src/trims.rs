@@ -6,8 +6,9 @@
 //! unless the equipment asset's `trim_overrides` pick another texture or
 //! palette (iron armour with an iron trim uses `trim/iron_darker`).
 use horizon_assets::palette::apply_palette;
+use horizon_platform::fs;
 use serde_json::Value;
-use std::{collections::HashMap, fs, path::Path};
+use std::{collections::HashMap, path::Path};
 
 /// An RGBA image: width, height, pixels.
 pub type Image = (u32, u32, Vec<u8>);

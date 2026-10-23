@@ -27,7 +27,7 @@ pub fn file(millis: i64, agreed: bool) -> String {
 
 /// Eula.readFile; `Err` carries the warning vanilla logs.
 pub fn agreed(path: &Path) -> Result<bool, String> {
-    let read = std::fs::read(path)
+    let read = horizon_platform::fs::read(path)
         .map_err(|e| e.to_string())
         .and_then(|b| Properties::load_latin1(&b).map_err(|e| e.to_string()));
     match read {
@@ -36,7 +36,7 @@ pub fn agreed(path: &Path) -> Result<bool, String> {
             .unwrap_or("false")
             .eq_ignore_ascii_case("true")),
         Err(_) => {
-            let _ = std::fs::write(path, default_file(now_millis()));
+            let _ = horizon_platform::fs::write(path, default_file(now_millis()));
             Err(format!("Failed to load {}", path.display()))
         }
     }

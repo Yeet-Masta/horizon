@@ -382,11 +382,11 @@ impl<E: Entry> UserList<E> {
         Json::Array(items).pretty()
     }
     pub fn save(&self) -> std::io::Result<()> {
-        std::fs::write(&self.file, self.to_json())
+        horizon_platform::fs::write(&self.file, self.to_json())
     }
     /// StoredUserList.load: a missing file leaves the list as it is.
     pub fn load(&mut self) -> Result<(), String> {
-        let Ok(text) = std::fs::read_to_string(&self.file) else {
+        let Ok(text) = horizon_platform::fs::read_to_string(&self.file) else {
             return Ok(());
         };
         self.load_str(&text)

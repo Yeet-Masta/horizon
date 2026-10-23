@@ -24,6 +24,8 @@ use horizon_core::{
     position::{BlockPos, ChunkPos},
     ticks::{SavedTick, TickPriority, TickTypeId},
 };
+use horizon_platform::fs;
+use horizon_platform::fs::PathExt as _;
 use horizon_world::{
     DATA_VERSION,
     chunk::BlockState,
@@ -37,7 +39,6 @@ use horizon_world::{
 };
 use std::{
     collections::{BTreeMap, HashMap},
-    fs,
     path::{Path, PathBuf},
     sync::{
         Arc, Condvar, Mutex, OnceLock,
@@ -225,12 +226,12 @@ pub fn migrate_legacy(world: &Path) -> Result<()> {
         let to = dimension_dir(world, dimension);
         for folder in ["region", "entities", "poi"] {
             let (src, dst) = (from.join(folder), to.join(folder));
-            if src.is_dir() && !dst.exists() {
+            if src.fs_is_dir() && !dst.fs_exists() {
                 fs::create_dir_all(&to)?;
                 fs::rename(&src, &dst)?;
             }
         }
-        if !old.is_empty() && from.is_dir() && fs::read_dir(&from)?.next().is_none() {
+        if !old.is_empty() && from.fs_is_dir() && fs::read_dir(&from)?.next().is_none() {
             let _ = fs::remove_dir(&from);
         }
     }
@@ -1422,8 +1423,8 @@ fn write_region_records(
     folder: &str,
     records: &[((i32, i32), &Record)],
 ) -> Result<()> {
-    let timestamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    let timestamp = horizon_platform::time::SystemTime::now()
+        .duration_since(horizon_platform::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs() as u32);
     let compressed = compress_records(records, timestamp);
     let mut by_region: BTreeMap<(i32, i32), Vec<(ChunkPos, Option<ChunkRecord>)>> = BTreeMap::new();
@@ -1478,7 +1479,7 @@ fn compress_records(
             .map(|tag| ChunkRecord::from_nbt(&tag, Compression::Zlib, timestamp, Limits::default()))
             .transpose()
     };
-    let helpers = std::thread::available_parallelism()
+    let helpers = horizon_platform::thread::available_parallelism()
         .map_or(1, |n| n.get().div_ceil(2))
         .min(records.len() / CHUNKS_PER_HELPER);
     if helpers <= 1 {
@@ -1486,7 +1487,7 @@ fn compress_records(
     }
     let next = std::sync::atomic::AtomicUsize::new(0);
     let mut done: Vec<(usize, std::io::Result<Option<ChunkRecord>>)> =
-        std::thread::scope(|scope| {
+        horizon_platform::thread::scope(|scope| {
             let threads: Vec<_> = (0..helpers)
                 .map(|_| {
                     scope.spawn(|| {
@@ -1553,7 +1554,60 @@ type WriteBatch = (bool, Vec<((i32, i32), Record, u64)>);
 /// submission order.
 struct Writer {
     send: mpsc::Sender<WriteBatch>,
-    thread: std::thread::JoinHandle<()>,
+    thread: horizon_platform::thread::JoinHandle<()>,
+}
+
+/// What the writer writes into: one batch at a time, in submission order.
+struct WriteTarget {
+    root: PathBuf,
+    regions: Arc<RegionCache>,
+    entity_regions: Arc<RegionCache>,
+    pending: Arc<PendingWrites>,
+    outstanding: Arc<Outstanding>,
+}
+impl WriteTarget {
+    fn write(&self, entities: bool, batch: Vec<((i32, i32), Record, u64)>) {
+        let (folder, cache) = if entities {
+            ("entities", &self.entity_regions)
+        } else {
+            ("region", &self.regions)
+        };
+        // IOWorker.pendingWrites: a chunk queued again since is
+        // written once, by its newest batch.
+        let newest = |k: &(i32, i32), seq: u64| {
+            self.pending.lock().map_or(true, |p| {
+                p.get(&(entities, k.0, k.1)).is_none_or(|p| p.0 <= seq)
+            })
+        };
+        let records: Vec<_> = batch
+            .iter()
+            .filter(|(k, _, seq)| newest(k, *seq))
+            .map(|(k, r, _)| (*k, r))
+            .collect();
+        let result = write_region_records(&self.root, cache, folder, &records);
+        if let Err(e) = &result {
+            let message = format!("failed to write {folder} files: {e}");
+            log::warn!("Horizon: {message}");
+            *self.outstanding.error.lock().unwrap() = Some(message);
+        }
+        // Keep failed snapshots readable; never report them as durable.
+        if result.is_ok()
+            && let Ok(mut pending) = self.pending.lock()
+        {
+            for (k, _, seq) in &batch {
+                if pending
+                    .get(&(entities, k.0, k.1))
+                    .is_some_and(|p| p.0 == *seq)
+                {
+                    pending.remove(&(entities, k.0, k.1));
+                }
+            }
+        }
+        if let Ok(mut count) = self.outstanding.count.lock() {
+            *count -= 1;
+            self.outstanding.done.notify_all();
+        }
+    }
 }
 
 /// Writes still queued or running, with a condition to wait for none.
@@ -1693,8 +1747,14 @@ impl SaveDir {
                 .count
                 .lock()
                 .map_err(|_| "writer poisoned")? += 1;
+            // The web build has no thread to write on: the batch is written here.
+            #[cfg(target_family = "wasm")]
+            self.write_target().write(entities, batch);
+            #[cfg(not(target_family = "wasm"))]
             let mut writer = self.writer.lock().map_err(|_| "writer poisoned")?;
+            #[cfg(not(target_family = "wasm"))]
             let writer = writer.get_or_insert_with(|| self.start_writer());
+            #[cfg(not(target_family = "wasm"))]
             if writer.send.send((entities, batch)).is_err() {
                 *self
                     .outstanding
@@ -1715,60 +1775,28 @@ impl SaveDir {
         }
         Ok(())
     }
+    #[cfg(not(target_family = "wasm"))]
     fn start_writer(&self) -> Writer {
         let (send, receive) = mpsc::channel::<WriteBatch>();
-        let root = self.root.clone();
-        let (regions, entity_regions) = (self.regions.clone(), self.entity_regions.clone());
-        let pending = self.pending.clone();
-        let outstanding = self.outstanding.clone();
-        let thread = std::thread::Builder::new()
+        let target = self.write_target();
+        let thread = horizon_platform::thread::Builder::new()
             .name("horizon-region-writer".into())
             .spawn(move || {
                 for (entities, batch) in receive {
-                    let (folder, cache) = if entities {
-                        ("entities", &entity_regions)
-                    } else {
-                        ("region", &regions)
-                    };
-                    // IOWorker.pendingWrites: a chunk queued again since is
-                    // written once, by its newest batch.
-                    let newest = |k: &(i32, i32), seq: u64| {
-                        pending.lock().map_or(true, |p| {
-                            p.get(&(entities, k.0, k.1)).is_none_or(|p| p.0 <= seq)
-                        })
-                    };
-                    let records: Vec<_> = batch
-                        .iter()
-                        .filter(|(k, _, seq)| newest(k, *seq))
-                        .map(|(k, r, _)| (*k, r))
-                        .collect();
-                    let result = write_region_records(&root, cache, folder, &records);
-                    if let Err(e) = &result {
-                        let message = format!("failed to write {folder} files: {e}");
-                        log::warn!("Horizon: {message}");
-                        *outstanding.error.lock().unwrap() = Some(message);
-                    }
-                    // Keep failed snapshots readable; never report them as durable.
-                    if result.is_ok()
-                        && let Ok(mut pending) = pending.lock()
-                    {
-                        for (k, _, seq) in &batch {
-                            if pending
-                                .get(&(entities, k.0, k.1))
-                                .is_some_and(|p| p.0 == *seq)
-                            {
-                                pending.remove(&(entities, k.0, k.1));
-                            }
-                        }
-                    }
-                    if let Ok(mut count) = outstanding.count.lock() {
-                        *count -= 1;
-                        outstanding.done.notify_all();
-                    }
+                    target.write(entities, batch);
                 }
             })
             .expect("spawn region writer");
         Writer { send, thread }
+    }
+    fn write_target(&self) -> WriteTarget {
+        WriteTarget {
+            root: self.root.clone(),
+            regions: self.regions.clone(),
+            entity_regions: self.entity_regions.clone(),
+            pending: self.pending.clone(),
+            outstanding: self.outstanding.clone(),
+        }
     }
     /// Wait until every queued write is on disk.
     pub fn flush(&self) -> Result<()> {
@@ -1914,7 +1942,7 @@ pub fn write_dat(path: &Path, tag: Tag) -> Result<()> {
         .unwrap_or("data.dat");
     let temporary = path.with_file_name(format!("{file}_new"));
     fs::write(&temporary, compressed)?;
-    if path.exists() {
+    if path.fs_exists() {
         let old = match file.strip_suffix(".dat") {
             Some(stem) => path.with_file_name(format!("{stem}.dat_old")),
             None => path.with_file_name(format!("{file}_old")),
@@ -1976,10 +2004,11 @@ pub fn uuid_from_text(s: &str) -> Option<[i32; 4]> {
 }
 /// A random (version 4) UUID as vanilla's four-int form.
 pub fn random_uuid() -> [i32; 4] {
-    let t = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    let t = horizon_platform::time::SystemTime::now()
+        .duration_since(horizon_platform::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_nanos() as u64);
-    let mut s = t ^ (std::process::id() as u64).rotate_left(32) ^ 0x9E37_79B9_7F4A_7C15;
+    let mut s =
+        t ^ (horizon_platform::process::id() as u64).rotate_left(32) ^ 0x9E37_79B9_7F4A_7C15;
     let mut next = || {
         s ^= s << 13;
         s ^= s >> 7;
@@ -2854,8 +2883,8 @@ impl Level {
             "locked",
             Tag::Byte(i8::from(self.difficulty_locked)),
         );
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let now = horizon_platform::time::SystemTime::now()
+            .duration_since(horizon_platform::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_millis() as i64);
         for (key, value) in [
             ("DataVersion", Tag::Int(DATA_VERSION)),
@@ -2937,10 +2966,10 @@ impl Level {
                 .or_insert_with(|| Tag::compound([("total_ticks", Tag::Long(self.time))]));
         }
         write_saved_data(dir, "world_clocks", clocks)?;
-        if legacy || !saved_data_path(dir, "world_gen_settings").exists() {
+        if legacy || !saved_data_path(dir, "world_gen_settings").fs_exists() {
             write_world_gen_settings(dir, self.seed, WorldGen::default())?;
         }
-        if !saved_data_path(dir, "game_rules").exists() || !self.game_rules.is_empty() {
+        if !saved_data_path(dir, "game_rules").fs_exists() || !self.game_rules.is_empty() {
             // Only rules vanilla knows: an unknown key makes it reject the file.
             let mut rules = Tag::Compound(Compound::new());
             for (name, default) in GAME_RULES {
@@ -3402,7 +3431,7 @@ impl<G: ChunkGenerator> ChunkGenerator for Persistent<G> {
 mod tests {
     #[test]
     fn saved_far_surface_reads_builds_and_water_without_gameplay_chunks() {
-        let Some(root) = std::env::var_os("HORIZON_TEST_RESOURCES") else {
+        let Some(root) = horizon_platform::env::var_os("HORIZON_TEST_RESOURCES") else {
             return;
         };
         let root = PathBuf::from(root);
@@ -3448,7 +3477,10 @@ mod tests {
             "block_entities",
             Tag::String("not decoded by far sampling".into()),
         );
-        let dir = std::env::temp_dir().join(format!("horizon-lod-save-{}", std::process::id()));
+        let dir = horizon_platform::env::temp_dir().join(format!(
+            "horizon-lod-save-{}",
+            horizon_platform::process::id()
+        ));
         fs::create_dir_all(&dir).unwrap();
         let save = SaveDir::new(dir.clone());
         save.write_records("region", vec![((-2, 3), Some(saved))], true)
@@ -3710,8 +3742,9 @@ mod tests {
 
     #[test]
     fn older_worlds_are_upgraded_on_opening() {
-        let dir = std::env::temp_dir().join(format!("horizon-dv-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = horizon_platform::env::temp_dir()
+            .join(format!("horizon-dv-{}", horizon_platform::process::id()));
+        let _ = horizon_platform::fs::remove_dir_all(&dir);
         let level =
             |v: i32| Tag::compound([("Data", Tag::compound([("DataVersion", Tag::Int(v))]))]);
         let version = |dir: &std::path::Path| {
@@ -3729,12 +3762,15 @@ mod tests {
         super::upgrade_older_world(&dir).unwrap();
         assert_eq!(version(&dir), Some(i64::from(super::DATA_VERSION)));
         super::upgrade_older_world(&dir).unwrap();
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = horizon_platform::fs::remove_dir_all(&dir);
     }
     #[test]
     fn write_completion_polls_without_waiting_and_keeps_latest_snapshot() {
-        let dir = std::env::temp_dir().join(format!("horizon-save-poll-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = horizon_platform::env::temp_dir().join(format!(
+            "horizon-save-poll-{}",
+            horizon_platform::process::id()
+        ));
+        let _ = horizon_platform::fs::remove_dir_all(&dir);
         let save = super::SaveDir::new(dir.clone());
         let lock = super::SessionLock::acquire(&dir).unwrap();
         let path = save.region_path("entities", 0, 0);
@@ -3764,16 +3800,19 @@ mod tests {
                 .is_empty()
         );
         drop((reopened, save, lock));
-        let _ = std::fs::remove_dir_all(dir);
+        let _ = horizon_platform::fs::remove_dir_all(dir);
     }
 
     #[test]
     fn failed_async_writes_are_readable_and_never_reported_durable() {
-        let dir = std::env::temp_dir().join(format!("horizon-save-failure-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = horizon_platform::env::temp_dir().join(format!(
+            "horizon-save-failure-{}",
+            horizon_platform::process::id()
+        ));
+        let _ = horizon_platform::fs::remove_dir_all(&dir);
+        horizon_platform::fs::create_dir_all(&dir).unwrap();
         // A file where a directory is needed causes a real writer I/O error.
-        std::fs::write(dir.join("entities"), b"blocked").unwrap();
+        horizon_platform::fs::write(dir.join("entities"), b"blocked").unwrap();
         let save = super::SaveDir::new(dir.clone());
         let entity = Tag::compound([("version", Tag::Int(3))]);
         save.save_entities_later(vec![((0, 0), vec![entity.clone()])])
@@ -3784,34 +3823,38 @@ mod tests {
         // The failure stays visible on subsequent barriers too.
         assert!(save.flush().is_err());
         drop(save);
-        let _ = std::fs::remove_dir_all(dir);
+        let _ = horizon_platform::fs::remove_dir_all(dir);
     }
 
     #[test]
     fn session_lock_is_exclusive() {
-        let dir = std::env::temp_dir().join(format!("horizon-lock-{}", std::process::id()));
+        let dir = horizon_platform::env::temp_dir()
+            .join(format!("horizon-lock-{}", horizon_platform::process::id()));
         let first = super::SessionLock::acquire(&dir).expect("first lock");
         assert!(super::SessionLock::acquire(&dir).is_err());
         assert_eq!(
-            std::fs::read(dir.join("session.lock")).unwrap(),
+            horizon_platform::fs::read(dir.join("session.lock")).unwrap(),
             [0x26, 0x03]
         );
         drop(first);
         assert!(super::SessionLock::acquire(&dir).is_ok());
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = horizon_platform::fs::remove_dir_all(&dir);
     }
     /// #749: a copy of the lock's descriptor (a child process spawned on
     /// another thread holds one until it execs) must not keep a released
     /// world locked.
     #[test]
     fn session_lock_releases_while_a_descriptor_copy_lives() {
-        let dir = std::env::temp_dir().join(format!("horizon-lock-copy-{}", std::process::id()));
+        let dir = horizon_platform::env::temp_dir().join(format!(
+            "horizon-lock-copy-{}",
+            horizon_platform::process::id()
+        ));
         let lock = super::SessionLock::acquire(&dir).expect("first lock");
         let copy = lock.0.try_clone().unwrap();
         drop(lock);
         assert!(super::SessionLock::acquire(&dir).is_ok());
         drop(copy);
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = horizon_platform::fs::remove_dir_all(&dir);
     }
     #[test]
     fn crafter_block_entity_round_trips() {
@@ -4125,7 +4168,8 @@ mod tests {
     }
     #[test]
     fn level_round_trips_through_the_vanilla_files() {
-        let dir = std::env::temp_dir().join(format!("horizon-level-{}", std::process::id()));
+        let dir = horizon_platform::env::temp_dir()
+            .join(format!("horizon-level-{}", horizon_platform::process::id()));
         let _ = fs::remove_dir_all(&dir);
         let mut level = Level {
             name: "Test".into(),

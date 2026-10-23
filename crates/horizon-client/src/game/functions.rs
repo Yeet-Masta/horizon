@@ -14,6 +14,7 @@ use horizon_client::{
     scoreboard::bracketed,
     text::{self, Text},
 };
+use horizon_platform::fs::PathExt as _;
 use horizon_world::nbt::Tag;
 use std::collections::BTreeSet;
 
@@ -60,9 +61,10 @@ impl Game<'_> {
     }
     pub(super) fn reload_datapacks(&mut self, run_load: bool) {
         self.fns.packs = datapack::discover(&self.world_root);
-        let saved: Option<serde_json::Value> = std::fs::read(self.datapack_settings_path())
-            .ok()
-            .and_then(|b| serde_json::from_slice(&b).ok());
+        let saved: Option<serde_json::Value> =
+            horizon_platform::fs::read(self.datapack_settings_path())
+                .ok()
+                .and_then(|b| serde_json::from_slice(&b).ok());
         let list = |key: &str| -> Vec<String> {
             saved
                 .as_ref()
@@ -122,7 +124,7 @@ impl Game<'_> {
             .filter(|id| !self.fns.enabled.contains(id))
             .collect();
         let json = serde_json::json!({"enabled": self.fns.enabled, "disabled": disabled});
-        let _ = std::fs::write(self.datapack_settings_path(), json.to_string());
+        let _ = horizon_platform::fs::write(self.datapack_settings_path(), json.to_string());
     }
     pub(super) fn sync_function_registries(&mut self) {
         let reg = &mut self.ui.registries;
@@ -196,7 +198,7 @@ impl Game<'_> {
                 ])
             })
             .collect();
-        if events.is_empty() && !self.schedule_path().exists() {
+        if events.is_empty() && !self.schedule_path().fs_exists() {
             return;
         }
         let _ = save::write_dat(

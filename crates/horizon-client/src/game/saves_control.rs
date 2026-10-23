@@ -3,8 +3,9 @@
 //! (no world open), as those screens do; deleting one needs `--confirm`.
 use super::Game;
 use horizon_client::{Result, title};
+use horizon_platform::time::UNIX_EPOCH;
 use serde_json::{Value, json};
-use std::{path::PathBuf, sync::mpsc::Sender, time::UNIX_EPOCH};
+use std::{path::PathBuf, sync::mpsc::Sender};
 
 pub(super) const HELP: &[&str] = &[
     "worlds                         the saved worlds, newest first: folder, name, mode, last played, version",
@@ -15,7 +16,7 @@ pub(super) const HELP: &[&str] = &[
 ];
 
 fn saves() -> Result<PathBuf> {
-    Ok(std::env::current_dir()?.join("saves"))
+    Ok(horizon_platform::env::current_dir()?.join("saves"))
 }
 
 impl Game<'_> {
@@ -97,7 +98,7 @@ impl Game<'_> {
                 let backups = title::world_management::backups_path(&saves);
                 // A big world takes a while to zip: off the game thread, as Make Backup does.
                 let reply = reply.clone();
-                std::thread::spawn(move || {
+                horizon_platform::thread::spawn(move || {
                     let answer = match title::world_management::backup(&saves, &folder) {
                         Ok(bytes) => {
                             json!({ "ok": true, "folder": folder, "backups": backups, "bytes": bytes })

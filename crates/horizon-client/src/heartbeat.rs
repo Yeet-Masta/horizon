@@ -4,11 +4,13 @@
 //! play-with-friends world is open, every minute and at once when that last one changes.
 //! It sends nothing when sending is turned off (`HORIZON_TELEMETRY_URL=off`) or with
 //! `HORIZON_NO_HEARTBEAT=1` (automated runs).
+use horizon_platform::thread::Thread;
+#[cfg(not(target_family = "wasm"))]
+use horizon_platform::time::Duration;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::thread::Thread;
-use std::time::Duration;
 
+#[cfg(not(target_family = "wasm"))]
 use horizon_telemetry::live::{self, Ping};
 
 /// A world is open to LAN or to friends.
@@ -16,18 +18,24 @@ static LAN: AtomicBool = AtomicBool::new(false);
 static PINGER: OnceLock<Thread> = OnceLock::new();
 
 /// After a failure the next ping waits longer, doubling up to this.
+#[cfg(not(target_family = "wasm"))]
 const MAX_WAIT: Duration = Duration::from_secs(600);
+
+/// The web build sends no ping.
+#[cfg(target_family = "wasm")]
+pub fn start() {}
 
 /// Starts the pings, once. Call when the game itself starts (not a dedicated server, not a
 /// benchmark or an automated run).
+#[cfg(not(target_family = "wasm"))]
 pub fn start() {
-    if PINGER.get().is_some() || std::env::var_os("HORIZON_NO_HEARTBEAT").is_some() {
+    if PINGER.get().is_some() || horizon_platform::env::var_os("HORIZON_NO_HEARTBEAT").is_some() {
         return;
     }
     let Some(endpoint) = horizon_telemetry::endpoint() else {
         return;
     };
-    let spawned = std::thread::Builder::new()
+    let spawned = horizon_platform::thread::Builder::new()
         .name("Heartbeat".into())
         .spawn(move || run(&endpoint));
     match spawned {
@@ -47,6 +55,7 @@ pub fn set_lan(open: bool) {
     }
 }
 
+#[cfg(not(target_family = "wasm"))]
 fn run(endpoint: &str) {
     let session = live::session_id();
     let version = crate::telemetry::version();
@@ -69,6 +78,6 @@ fn run(endpoint: &str) {
             }
         }
         // Woken early by `set_lan`; a spurious wake only sends one ping more.
-        std::thread::park_timeout(wait);
+        horizon_platform::thread::park_timeout(wait);
     }
 }

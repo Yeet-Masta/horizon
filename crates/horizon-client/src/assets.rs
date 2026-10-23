@@ -1,4 +1,5 @@
 use crate::Result;
+use horizon_platform::fs::File;
 use horizon_world::{
     DATA_VERSION,
     heightmap::HeightmapState,
@@ -8,7 +9,6 @@ use horizon_world::{
 use serde_json::Value;
 use std::{
     collections::BTreeSet,
-    fs::File,
     io::{self, BufReader},
     path::Path,
     sync::Arc,

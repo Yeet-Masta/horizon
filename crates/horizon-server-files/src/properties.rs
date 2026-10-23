@@ -115,7 +115,7 @@ pub struct SystemEntropy(u64);
 impl Default for SystemEntropy {
     fn default() -> Self {
         let mut seed = [0u8; 8];
-        let ok = std::fs::File::open("/dev/urandom")
+        let ok = horizon_platform::fs::File::open("/dev/urandom")
             .and_then(|mut f| std::io::Read::read_exact(&mut f, &mut seed))
             .is_ok();
         let mut s = u64::from_le_bytes(seed);
@@ -235,7 +235,7 @@ impl ServerProperties {
     /// DedicatedServerProperties.fromFile; a file that cannot be read is an
     /// empty set (Settings.loadFromFile logs and continues).
     pub fn from_file(path: &std::path::Path, entropy: &mut dyn Entropy) -> Result<Self, String> {
-        let p = match std::fs::read(path) {
+        let p = match horizon_platform::fs::read(path) {
             Ok(bytes) => Properties::load_file(&bytes).map_err(|e| e.to_string())?,
             Err(_) => Properties::default(),
         };
@@ -470,7 +470,7 @@ impl ServerProperties {
         )
     }
     pub fn store(&self, path: &std::path::Path) -> std::io::Result<()> {
-        std::fs::write(path, self.stored(now_millis()))
+        horizon_platform::fs::write(path, self.stored(now_millis()))
     }
 
     /// MutableValue.update: change one key and re-read everything (the

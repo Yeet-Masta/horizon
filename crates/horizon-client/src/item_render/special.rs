@@ -49,7 +49,7 @@ const COPPER_GOLEM_LAYERS: [(&str, &str); 4] = [
 ];
 
 pub(super) fn load_parts(root: &Path) -> HashMap<String, ModelPart> {
-    let Ok(all) = std::fs::read(root.join("entity-models.json"))
+    let Ok(all) = horizon_platform::fs::read(root.join("entity-models.json"))
         .map_err(|_| ())
         .and_then(|b| serde_json::from_slice::<Value>(&b).map_err(|_| ()))
     else {

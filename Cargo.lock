@@ -462,6 +462,8 @@ version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "af491d569909a7e4dee0ad7db7f5341fef5c614d5b8ec8cf765732aba3cff681"
 dependencies = [
+ "serde",
+ "termcolor",
  "unicode-width",
 ]
 
@@ -1426,6 +1428,7 @@ dependencies = [
  "horizon-dualsense",
  "horizon-friends",
  "horizon-mods",
+ "horizon-platform",
  "horizon-protocol",
  "horizon-server-files",
  "horizon-shaderpack",
@@ -1445,6 +1448,9 @@ dependencies = [
  "symphonia",
  "toml",
  "ureq",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
  "wgpu",
  "winit",
  "winresource",
@@ -1494,6 +1500,7 @@ name = "horizon-mods"
 version = "0.1.0"
 dependencies = [
  "horizon-mods",
+ "horizon-platform",
  "log",
  "serde",
  "serde_json",
@@ -1509,6 +1516,20 @@ name = "horizon-mods-test-guest"
 version = "0.1.0"
 dependencies = [
  "horizon-mod-sdk",
+]
+
+[[package]]
+name = "horizon-platform"
+version = "0.1.0"
+dependencies = [
+ "getrandom 0.2.17",
+ "getrandom 0.3.4",
+ "js-sys",
+ "pollster",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-time",
+ "zip",
 ]
 
 [[package]]
@@ -1541,6 +1562,7 @@ dependencies = [
  "flate2",
  "getrandom 0.3.4",
  "horizon-core",
+ "horizon-platform",
  "horizon-world",
  "serde_json",
  "sha1",
@@ -1589,6 +1611,7 @@ version = "0.1.0"
 dependencies = [
  "base64",
  "horizon-core",
+ "horizon-platform",
  "horizon-protocol",
  "horizon-world",
  "log",
@@ -1600,6 +1623,7 @@ name = "horizon-shaderpack"
 version = "0.1.0"
 dependencies = [
  "glsl-lang",
+ "horizon-platform",
  "naga",
  "pp-rs",
  "zip",
@@ -1634,6 +1658,7 @@ version = "0.1.0"
 dependencies = [
  "flate2",
  "horizon-core",
+ "horizon-platform",
  "libm",
  "lz4_flex",
  "postcard",
@@ -4541,8 +4566,6 @@ dependencies = [
 [[package]]
 name = "wgpu"
 version = "30.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "527ccdf43dd5b2e8676eed9984ce00e2bbb0a1b85b70c1969dcb6cd2eb55ab9e"
 dependencies = [
  "arrayvec",
  "bitflags 2.13.2",
@@ -4553,6 +4576,7 @@ dependencies = [
  "hashbrown 0.17.1",
  "js-sys",
  "log",
+ "naga",
  "parking_lot",
  "portable-atomic",
  "profiling",
@@ -4570,8 +4594,6 @@ dependencies = [
 [[package]]
 name = "wgpu-core"
 version = "30.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "14c018fce9b6270aa203c2fdd56f3cce996713534bd757e4ea58c8560b121f14"
 dependencies = [
  "arrayvec",
  "bit-set 0.10.0",
@@ -4676,8 +4698,6 @@ dependencies = [
 [[package]]
 name = "wgpu-types"
 version = "30.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "99dad6f1fbdbbdb4c278a6508b059d44688f5cebddf78d005a46a31340269286"
 dependencies = [
  "bitflags 2.13.2",
  "bytemuck",

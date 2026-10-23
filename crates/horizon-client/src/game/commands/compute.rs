@@ -57,7 +57,7 @@ impl Game<'_> {
             .options
             .resources
             .join(format!("data/{ns}/{dir}/{path}.json"));
-        serde_json::from_slice(&std::fs::read(file).ok()?).ok()
+        serde_json::from_slice(&horizon_platform::fs::read(file).ok()?).ok()
     }
     /// The compute context the command's source literal selects.
     pub(in crate::game) fn compute_context(&mut self, ctx: &Context) -> R<ComputeContext> {

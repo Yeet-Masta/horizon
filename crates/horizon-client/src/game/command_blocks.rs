@@ -388,7 +388,9 @@ impl Game<'_> {
         if let Some(c) = command_block_mut(&mut self.world, pos)
             && c.track_output
         {
-            let time = chrono::Local::now().format("[%H:%M:%S] ").to_string();
+            let time = horizon_client::logging::local_now()
+                .format("[%H:%M:%S] ")
+                .to_string();
             c.last_output = Some(Text::literal(time).append(message));
         }
     }

@@ -122,7 +122,7 @@ mod tests {
     fn matches_the_tree_built_registry() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../.local/horizon-client/26.3/facts.json");
-        let Ok(bytes) = std::fs::read(&path) else {
+        let Ok(bytes) = horizon_platform::fs::read(&path) else {
             eprintln!("skipped: no prepared facts.json");
             return;
         };

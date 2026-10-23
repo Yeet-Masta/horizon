@@ -8,6 +8,8 @@ rust-version = "1.90"
 description = "Horizon native development client"
 
 [dependencies]
+# std::fs, std::time and std::thread, or the browser's on the web build (web/README.md).
+horizon-platform = { path = "../horizon-platform" }
 horizon-assets = { path = "../horizon-assets" }
 horizon-core = { path = "../horizon-core" }
 # The server thread ahead of the workers (MinecraftServer.spin's Thread.setPriority).
@@ -18,7 +20,7 @@ horizon-protocol = { path = "../horizon-protocol" }
 horizon-server-files = { path = "../horizon-server-files" }
 horizon-friends = { path = "../horizon-friends" }
 # Horizon mods: sandboxed WebAssembly components, off unless installed and turned on (docs/mods.md).
-horizon-mods = { path = "../horizon-mods" }
+horizon-mods = { path = "../horizon-mods", default-features = false }
 wgpu = { version = "30.0.1", default-features = false, features = ["std", "parking_lot", "vulkan", "metal", "wgsl"] }
 winit = "0.30.13"
 pollster = "0.4"
@@ -44,16 +46,33 @@ flate2 = { version = "1.1.10", default-features = false, features = ["zlib-rs", 
 horizon-theme = { path = "../horizon-theme" }
 # Opt-in data collection: the game keeps, the launcher sends (docs/telemetry.md); `live` is
 # the anonymous "I'm playing" ping the game sends itself (`heartbeat.rs`).
-horizon-telemetry = { path = "../horizon-telemetry", default-features = false, features = ["live"] }
+horizon-telemetry = { path = "../horizon-telemetry", default-features = false }
 horizon-bench = { path = "../horizon-bench" }
-arboard = { version = "3.6.1", default-features = false, features = ["wayland-data-control"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 # Controllers (evdev + libudev on Linux, IOKit on macOS, Windows.Gaming.Input); the `controllers` feature.
 gilrs = { version = "0.11", optional = true }
 # The DualSense's rumble, adaptive triggers and lights over HID (gilrs only reads it).
 horizon-dualsense = { path = "../horizon-dualsense", optional = true }
+
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+# Mods run in wasmtime, which a browser can't host.
+horizon-mods = { path = "../horizon-mods", features = ["runtime"] }
+horizon-telemetry = { path = "../horizon-telemetry", default-features = false, features = ["live"] }
+arboard = { version = "3.6.1", default-features = false, features = ["wayland-data-control"] }
 # HTTPS to the Minecraft services (online-mode session join).
 ureq = { version = "2", default-features = false, features = ["tls"] }
+
+# The web build (web/README.md): WebGPU on a canvas, the page's event loop.
+[target.'cfg(target_family = "wasm")'.dependencies]
+wgpu = { version = "30.0.1", default-features = false, features = ["webgpu", "fragile-send-sync-non-atomic-wasm"] }
+wasm-bindgen = "0.2.129"
+wasm-bindgen-futures = "0.4.79"
+web-sys = { version = "0.3.106", features = [
+    "Document", "Window", "Element", "EventTarget", "HtmlCanvasElement",
+    # Sound: WebAudio (audio.rs `web_output`).
+    "AudioBuffer", "AudioContext", "AudioContextState", "AudioDestinationNode", "AudioNode",
+    "AudioProcessingEvent", "BaseAudioContext", "ScriptProcessorNode",
+] }
 
 [target.'cfg(unix)'.dependencies]
 # The server thread's CPU time per tick (`HORIZON_SPIKES`, spans.rs).

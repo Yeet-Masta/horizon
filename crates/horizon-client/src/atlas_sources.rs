@@ -5,10 +5,11 @@
 //! the same id and a filter removes the matching ones.
 use crate::packs::pattern::Pattern;
 use horizon_assets::palette::apply_palette;
+use horizon_platform::fs;
+use horizon_platform::fs::PathExt as _;
 use serde_json::Value;
 use std::{
     collections::BTreeMap,
-    fs,
     path::{Path, PathBuf},
 };
 
@@ -187,7 +188,7 @@ pub fn list_textures(root: &Path) -> Vec<String> {
             };
             for e in entries.flatten() {
                 let p = e.path();
-                if p.is_dir() {
+                if p.fs_is_dir() {
                     stack.push(p);
                 } else if p.extension().is_some_and(|x| x == "png")
                     && let Ok(rel) = p.strip_prefix(&base)

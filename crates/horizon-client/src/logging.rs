@@ -8,8 +8,10 @@
 //! Messages go through the `log` facade. Horizon's own still print their plain text on stderr,
 //! as they did before the log existed; other crates' errors only reach the file (their
 //! warnings are mostly the Vulkan loader's startup chatter).
+// The web build has no log file: its writer goes unused there.
+#![cfg_attr(target_family = "wasm", allow(dead_code))]
+use horizon_platform::fs::{self, File, OpenOptions};
 use std::collections::VecDeque;
-use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, mpsc};
@@ -21,10 +23,18 @@ pub const MAX_ARCHIVES_PER_DAY: u32 = 7;
 /// Formatted lines kept in memory for crash reports.
 const RECENT: usize = 50;
 
+/// `Local::now()`. Through `horizon_platform::time`: chrono reads std's clock,
+/// which panics on the web build.
+pub fn local_now() -> DateTime<Local> {
+    DateTime::from(horizon_platform::time::to_std(
+        horizon_platform::time::SystemTime::now(),
+    ))
+}
+
 /// The platform data folder (what the `dirs` crate's data_dir gives).
 pub fn data_dir() -> PathBuf {
     let env = |k: &str| {
-        std::env::var_os(k)
+        horizon_platform::env::var_os(k)
             .filter(|v| !v.is_empty())
             .map(PathBuf::from)
     };
@@ -42,13 +52,13 @@ pub fn data_dir() -> PathBuf {
     } else if let Some(h) = &home {
         return h.join(".local/share");
     }
-    std::env::temp_dir()
+    horizon_platform::env::temp_dir()
 }
 
 /// Where the launcher runs the game and keeps its saves: `HORIZON_HOME`, else `horizon` in the
 /// platform data folder (launcher/src/backend.rs `game_home`).
 pub fn game_home() -> PathBuf {
-    match std::env::var_os("HORIZON_HOME").filter(|h| !h.is_empty()) {
+    match horizon_platform::env::var_os("HORIZON_HOME").filter(|h| !h.is_empty()) {
         Some(h) => PathBuf::from(h),
         None => data_dir().join("horizon"),
     }
@@ -196,7 +206,7 @@ pub fn open_latest(dir: &Path) -> io::Result<Option<Latest>> {
         .truncate(false)
         .open(dir.join("latest.log"))?;
     let modified = file.metadata()?.modified()?;
-    let date = DateTime::<Local>::from(modified).date_naive();
+    let date = DateTime::<Local>::from(horizon_platform::time::to_std(modified)).date_naive();
     roll(&mut file, dir, date)?;
     Ok(Some(Latest { file, _lock: lock }))
 }
@@ -291,7 +301,7 @@ impl log::Log for Logger {
             return;
         }
         let message = record.args().to_string();
-        let current = std::thread::current();
+        let current = horizon_platform::thread::current();
         let thread = match current.name() {
             Some("main") => self.main_thread,
             Some(name) => name,
@@ -305,7 +315,7 @@ impl log::Log for Logger {
     fn flush(&self) {
         let (done, wait) = mpsc::sync_channel(1);
         if self.out.send(Out::Flush(done)).is_ok() {
-            let _ = wait.recv_timeout(std::time::Duration::from_secs(1));
+            let _ = wait.recv_timeout(horizon_platform::time::Duration::from_secs(1));
         }
     }
 }
@@ -316,7 +326,7 @@ impl Logger {
     }
 
     fn send(&self, thread: &str, level: log::Level, message: &str, stderr: Option<String>) {
-        let now = Local::now();
+        let now = local_now();
         // As log4j writes a multi-line message: the pattern once, the rest as it is.
         let lines: Vec<String> = message
             .lines()
@@ -338,11 +348,19 @@ impl Logger {
                 recent.push_back(line.clone());
             }
         }
+        #[cfg(target_family = "wasm")]
+        {
+            let _ = stderr;
+            horizon_platform::web::console(level as u8, &lines.join("\n"));
+            return;
+        }
+        #[cfg(not(target_family = "wasm"))]
         let msg = Out::Write {
             date: now.date_naive(),
             lines,
             stderr,
         };
+        #[cfg(not(target_family = "wasm"))]
         if let Err(mpsc::SendError(Out::Write {
             stderr: Some(message),
             ..
@@ -358,6 +376,10 @@ impl Logger {
 /// still printed when the file cannot be opened.
 pub fn init(home: &Path, main_thread: &'static str) {
     let dir = logs_dir(home);
+    // The web build logs to the browser's console only (`Logger::send`).
+    #[cfg(target_family = "wasm")]
+    let file = None;
+    #[cfg(not(target_family = "wasm"))]
     let file = match open_latest(&dir) {
         Ok(Some(latest)) => Some(latest),
         Ok(None) => {
@@ -380,9 +402,12 @@ pub fn init(home: &Path, main_thread: &'static str) {
         let writer = Writer {
             file,
             dir,
-            date: Local::now().date_naive(),
+            date: local_now().date_naive(),
         };
-        if let Err(e) = std::thread::Builder::new()
+        #[cfg(target_family = "wasm")]
+        drop((writer, receive));
+        #[cfg(not(target_family = "wasm"))]
+        if let Err(e) = horizon_platform::thread::Builder::new()
             .name("Log writer".into())
             .spawn(move || writer.run(receive))
         {
@@ -402,7 +427,7 @@ pub fn init(home: &Path, main_thread: &'static str) {
 /// A line in the log from code that prints it elsewhere itself (the dedicated server console).
 pub fn write_only(level: log::Level, message: &str) {
     if let Some(logger) = LOGGER.get() {
-        let current = std::thread::current();
+        let current = horizon_platform::thread::current();
         let thread = match current.name() {
             Some("main") | None => logger.main_thread,
             Some(name) => name,
@@ -536,7 +561,8 @@ mod tests {
 
     #[test]
     fn startup_archives_the_last_runs_log() {
-        let dir = std::env::temp_dir().join(format!("horizon-logs-test-{}", std::process::id()));
+        let dir = horizon_platform::env::temp_dir()
+            .join(format!("horizon-logs-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         // Empty: nothing is archived (OnStartupTriggeringPolicy's minSize is 1 byte).
@@ -552,7 +578,7 @@ mod tests {
         assert!(open_latest(&dir).unwrap().is_none());
         writeln!(latest.file, "second run").unwrap();
         drop(latest);
-        let today = Local::now().date_naive();
+        let today = local_now().date_naive();
         let archive = dir.join(archive_name(today, 1));
         let mut text = String::new();
         flate2::read::GzDecoder::new(File::open(&archive).unwrap())
@@ -572,7 +598,8 @@ mod tests {
 
     #[test]
     fn the_newest_crash_report_is_found_by_name() {
-        let home = std::env::temp_dir().join(format!("horizon-crash-test-{}", std::process::id()));
+        let home = horizon_platform::env::temp_dir()
+            .join(format!("horizon-crash-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&home);
         assert!(newest_crash_report(&home).is_none());
         let dir = crash_reports_dir(&home);

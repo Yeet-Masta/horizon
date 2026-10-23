@@ -611,17 +611,17 @@ mod tests {
 
     #[test]
     fn fireworks_use_loaded_tooltip_translations() {
-        let root = std::env::temp_dir().join(format!(
+        let root = horizon_platform::env::temp_dir().join(format!(
             "horizon-firework-tooltip-language-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
+            horizon_platform::time::SystemTime::now()
+                .duration_since(horizon_platform::time::UNIX_EPOCH)
                 .unwrap()
                 .as_nanos(),
         ));
         let dir = root.join("assets/minecraft/lang");
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(
+        horizon_platform::fs::create_dir_all(&dir).unwrap();
+        horizon_platform::fs::write(
             dir.join("en_us.json"),
             serde_json::to_vec(&serde_json::json!({
                 "item.minecraft.firework_rocket.flight_duration": "Flight Duration: %s",
@@ -637,7 +637,7 @@ mod tests {
         )
         .unwrap();
         let enchantments = crate::enchant::Enchantments::load(&root);
-        std::fs::remove_dir_all(&root).unwrap();
+        horizon_platform::fs::remove_dir_all(&root).unwrap();
         let translate = |key: &str| enchantments.translate(key).map(str::to_owned);
         let mut rocket = ItemStack::new("minecraft:firework_rocket", 1);
         assert_eq!(firework_lines(&rocket, &translate), ["Flight Duration: 1"]);
@@ -693,17 +693,17 @@ mod tests {
                 slot.to_owned(),
             )
         });
-        let root = std::env::temp_dir().join(format!(
+        let root = horizon_platform::env::temp_dir().join(format!(
             "horizon-tooltip-language-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
+            horizon_platform::time::SystemTime::now()
+                .duration_since(horizon_platform::time::UNIX_EPOCH)
                 .unwrap()
                 .as_nanos(),
         ));
         let dir = root.join("assets/minecraft/lang");
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(
+        horizon_platform::fs::create_dir_all(&dir).unwrap();
+        horizon_platform::fs::write(
             dir.join("en_us.json"),
             serde_json::to_vec(&serde_json::json!({
                 "item.modifiers.mainhand": "When in Main Hand:",
@@ -719,7 +719,7 @@ mod tests {
         )
         .unwrap();
         let enchantments = crate::enchant::Enchantments::load(&root);
-        std::fs::remove_dir_all(&root).unwrap();
+        horizon_platform::fs::remove_dir_all(&root).unwrap();
         let lang = |key: &str| enchantments.translate(key).map(str::to_owned);
         let green = rgba(0, 170, 0, 255);
         let gray = rgba(170, 170, 170, 255);
@@ -753,7 +753,8 @@ mod tests {
     #[ignore = "requires prepared items/language in HORIZON_TEST_RESOURCES"]
     fn equipment_attributes_with_prepared_items_and_language() {
         let root = std::path::PathBuf::from(
-            std::env::var_os("HORIZON_TEST_RESOURCES").expect("HORIZON_TEST_RESOURCES"),
+            horizon_platform::env::var_os("HORIZON_TEST_RESOURCES")
+                .expect("HORIZON_TEST_RESOURCES"),
         );
         let items = crate::items::Items::catalog(&root).unwrap();
         let enchantments = crate::enchant::Enchantments::load(&root);

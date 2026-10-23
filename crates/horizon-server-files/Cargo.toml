@@ -7,6 +7,8 @@ rust-version = "1.90"
 description = "The dedicated server's vanilla files: server.properties, eula.txt, ops, whitelist and bans, and account lookups"
 
 [dependencies]
+# std::fs, std::time and std::thread, or the browser's on the web build.
+horizon-platform = { path = "../horizon-platform" }
 horizon-core = { path = "../horizon-core" }
 horizon-protocol = { path = "../horizon-protocol" }
 horizon-world = { path = "../horizon-world" }
@@ -14,6 +16,9 @@ log = "0.4"
 # Online mode: finding accounts by name (the services' profiles endpoint).
 # Secure chat: the services' public keys arrive base64-encoded.
 base64 = "0.22"
+
+# No sockets in a browser: the web build looks no account up.
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
 ureq = { version = "2", default-features = false, features = ["tls"] }
 
 [lints]

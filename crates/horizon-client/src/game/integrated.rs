@@ -24,6 +24,10 @@ use horizon_client::{
     settings::Settings,
     title::WorldOptions,
 };
+use horizon_platform::{
+    thread::JoinHandle,
+    time::{Duration, Instant},
+};
 use horizon_protocol::connection::Pipe;
 use horizon_protocol::{crypto::offline_uuid, text::translatable};
 use std::{
@@ -34,8 +38,6 @@ use std::{
         atomic::{AtomicBool, AtomicI32, AtomicU16, AtomicU32, Ordering},
         mpsc::{Receiver, Sender, channel, sync_channel},
     },
-    thread::JoinHandle,
-    time::{Duration, Instant},
 };
 
 /// What the window tells its server thread.
@@ -240,7 +242,7 @@ impl Game<'_> {
         let (ready_tx, ready) = channel();
         let (tasks, server_tasks) = channel();
         let server_flags = flags.clone();
-        let thread = std::thread::Builder::new()
+        let thread = horizon_platform::thread::Builder::new()
             .name("Server thread".into())
             .spawn(move || {
                 // MinecraftServer.spin's Thread.setPriority(8).
@@ -407,7 +409,7 @@ impl Game<'_> {
             }
             self.lan = Some(host);
         }
-        std::thread::sleep(Duration::from_millis(100));
+        horizon_platform::thread::sleep(Duration::from_millis(100));
         self.save_game()?;
         self.lan_close(false);
         self.save.flush()?;
@@ -704,7 +706,9 @@ mod tests {
         let (tasks, _) = channel();
         let server = Integrated {
             flags: flags.clone(),
-            thread: Some(std::thread::spawn(move || wait.recv().unwrap())),
+            thread: Some(horizon_platform::thread::spawn(move || {
+                wait.recv().unwrap()
+            })),
             tasks,
             world_name: String::new(),
         };
@@ -722,7 +726,7 @@ mod tests {
         let (tasks, _) = channel();
         let server = Integrated {
             flags,
-            thread: Some(std::thread::spawn(move || {
+            thread: Some(horizon_platform::thread::spawn(move || {
                 *saving.failure.lock().unwrap() = Some("disk write failed".into());
             })),
             tasks,

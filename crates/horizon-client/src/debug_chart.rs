@@ -8,10 +8,8 @@ use crate::{
     hud_layout::{GuiDraw, argb, fill},
     text::Text,
 };
-use std::{
-    collections::VecDeque,
-    time::{Duration, Instant},
-};
+use horizon_platform::time::{Duration, Instant};
+use std::collections::VecDeque;
 
 /// `LocalSampleLogger.CAPACITY`.
 pub const CAPACITY: usize = 240;

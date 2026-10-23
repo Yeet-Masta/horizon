@@ -23,12 +23,9 @@ use horizon_client::{
     save::SaveDir, streaming::Streaming, tick_chunk_membership::TickChunkMembership,
     ticket_levels::ChunkTickets, world::World,
 };
+use horizon_platform::time::{Duration, Instant};
 use horizon_world::level::{LevelEvent, Ticks};
-use std::{
-    collections::HashMap,
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::{collections::HashMap, sync::Arc};
 
 /// Server ticks a level other than the Overworld stays loaded with no player
 /// in it, before it is saved and closed (vanilla unloads a level's chunks
@@ -365,7 +362,7 @@ impl Game<'_> {
         }
         *next += self.clock.tick_duration();
         if *next > now {
-            std::thread::sleep(*next - now);
+            horizon_platform::thread::sleep(*next - now);
         } else if now - *next > Duration::from_secs(2) {
             *next = now;
         }

@@ -2,6 +2,7 @@
 //! the parts of them commands use: `.mcfunction` functions (with macros and
 //! line continuation), function tags and predicates.
 use crate::zip::Zip;
+use horizon_platform::fs::PathExt as _;
 use horizon_world::nbt::Tag;
 use std::{
     collections::BTreeMap,
@@ -42,7 +43,7 @@ impl DataPack {
         let Source::Dir(root) = &self.source else {
             return self.list("data/");
         };
-        let Ok(entries) = std::fs::read_dir(root.join("data")) else {
+        let Ok(entries) = horizon_platform::fs::read_dir(root.join("data")) else {
             return Vec::new();
         };
         let mut namespaces: Vec<_> = entries.flatten().map(|e| e.path()).collect();
@@ -58,7 +59,7 @@ impl DataPack {
     fn read(&self, path: &str) -> Option<Vec<u8>> {
         match &self.source {
             Source::Zip(z) => z.read(path).ok(),
-            Source::Dir(root) => std::fs::read(root.join(path)).ok(),
+            Source::Dir(root) => horizon_platform::fs::read(root.join(path)).ok(),
         }
     }
     /// The `description` of `pack.mcmeta`, as text.
@@ -74,14 +75,14 @@ impl DataPack {
     }
 }
 fn walk(root: &Path, dir: &Path, out: &mut Vec<String>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
+    let Ok(entries) = horizon_platform::fs::read_dir(dir) else {
         return;
     };
     let mut entries: Vec<_> = entries.flatten().collect();
-    entries.sort_by_key(std::fs::DirEntry::file_name);
+    entries.sort_by_key(horizon_platform::fs::DirEntry::file_name);
     for e in entries {
         let p = e.path();
-        if p.is_dir() {
+        if p.fs_is_dir() {
             walk(root, &p, out);
         } else if let Ok(rel) = p.strip_prefix(root) {
             out.push(rel.to_string_lossy().replace('\\', "/"));
@@ -99,14 +100,14 @@ impl DataPack {
 }
 /// The packs in `<world>/datapacks`, sorted by name.
 pub fn discover(world: &Path) -> Vec<DataPack> {
-    let Ok(entries) = std::fs::read_dir(world.join("datapacks")) else {
+    let Ok(entries) = horizon_platform::fs::read_dir(world.join("datapacks")) else {
         return Vec::new();
     };
     let mut packs = Vec::new();
     for e in entries.flatten() {
         let name = e.file_name().to_string_lossy().into_owned();
         let path = e.path();
-        if path.is_dir() && path.join("pack.mcmeta").exists() {
+        if path.fs_is_dir() && path.join("pack.mcmeta").fs_exists() {
             packs.push(DataPack {
                 id: format!("file/{name}"),
                 source: Source::Dir(path),
@@ -483,13 +484,14 @@ mod tests {
 
     #[test]
     fn packs_provide_functions_and_tags() {
-        let dir = std::env::temp_dir().join(format!("hz-datapack-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir =
+            horizon_platform::env::temp_dir().join(format!("hz-datapack-{}", std::process::id()));
+        let _ = horizon_platform::fs::remove_dir_all(&dir);
         let pack = dir.join("datapacks/mypack");
         let write = |p: &str, t: &str| {
             let path = pack.join(p);
-            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::write(path, t).unwrap();
+            horizon_platform::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            horizon_platform::fs::write(path, t).unwrap();
         };
         write(
             "pack.mcmeta",
@@ -524,13 +526,14 @@ mod tests {
             ["mine:a", "mine:sub/b"]
         );
         assert!(store.predicates.contains_key("mine:p"));
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = horizon_platform::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn folder_packs_list_the_needed_kinds_in_walk_order() {
-        let dir = std::env::temp_dir().join(format!("hz-datapack-kinds-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = horizon_platform::env::temp_dir()
+            .join(format!("hz-datapack-kinds-{}", std::process::id()));
+        let _ = horizon_platform::fs::remove_dir_all(&dir);
         let pack = dir.join("datapacks/p");
         let files = [
             "data/b/function/z.mcfunction",
@@ -548,10 +551,10 @@ mod tests {
         ];
         for f in files {
             let path = pack.join(f);
-            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::write(path, "{}").unwrap();
+            horizon_platform::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            horizon_platform::fs::write(path, "{}").unwrap();
         }
-        std::fs::write(pack.join("pack.mcmeta"), "{}").unwrap();
+        horizon_platform::fs::write(pack.join("pack.mcmeta"), "{}").unwrap();
         let p = DataPack::builtin(&pack);
         let kinds = ["function", "item_modifier", "predicate", "tags/function"];
         let wanted: Vec<String> = p
@@ -564,6 +567,6 @@ mod tests {
             .collect();
         assert_eq!(wanted.len(), 7);
         assert_eq!(p.list_kinds(&kinds), wanted);
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = horizon_platform::fs::remove_dir_all(&dir);
     }
 }

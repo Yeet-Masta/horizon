@@ -1,0 +1,9 @@
+# The web build (web/README.md). getrandom draws from the browser's
+# crypto.getRandomValues through horizon-platform.
+[target.wasm32-unknown-unknown]
+rustflags = ['--cfg', 'getrandom_backend="custom"']
+
+# wasm64 is a nightly target built with -Zbuild-std; zlib-rs's wasm64 SIMD
+# needs the unstable `simd_wasm64` feature there.
+[target.wasm64-unknown-unknown]
+rustflags = ['--cfg', 'getrandom_backend="custom"', '-Zcrate-attr=feature(simd_wasm64)', '-Aunused_features']

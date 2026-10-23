@@ -989,7 +989,7 @@ impl Game<'_> {
             .options
             .resources
             .join(format!("data/{ns}/tags/worldgen/biome/{path}.json"));
-        let Ok(bytes) = std::fs::read(file) else {
+        let Ok(bytes) = horizon_platform::fs::read(file) else {
             return self.res.mob_data().biome_has(tag, biome);
         };
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or_default();

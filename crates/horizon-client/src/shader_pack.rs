@@ -3,12 +3,12 @@
 //! player's option values, puts the prelude before each stage's source and
 //! has naga parse and validate it, so a broken pack is reported (file, line,
 //! column) and never reaches the GPU.
+use horizon_platform::fs::PathExt as _;
+use horizon_platform::{fs, time::SystemTime};
 use serde::Deserialize;
 use std::{
     collections::BTreeMap,
-    fs,
     path::{Path, PathBuf},
-    time::SystemTime,
 };
 
 /// The stage and uniform contract this build provides.
@@ -158,7 +158,7 @@ pub fn list(dir: &Path) -> Vec<(String, Result<Info, String>)> {
         .filter_map(|e| {
             let id = e.file_name().to_string_lossy().into_owned();
             let path = e.path();
-            if path.join("pack.toml").is_file() {
+            if path.join("pack.toml").fs_is_file() {
                 Some((id, manifest(&path).map(|m| m.pack)))
             } else if crate::java_pack::is_java_pack(&path) {
                 Some((id.clone(), Ok(java_info(id))))
@@ -174,7 +174,9 @@ pub fn list(dir: &Path) -> Vec<(String, Result<Info, String>)> {
 /// `shaderpacks/` beside `options.txt` (the game's working folder: the game
 /// home, not the launcher's version folder).
 pub fn folder() -> PathBuf {
-    std::env::current_dir().unwrap_or_default().join(DIR)
+    horizon_platform::env::current_dir()
+        .unwrap_or_default()
+        .join(DIR)
 }
 
 /// `shaderpacks/` and its packs as the Shader Packs page lists them, read
@@ -184,20 +186,20 @@ pub fn folder() -> PathBuf {
 pub struct Folder {
     pub dir: PathBuf,
     pub packs: Vec<(String, Result<Info, String>)>,
-    read: Option<std::time::Instant>,
+    read: Option<horizon_platform::time::Instant>,
 }
 
 impl Folder {
     pub fn poll(&mut self, dir: PathBuf) {
         let fresh = self
             .read
-            .is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(1));
+            .is_some_and(|t| t.elapsed() < horizon_platform::time::Duration::from_secs(1));
         if fresh && self.dir == dir {
             return;
         }
         self.packs = list(&dir);
         self.dir = dir;
-        self.read = Some(std::time::Instant::now());
+        self.read = Some(horizon_platform::time::Instant::now());
     }
 }
 
@@ -296,7 +298,7 @@ impl ShaderPack {
         vendor: &str,
         renderer: &str,
     ) -> Result<Self, String> {
-        if path.join("pack.toml").is_file() || !crate::java_pack::is_java_pack(path) {
+        if path.join("pack.toml").fs_is_file() || !crate::java_pack::is_java_pack(path) {
             return Self::load(path, values);
         }
         let stamp = Stamp::of(path);
@@ -429,8 +431,8 @@ mod tests {
     fn scratch() -> PathBuf {
         static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let dir =
-            std::env::temp_dir().join(format!("horizon-shader-pack-{}-{n}", std::process::id()));
+        let dir = horizon_platform::env::temp_dir()
+            .join(format!("horizon-shader-pack-{}-{n}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir

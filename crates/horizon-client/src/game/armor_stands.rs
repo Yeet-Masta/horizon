@@ -55,14 +55,15 @@ impl ArmorStandAssets {
         }
         let mut equipment = HashMap::new();
         let mut trim_overrides = HashMap::new();
-        if let Ok(entries) = std::fs::read_dir(root.join("assets/minecraft/equipment")) {
+        if let Ok(entries) = horizon_platform::fs::read_dir(root.join("assets/minecraft/equipment"))
+        {
             for e in entries.flatten() {
                 let path = e.path();
                 let Some(name) = path.file_stem().and_then(|s| s.to_str()) else {
                     continue;
                 };
-                let Ok(v) =
-                    std::fs::read(&path).map(|b| serde_json::from_slice::<serde_json::Value>(&b))
+                let Ok(v) = horizon_platform::fs::read(&path)
+                    .map(|b| serde_json::from_slice::<serde_json::Value>(&b))
                 else {
                     continue;
                 };

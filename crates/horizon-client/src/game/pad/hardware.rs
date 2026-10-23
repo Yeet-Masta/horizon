@@ -6,8 +6,8 @@ use super::{
     Pads,
 };
 use horizon_client::gamepad::{self, Button, GlyphStyle, PadState, Rumble, TriggerFeel};
+use horizon_platform::time::{Duration, Instant};
 use serde_json::{Value, json};
-use std::time::{Duration, Instant};
 
 /// The controllers gilrs sees and the DualSense's output.
 #[derive(Default)]
@@ -301,8 +301,8 @@ impl Game<'_> {
             self.pad.devices.haptics_tried = false;
         } else if !self.pad.devices.haptics_tried {
             self.pad.devices.haptics_tried = true;
-            if std::env::var_os("HORIZON_DUALSENSE_HAPTICS").is_some_and(|v| v == "1")
-                && std::env::var_os("HORIZON_NO_AUDIO").is_none()
+            if horizon_platform::env::var_os("HORIZON_DUALSENSE_HAPTICS").is_some_and(|v| v == "1")
+                && horizon_platform::env::var_os("HORIZON_NO_AUDIO").is_none()
             {
                 self.pad.devices.haptics = horizon_dualsense::haptics::Haptics::open();
             }

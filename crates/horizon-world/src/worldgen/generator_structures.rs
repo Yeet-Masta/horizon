@@ -491,7 +491,7 @@ mod tests {
                 (2, ring_searches(seed.wrapping_add(1), 20, 5, 40)),
             ]);
             let sets = [&preferred, &none, &preferred];
-            std::thread::scope(|scope| {
+            horizon_platform::thread::scope(|scope| {
                 for _ in 0..4 {
                     scope.spawn(|| work.help(|set| sets[set], &mut { biomes }));
                 }

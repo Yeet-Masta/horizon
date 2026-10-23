@@ -25,8 +25,9 @@ use horizon_core::{
     geometry::Aabb,
     random::{LegacyRandom, RandomSource},
 };
+use horizon_platform::fs;
 use serde_json::Value;
-use std::{fs, path::Path, sync::Arc};
+use std::{path::Path, sync::Arc};
 
 /// `EntitySpawnReason`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

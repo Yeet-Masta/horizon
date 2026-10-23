@@ -14,8 +14,8 @@ use horizon_client::{
     ui,
 };
 use horizon_core::position::BlockPos;
+use horizon_platform::time::Instant;
 use horizon_world::level::flags as level_flags;
-use std::time::Instant;
 use winit::{
     event::{ElementState, KeyEvent},
     keyboard::{KeyCode, PhysicalKey},

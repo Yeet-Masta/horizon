@@ -19,7 +19,7 @@ impl Game<'_> {
         static TRANSFORMS: OnceLock<Option<StateTransforms>> = OnceLock::new();
         TRANSFORMS
             .get_or_init(|| {
-                let json = std::fs::read_to_string(
+                let json = horizon_platform::fs::read_to_string(
                     self.options
                         .resources
                         .join("worldgen/blocks/structure-blocks.json"),
@@ -47,7 +47,7 @@ impl Game<'_> {
         ];
         let transforms = self.state_transforms()?;
         for file in candidates {
-            let Ok(bytes) = std::fs::read(&file) else {
+            let Ok(bytes) = horizon_platform::fs::read(&file) else {
                 continue;
             };
             let Ok(raw) = Compression::Gzip.decode(&bytes, 1 << 28) else {
@@ -216,8 +216,8 @@ impl Game<'_> {
             .state_transforms()
             .ok_or_else(|| err("commands.place.template.invalid", &[&id]))?;
         let mut random = LegacyRandom::new(if seed == 0 {
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
+            horizon_platform::time::SystemTime::now()
+                .duration_since(horizon_platform::time::UNIX_EPOCH)
                 .map_or(1, |d| d.as_millis() as i64)
         } else {
             seed

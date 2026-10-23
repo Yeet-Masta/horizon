@@ -259,7 +259,7 @@ fn weather_double_plus_float(base: vec2<u32>, delta: f32) -> f32 {
     }
     let e = max(be, de);
     // Leading significand bit at 61, with room for addition and guard bits.
-    var a = vec2(base.x << 9u, ((base.y & 0xfffffu) | 0x100000u) << 9u | (base.x >> 23u));
+    var a = vec2(base.x << 9u, (((base.y & 0xfffffu) | 0x100000u) << 9u) | (base.x >> 23u));
     var b = vec2(0u, dm << 6u);
     a = weather_shr_jam(a, u32(e - be));
     b = weather_shr_jam(b, u32(e - de));

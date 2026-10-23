@@ -6,8 +6,9 @@ use crate::{
     containers::Providers,
     items::{ItemStack, Items},
 };
+use horizon_platform::fs;
 use serde_json::Value;
-use std::{collections::HashSet, fs, path::Path, sync::Arc};
+use std::{collections::HashSet, path::Path, sync::Arc};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Category {

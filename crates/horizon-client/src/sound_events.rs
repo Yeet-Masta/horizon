@@ -5,8 +5,10 @@
 //! `WeighedSoundEvents.getSound` drawing `nextInt(totalWeight)` from the sound
 //! instance's random.
 use horizon_core::random::RandomSource;
+use horizon_platform::fs;
+use horizon_platform::fs::PathExt as _;
 use serde_json::Value;
-use std::{collections::HashMap, fs, path::Path};
+use std::{collections::HashMap, path::Path};
 
 /// `SoundManager.EMPTY_SOUND_LOCATION`.
 pub const EMPTY: &str = "minecraft:empty";
@@ -241,7 +243,7 @@ impl SoundRegistry {
             let Ok(text) = fs::read(assets.join(&namespace).join("sounds.json")) else {
                 continue;
             };
-            let exists = |ns: &str, path: &str| assets.join(ns).join(path).is_file();
+            let exists = |ns: &str, path: &str| assets.join(ns).join(path).fs_is_file();
             registry.add_file(&namespace, &text, &exists);
         }
         registry

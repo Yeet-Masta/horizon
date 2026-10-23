@@ -12,6 +12,7 @@ use crate::{
     zip::Zip,
 };
 use ab_glyph::{Font as _, ScaleFont as _};
+use horizon_platform::fs::PathExt as _;
 use std::{
     cell::RefCell,
     collections::HashMap,
@@ -191,7 +192,7 @@ fn parse_hex(text: &[u8], out: &mut HashMap<u32, HexGlyph>) {
     }
 }
 fn read_json(root: &Path, path: &str) -> Option<serde_json::Value> {
-    serde_json::from_slice(&std::fs::read(root.join(path)).ok()?).ok()
+    serde_json::from_slice(&horizon_platform::fs::read(root.join(path)).ok()?).ok()
 }
 fn resource_path(id: &str, folder: &str, ext: &str) -> String {
     let (ns, path) = id.split_once(':').unwrap_or(("minecraft", id));
@@ -353,7 +354,7 @@ fn load_bitmap(
 /// `font/`, its Unicode characters but the `skip` ones.
 fn load_true_type(root: &Path, p: &serde_json::Value) -> Option<TrueType> {
     let file = p["file"].as_str()?;
-    let data = std::fs::read(root.join(resource_path(file, "font", "")))
+    let data = horizon_platform::fs::read(root.join(resource_path(file, "font", "")))
         .map_err(|e| log::warn!("font file {file}: {e}"))
         .ok()?;
     // FT_Get_Font_Format must say TrueType: CFF outlines ("OTTO") are refused.
@@ -496,10 +497,14 @@ fn load_hex(root: &Path, p: &serde_json::Value) -> HashMap<u32, HexGlyph> {
 /// The ids of every font definition (`font/**/*.json` of each namespace).
 fn font_ids(root: &Path) -> Vec<String> {
     fn walk(dir: &Path, prefix: &str, out: &mut Vec<String>) {
-        for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        for entry in horizon_platform::fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
             let path = entry.path();
             let name = entry.file_name().to_string_lossy().into_owned();
-            if path.is_dir() {
+            if path.fs_is_dir() {
                 walk(&path, &format!("{prefix}{name}/"), out);
             } else if let Some(stem) = name.strip_suffix(".json") {
                 out.push(format!("{prefix}{stem}"));
@@ -507,7 +512,7 @@ fn font_ids(root: &Path) -> Vec<String> {
         }
     }
     let mut ids = Vec::new();
-    for ns in std::fs::read_dir(root.join("assets"))
+    for ns in horizon_platform::fs::read_dir(root.join("assets"))
         .into_iter()
         .flatten()
         .flatten()
@@ -594,8 +599,8 @@ impl Font {
                     pending: Vec::new(),
                 },
                 random: horizon_core::random::LegacyRandom::new(
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
+                    horizon_platform::time::SystemTime::now()
+                        .duration_since(horizon_platform::time::UNIX_EPOCH)
                         .map_or(0, |d| d.as_nanos() as i64),
                 ),
             }),
@@ -1066,12 +1071,13 @@ mod tests {
 
     /// A resource root with these font definitions and files.
     fn root(name: &str, files: &[(&str, &[u8])]) -> PathBuf {
-        let root = std::env::temp_dir().join(format!("horizon-font-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
+        let root = horizon_platform::env::temp_dir()
+            .join(format!("horizon-font-{name}-{}", std::process::id()));
+        let _ = horizon_platform::fs::remove_dir_all(&root);
         for (path, bytes) in files {
             let path = root.join(path);
-            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::write(path, bytes).unwrap();
+            horizon_platform::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            horizon_platform::fs::write(path, bytes).unwrap();
         }
         root
     }
@@ -1128,7 +1134,7 @@ mod tests {
             ],
         );
         let font = load(&root);
-        let _ = std::fs::remove_dir_all(&root);
+        let _ = horizon_platform::fs::remove_dir_all(&root);
         let a = font.glyph('A');
         let rect = a.rect.expect("A is drawn");
         // Oversampled 2x: the bitmap is twice the glyph's GUI size.
@@ -1169,7 +1175,7 @@ mod tests {
             ],
         );
         let font = load(&root);
-        let _ = std::fs::remove_dir_all(&root);
+        let _ = horizon_platform::fs::remove_dir_all(&root);
         // The sheet is not in this atlas: glyphs are copied in when first drawn.
         assert_eq!(font.glyph('a').advance, 3.0);
         assert_eq!(font.glyph('b').advance, 7.0);
@@ -1208,7 +1214,7 @@ mod tests {
             ],
         );
         let mut font = load(&root);
-        let _ = std::fs::remove_dir_all(&root);
+        let _ = horizon_platform::fs::remove_dir_all(&root);
         assert_eq!(font.glyph('a').advance, 5.0);
         font.uniform = true;
         font.reset_cache();

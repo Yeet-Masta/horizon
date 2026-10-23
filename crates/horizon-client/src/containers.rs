@@ -5,8 +5,10 @@ use crate::{
     crafting::Recipes,
     items::{ItemStack, Items},
 };
+use horizon_platform::fs;
+use horizon_platform::fs::PathExt as _;
 use serde_json::Value;
-use std::{collections::HashMap, fs, path::Path, sync::Arc};
+use std::{collections::HashMap, path::Path, sync::Arc};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FurnaceKind {
@@ -375,7 +377,7 @@ fn load_dir(dir: &Path, prefix: &str, out: &mut HashMap<String, Value>) {
             .and_then(|s| s.to_str())
             .unwrap_or("")
             .to_owned();
-        if p.is_dir() {
+        if p.fs_is_dir() {
             load_dir(&p, &format!("{prefix}{name}/"), out);
         } else if let Ok(bytes) = fs::read(&p)
             && let Ok(v) = serde_json::from_slice(&bytes)

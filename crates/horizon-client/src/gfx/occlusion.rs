@@ -449,9 +449,13 @@ struct Worker {
 
 impl Worker {
     fn spawn(min_y: i32, sections: i32) -> Option<Self> {
+        // The web build searches on the render thread, its only one.
+        if horizon_platform::WEB {
+            return None;
+        }
         let (jobs, job_rx) = mpsc::channel::<Job>();
         let (done_tx, done) = mpsc::channel();
-        std::thread::Builder::new()
+        horizon_platform::thread::Builder::new()
             .name("occlusion".into())
             .spawn(move || {
                 let mut columns = Columns::new(min_y, sections);
@@ -1187,7 +1191,7 @@ mod tests {
         let mut graph = Graph::default();
         let mut best = f64::MAX;
         for _ in 0..12 {
-            let started = std::time::Instant::now();
+            let started = horizon_platform::time::Instant::now();
             graph.search(&o.columns, camera, 34, &mut vis, &mut queue);
             best = best.min(started.elapsed().as_secs_f64() * 1000.0);
         }

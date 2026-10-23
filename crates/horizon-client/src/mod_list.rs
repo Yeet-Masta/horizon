@@ -1,7 +1,9 @@
 //! Which of the installed Horizon mods are on (`docs/mods.md`), kept in
 //! `horizon-mods.txt` beside `options.txt` as `mod.<id>:true` lines. Every
 //! mod is off until the player turns it on in Options > Mods.
-use std::{collections::BTreeSet, fs, path::Path};
+use horizon_platform::fs;
+use horizon_platform::fs::PathExt as _;
+use std::{collections::BTreeSet, path::Path};
 
 pub const FILE: &str = "horizon-mods.txt";
 /// The folder holding `.hmod` files, beside `options.txt`.
@@ -55,7 +57,7 @@ impl ModList {
     }
     pub fn save(&self, dir: &Path) {
         let path = dir.join(FILE);
-        if self.enabled.is_empty() && !path.exists() {
+        if self.enabled.is_empty() && !path.fs_exists() {
             return;
         }
         let _ = fs::write(path, self.serialize());

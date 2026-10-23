@@ -10,7 +10,8 @@ use crate::{
     sprites::SpriteAnimation,
 };
 use glam::{DVec3, Mat4, Vec3, Vec4};
-use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Instant};
+use horizon_platform::time::Instant;
+use std::{collections::HashMap, path::PathBuf, sync::Arc};
 use wgpu::util::DeviceExt;
 use winit::window::Window;
 
@@ -303,9 +304,9 @@ pub struct Renderer {
     pub lightmap_pixels: [u8; 16 * 16 * 4],
     /// Time the last `render` spent blocked on the GPU or the display
     /// (acquiring, presenting, offscreen pacing), excluded from CPU time.
-    pub last_wait: std::time::Duration,
+    pub last_wait: horizon_platform::time::Duration,
     /// CPU time of the last `render`, waits excluded.
-    pub last_encode: std::time::Duration,
+    pub last_encode: horizon_platform::time::Duration,
     window: Arc<Window>,
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
@@ -484,11 +485,19 @@ pub(crate) const SPRITE_SPLIT: u32 = 2048;
 /// [`SPRITE_SPLIT`], or a smaller split from `HORIZON_SPRITE_SPLIT` (dev
 /// only: vanilla's sprites drawn from several arrays must look the same).
 fn sprite_split() -> u32 {
-    std::env::var("HORIZON_SPRITE_SPLIT")
+    let split = horizon_platform::env::var("HORIZON_SPRITE_SPLIT")
         .ok()
         .and_then(|v| v.parse().ok())
         .filter(|&n| (1..=SPRITE_SPLIT).contains(&n))
-        .unwrap_or(SPRITE_SPLIT)
+        .unwrap_or(SPRITE_SPLIT);
+    // WebGPU promises only 256 layers: the web build splits at what its
+    // adapter has, opened before the textures are prepared.
+    #[cfg(target_family = "wasm")]
+    let split = match WEB_DEVICE.lock().unwrap().as_ref() {
+        Some(opened) => split.min(opened.1.limits().max_texture_array_layers.max(1)),
+        None => split,
+    };
+    split
 }
 /// Sprite arrays terrain.wgsl binds (`sprites`, `sprites_1`...).
 const SPRITE_ARRAYS: u32 = 8;
@@ -646,6 +655,8 @@ fn mip_chain(
 /// pass is also what passes each draw's first instance to shaders reading
 /// `instance_index`, and DirectX 12 is the fallback, where working matters
 /// more than CPU time.
+// Native backend choice; the web build has only WebGPU.
+#[cfg_attr(target_family = "wasm", allow(dead_code))]
 fn instance_descriptor(backends: wgpu::Backends) -> wgpu::InstanceDescriptor {
     let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
     descriptor.backends = backends.with_env();
@@ -664,6 +675,8 @@ fn instance_descriptor(backends: wgpu::Backends) -> wgpu::InstanceDescriptor {
 /// Vulkan has no adapter (no Vulkan driver) or no device. A native crash in
 /// the driver can't be caught in the game; the launcher switches the setting
 /// to DirectX 12 after one at the renderer's start (#746).
+// Native backend choice; the web build has only WebGPU.
+#[cfg_attr(target_family = "wasm", allow(dead_code))]
 fn backend_order(api: GraphicsApi, windows: bool, wgpu_backend: bool) -> Vec<wgpu::Backends> {
     if !windows || wgpu_backend {
         return vec![wgpu::Backends::default()];
@@ -674,6 +687,8 @@ fn backend_order(api: GraphicsApi, windows: bool, wgpu_backend: bool) -> Vec<wgp
         GraphicsApi::Dx12 => vec![wgpu::Backends::DX12],
     }
 }
+// Native backend choice; the web build has only WebGPU.
+#[cfg_attr(target_family = "wasm", allow(dead_code))]
 fn backends_name(backends: wgpu::Backends) -> &'static str {
     match backends {
         wgpu::Backends::VULKAN => "Vulkan",
@@ -745,9 +760,85 @@ fn surface_format(
     .or_else(|| formats.iter().copied().find(|f| !f.is_srgb()))
     .unwrap_or(default)
 }
+/// The web build's device: requesting one waits on the browser, which
+/// `Renderer::new` (blocked on where it is called) can't, so the page's start
+/// opens it ([`open_web_device`]) before the game does.
+#[cfg(target_family = "wasm")]
+#[allow(clippy::type_complexity)]
+static WEB_DEVICE: std::sync::Mutex<
+    Option<(wgpu::Instance, wgpu::Adapter, wgpu::Device, wgpu::Queue)>,
+> = std::sync::Mutex::new(None);
+/// Opens the browser's WebGPU device, with what `open_device` asks natively.
+#[cfg(target_family = "wasm")]
+pub async fn open_web_device() -> Result<()> {
+    let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
+    descriptor.backends = wgpu::Backends::BROWSER_WEBGPU;
+    let instance = wgpu::Instance::new(descriptor);
+    let adapter = instance
+        .request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            compatible_surface: None,
+            force_fallback_adapter: false,
+            ..Default::default()
+        })
+        .await
+        .map_err(|e| format!("{NO_GPU_DRIVER} ({e})"))?;
+    describe_adapter(&adapter);
+    let limits = adapter.limits();
+    let features = timing::GpuTimer::features(&adapter)
+        | cull::Cull::features(&adapter)
+        | (adapter.features()
+            & (wgpu::Features::INDIRECT_FIRST_INSTANCE | wgpu::Features::MAPPABLE_PRIMARY_BUFFERS));
+    startup_step(format_args!(
+        "requesting the device with features [{features}] and the adapter's limits \
+         (buffers up to {} bytes, storage bindings up to {} bytes, {} texture layers)",
+        limits.max_buffer_size,
+        limits.max_storage_buffer_binding_size,
+        limits.max_texture_array_layers,
+    ));
+    let (device, queue) = adapter
+        .request_device(&wgpu::DeviceDescriptor {
+            label: Some("Horizon device"),
+            required_features: features,
+            required_limits: limits,
+            ..Default::default()
+        })
+        .await
+        .map_err(|e| format!("{NO_GPU_DRIVER} (device: {e})"))?;
+    *WEB_DEVICE.lock().unwrap() = Some((instance, adapter, device, queue));
+    Ok(())
+}
+/// The device [`open_web_device`] opened, and a surface on the window's canvas.
+#[cfg(target_family = "wasm")]
+async fn open_device(
+    window: &Arc<Window>,
+    offscreen: bool,
+    _api: GraphicsApi,
+    layers: u32,
+) -> Result<Opened> {
+    let (instance, adapter, device, queue) = WEB_DEVICE
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or("the WebGPU device is not open")?;
+    check_layers(&adapter.limits(), layers)?;
+    let surface = if offscreen {
+        None
+    } else {
+        Some(instance.create_surface(window.clone())?)
+    };
+    Ok(Opened {
+        instance,
+        surface,
+        adapter,
+        device,
+        queue,
+    })
+}
 /// Opens a device on the first of `backend_order`'s backends that gives one.
 /// Offscreen rendering needs no surface, so it can use a GPU the window's
 /// display cannot present from (a headless compositor).
+#[cfg(not(target_family = "wasm"))]
 async fn open_device(
     window: &Arc<Window>,
     offscreen: bool,
@@ -757,7 +848,7 @@ async fn open_device(
     let order = backend_order(
         api.with_env(),
         cfg!(windows),
-        std::env::var_os("WGPU_BACKEND").is_some(),
+        horizon_platform::env::var_os("WGPU_BACKEND").is_some(),
     );
     let mut failures = Vec::new();
     for (attempt, backends) in order.iter().copied().enumerate() {
@@ -844,7 +935,10 @@ const NO_GPU_DRIVER: &str = "No graphics driver with Vulkan or DirectX 12 found:
      start the game again";
 #[cfg(target_os = "macos")]
 const NO_GPU_DRIVER: &str = "No Metal graphics device found";
-#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+#[cfg(target_family = "wasm")]
+const NO_GPU_DRIVER: &str = "No WebGPU adapter: Horizon's web build needs a browser with WebGPU \
+     (Chrome or Edge 113+, Firefox 141+ on Windows, Safari 26+) and hardware acceleration on";
+#[cfg(not(any(target_os = "windows", target_os = "macos", target_family = "wasm")))]
 const NO_GPU_DRIVER: &str = "No Vulkan graphics driver found: Horizon needs the Vulkan loader \
      (libvulkan.so.1) and a Vulkan driver for your GPU (Mesa's, or NVIDIA's)";
 /// Logs a step of the renderer's start, for a native crash in the graphics
@@ -2113,7 +2207,7 @@ impl Renderer {
             .contains(wgpu::Features::INDIRECT_FIRST_INSTANCE);
         // HORIZON_GPU_CULL=0 turns occlusion culling off, `all` culls every
         // frame however little it hides (A/B checks).
-        let cull_env = std::env::var("HORIZON_GPU_CULL");
+        let cull_env = horizon_platform::env::var("HORIZON_GPU_CULL");
         let cull = (cull_env.as_deref() != Ok("0") && cull::Cull::supported(&adapter, &device))
             .then(|| {
                 let mut cull = cull::Cull::new(&device, config.format.remove_srgb_suffix());
@@ -2152,8 +2246,8 @@ impl Renderer {
             gpu_timer,
             gpu_times: Vec::new(),
             lightmap_pixels: [0; 16 * 16 * 4],
-            last_wait: std::time::Duration::ZERO,
-            last_encode: std::time::Duration::ZERO,
+            last_wait: horizon_platform::time::Duration::ZERO,
+            last_encode: horizon_platform::time::Duration::ZERO,
             window,
             device,
             queue,
@@ -4071,7 +4165,7 @@ impl Renderer {
                 let index = self.in_flight.pop_front();
                 let _ = self.device.poll(wgpu::PollType::Wait {
                     submission_index: index,
-                    timeout: Some(std::time::Duration::from_secs(5)),
+                    timeout: Some(horizon_platform::time::Duration::from_secs(5)),
                 });
             }
         }
@@ -4155,7 +4249,7 @@ impl Renderer {
         }
         buffer.unmap();
         let mut encoder = png::Encoder::new(
-            std::io::BufWriter::new(std::fs::File::create(path)?),
+            std::io::BufWriter::new(horizon_platform::fs::File::create(path)?),
             width,
             height,
         );
@@ -4389,7 +4483,7 @@ mod tests {
     #[test]
     fn shaders_translate_to_hlsl_for_directx_12() {
         fn wgsl_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
-            for entry in std::fs::read_dir(dir).unwrap() {
+            for entry in horizon_platform::fs::read_dir(dir).unwrap() {
                 let path = entry.unwrap().path();
                 if path.is_dir() {
                     wgsl_files(&path, out);
@@ -4405,7 +4499,7 @@ mod tests {
         );
         assert!(files.len() >= 10, "{files:?}");
         for path in files {
-            let text = std::fs::read_to_string(&path).unwrap();
+            let text = horizon_platform::fs::read_to_string(&path).unwrap();
             // entity.wgsl comes after the overlay's constants (entity_shader).
             let module = naga::front::wgsl::parse_str(&text)
                 .or_else(|_| {
@@ -4506,8 +4600,8 @@ mod tests {
                 .flags
                 .contains(wgpu::InstanceFlags::VALIDATION_INDIRECT_CALL)
         };
-        if std::env::var_os("WGPU_VALIDATION_INDIRECT_CALL").is_none()
-            && std::env::var_os("WGPU_BACKEND").is_none()
+        if horizon_platform::env::var_os("WGPU_VALIDATION_INDIRECT_CALL").is_none()
+            && horizon_platform::env::var_os("WGPU_BACKEND").is_none()
         {
             assert_eq!(validated(wgpu::Backends::default()), cfg!(debug_assertions));
             assert_eq!(validated(wgpu::Backends::VULKAN), cfg!(debug_assertions));

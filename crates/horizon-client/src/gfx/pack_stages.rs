@@ -51,7 +51,7 @@ pub struct PackStages {
     /// `world_post`'s bindings of the last stage's output.
     output: Option<wgpu::BindGroup>,
     world_size: [u32; 2],
-    started: std::time::Instant,
+    started: horizon_platform::time::Instant,
     frames: u32,
 }
 
@@ -160,7 +160,7 @@ impl PackStages {
                 }
             })
             .collect();
-        if let Some(error) = pollster::block_on(scope.pop()) {
+        if let Some(error) = horizon_platform::block_on_or(scope.pop(), None) {
             return Err(error.to_string());
         }
         let sampler = |filter| {
@@ -181,7 +181,7 @@ impl PackStages {
             targets: Vec::new(),
             output: None,
             world_size: [0, 0],
-            started: std::time::Instant::now(),
+            started: horizon_platform::time::Instant::now(),
             frames: 0,
         })
     }

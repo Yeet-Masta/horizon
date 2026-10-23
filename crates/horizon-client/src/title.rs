@@ -6,6 +6,7 @@ use crate::{
     save::Level,
     text::{Text, format_translation},
 };
+use horizon_platform::fs::PathExt as _;
 use std::path::{Path, PathBuf};
 use std::{
     cell::{Cell, RefCell},
@@ -67,7 +68,7 @@ pub struct WorldEntry {
     pub folder: String,
     pub name: String,
     pub creative: bool,
-    pub modified: std::time::SystemTime,
+    pub modified: horizon_platform::time::SystemTime,
     pub commands: bool,
     pub version: String,
 }
@@ -128,7 +129,7 @@ pub struct Title {
     /// Direct Connection's address, synchronized with `options.txt`'s `lastServer`.
     pub last_server: String,
     pub saves: PathBuf,
-    pub started: std::time::Instant,
+    pub started: horizon_platform::time::Instant,
     search: String,
     search_focused: bool,
     /// The focused text field's cursor, selection and scroll.
@@ -140,10 +141,12 @@ pub struct Title {
     backup_shown: Cell<bool>,
     /// EditWorldScreen's `SystemToast` (`WORLD_BACKUP`) and its slide.
     toast: Option<(crate::toasts::Slide, BackupToast)>,
-    icons: RefCell<std::collections::HashMap<PathBuf, (std::time::SystemTime, Option<Vec<u8>>)>>,
+    icons: RefCell<
+        std::collections::HashMap<PathBuf, (horizon_platform::time::SystemTime, Option<Vec<u8>>)>,
+    >,
     splash: Option<String>,
     /// The saves listed for Home, re-read every couple of seconds.
-    recent: std::cell::RefCell<Option<(std::time::Instant, Vec<WorldEntry>)>>,
+    recent: std::cell::RefCell<Option<(horizon_platform::time::Instant, Vec<WorldEntry>)>>,
 }
 pub(crate) struct Button {
     x: f32,
@@ -168,20 +171,20 @@ pub fn parse_seed(text: &str) -> Option<i64> {
     }))
 }
 pub fn list_worlds(saves: &Path) -> Vec<WorldEntry> {
-    let mut worlds: Vec<WorldEntry> = std::fs::read_dir(saves)
+    let mut worlds: Vec<WorldEntry> = horizon_platform::fs::read_dir(saves)
         .into_iter()
         .flatten()
         .flatten()
         .filter_map(|e| {
             let path = e.path();
             let level = Level::read(&path)?;
-            let modified = std::fs::metadata(path.join("level.dat"))
+            let modified = horizon_platform::fs::metadata(path.join("level.dat"))
                 .and_then(|m| m.modified())
                 .ok()?;
             let data = crate::save::read_dat(&path.join("level.dat"))?;
             let data = data.get("Data")?;
             let modified = match data.get("LastPlayed") {
-                Some(horizon_world::nbt::Tag::Long(millis)) if *millis >= 0 => std::time::UNIX_EPOCH + std::time::Duration::from_millis(*millis as u64),
+                Some(horizon_world::nbt::Tag::Long(millis)) if *millis >= 0 => horizon_platform::time::UNIX_EPOCH + horizon_platform::time::Duration::from_millis(*millis as u64),
                 _ => modified,
             };
             Some(WorldEntry {
@@ -224,9 +227,9 @@ fn choose_splash(text: &str, index: usize, date: (u32, u32)) -> Option<String> {
 impl Title {
     pub fn new(saves: PathBuf, resources: &Path) -> Self {
         use chrono::Datelike;
-        let today = chrono::Local::now();
+        let today = crate::logging::local_now();
         let mode = Mode::Main;
-        let now = std::time::Instant::now();
+        let now = horizon_platform::time::Instant::now();
         Self {
             mode,
             last_server: String::new(),
@@ -243,10 +246,12 @@ impl Title {
             toast: None,
             icons: RefCell::new(std::collections::HashMap::new()),
             splash: choose_splash(
-                &std::fs::read_to_string(resources.join("assets/minecraft/texts/splashes.txt"))
-                    .unwrap_or_default(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
+                &horizon_platform::fs::read_to_string(
+                    resources.join("assets/minecraft/texts/splashes.txt"),
+                )
+                .unwrap_or_default(),
+                horizon_platform::time::SystemTime::now()
+                    .duration_since(horizon_platform::time::UNIX_EPOCH)
                     .unwrap_or_default()
                     .subsec_nanos() as usize,
                 (today.month(), today.day()),
@@ -448,7 +453,7 @@ impl Title {
         let (send, receive) = mpsc::channel();
         let saves = self.saves.clone();
         let folder = world.folder.clone();
-        std::thread::spawn(move || {
+        horizon_platform::thread::spawn(move || {
             let _ = send.send(world_management::backup(&saves, &folder).map_err(|e| e.to_string()));
         });
         self.backup_shown.set(false);
@@ -466,10 +471,12 @@ impl Title {
     ) {
         let path = self.saves.join(&world.folder).join("icon.png");
         let mut icons = self.icons.borrow_mut();
-        let pixels = if let Ok(modified) = std::fs::metadata(&path).and_then(|m| m.modified()) {
+        let pixels = if let Ok(modified) =
+            horizon_platform::fs::metadata(&path).and_then(|m| m.modified())
+        {
             let cached = icons
                 .entry(path.clone())
-                .or_insert_with(|| (std::time::UNIX_EPOCH, None));
+                .or_insert_with(|| (horizon_platform::time::UNIX_EPOCH, None));
             if cached.0 != modified {
                 *cached = (
                     modified,
@@ -514,7 +521,7 @@ impl Title {
             Some((at, worlds)) if at.elapsed().as_secs() < 2 => worlds.clone(),
             _ => {
                 let worlds = list_worlds(&self.saves);
-                *recent = Some((std::time::Instant::now(), worlds.clone()));
+                *recent = Some((horizon_platform::time::Instant::now(), worlds.clone()));
                 worlds
             }
         }
@@ -559,7 +566,7 @@ impl Title {
         // FileUtil.findAvailableName: append (n) until unused.
         let mut folder = base.clone();
         let mut n = 1;
-        while self.saves.join(&folder).exists() {
+        while self.saves.join(&folder).fs_exists() {
             folder = format!("{base} ({n})");
             n += 1;
         }
@@ -671,7 +678,7 @@ impl Title {
                         top + 64.0,
                         200.0,
                         &lang::get_or("selectWorld.edit.resetIcon", "Reset Icon"),
-                        self.saves.join(&world.folder).join("icon.png").is_file(),
+                        self.saves.join(&world.folder).join("icon.png").fs_is_file(),
                         30,
                     ),
                     b(
@@ -890,7 +897,8 @@ impl Title {
                         );
                     }
                     batch.text(atlas, &world.name, x + 35.0, y + 1.0, u32::MAX, true);
-                    let date: chrono::DateTime<chrono::Local> = world.modified.into();
+                    let date: chrono::DateTime<chrono::Local> =
+                        horizon_platform::time::to_std(world.modified).into();
                     let line = format!("{} ({})", world.folder, date.format("%d/%m/%Y, %H:%M"));
                     batch.text(
                         atlas,

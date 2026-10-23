@@ -985,10 +985,10 @@ mod item_column_tests {
             let at: Vec<(i32, i32, i32)> = (0..hoppers)
                 .map(|_| (next(160.0) as i32, 63, next(160.0) as i32))
                 .collect();
-            let t = std::time::Instant::now();
+            let t = horizon_platform::time::Instant::now();
             let a: Vec<bool> = at.iter().map(|&h| scan(&items, h)).collect();
             let before = t.elapsed().as_secs_f64() * 1e3;
-            let t = std::time::Instant::now();
+            let t = horizon_platform::time::Instant::now();
             let mut columns = ItemColumns::default();
             let b: Vec<bool> = at
                 .iter()

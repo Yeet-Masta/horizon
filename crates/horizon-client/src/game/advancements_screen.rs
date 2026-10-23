@@ -10,7 +10,8 @@ use horizon_client::{
     text::{Style, Text},
     ui,
 };
-use std::{sync::Arc, time::Instant};
+use horizon_platform::time::Instant;
+use std::sync::Arc;
 
 const INSIDE_W: i32 = 234;
 const INSIDE_H: i32 = 113;

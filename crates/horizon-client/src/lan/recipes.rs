@@ -3,6 +3,7 @@
 //! table slot and brewing stand slot accepts) and the stonecutter's recipes,
 //! read from the data pack's recipe files.
 use super::data::SyncData;
+use horizon_platform::fs::PathExt as _;
 use horizon_protocol::buf::Writer;
 use serde_json::Value;
 use std::{
@@ -53,13 +54,18 @@ fn ingredient(v: &Value) -> Option<Ingredient> {
 
 /// Every recipe file, by recipe id (the registry's order).
 pub(super) fn recipes(dir: &Path, prefix: &str, out: &mut BTreeMap<String, Value>) {
-    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+    for entry in horizon_platform::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+    {
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().into_owned();
-        if path.is_dir() {
+        if path.fs_is_dir() {
             recipes(&path, &format!("{prefix}{name}/"), out);
         } else if let Some(stem) = name.strip_suffix(".json")
-            && let Ok(v) = serde_json::from_slice(&std::fs::read(&path).unwrap_or_default())
+            && let Ok(v) =
+                serde_json::from_slice(&horizon_platform::fs::read(&path).unwrap_or_default())
         {
             out.insert(format!("minecraft:{prefix}{stem}"), v);
         }

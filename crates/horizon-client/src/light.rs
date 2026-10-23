@@ -1239,7 +1239,8 @@ mod tests {
     #[test]
     #[ignore = "microbenchmark; run with --ignored --nocapture"]
     fn benchmark_worker_light_results() {
-        use std::{hint::black_box, time::Instant};
+        use horizon_platform::time::Instant;
+        use std::hint::black_box;
         let mut fixture = Chunk::empty(0, 0);
         for (si, s) in fixture.sections.iter_mut().enumerate() {
             let section = Arc::make_mut(s);

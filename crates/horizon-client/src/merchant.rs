@@ -8,8 +8,10 @@ use crate::{
     items::{ItemStack, Items},
 };
 use horizon_core::random::{RandomSource, XoroshiroRandom, mix_stafford13, seed_from_hash};
+use horizon_platform::fs;
+use horizon_platform::fs::PathExt as _;
 use serde_json::Value;
-use std::{collections::HashMap, fs, path::Path, sync::Arc};
+use std::{collections::HashMap, path::Path, sync::Arc};
 
 /// `VillagerData.NEXT_LEVEL_XP_THRESHOLDS`.
 pub const LEVEL_XP: [i32; 5] = [0, 10, 70, 150, 250];
@@ -453,7 +455,7 @@ fn walk(dir: &Path, base: &Path, out: &mut HashMap<String, Value>) {
     };
     for e in entries.flatten() {
         let p = e.path();
-        if p.is_dir() {
+        if p.fs_is_dir() {
             walk(&p, base, out);
         } else if p.extension().is_some_and(|x| x == "json")
             && let Ok(rel) = p.strip_prefix(base)

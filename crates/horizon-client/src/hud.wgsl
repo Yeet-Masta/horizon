@@ -25,12 +25,15 @@ struct Out {
 }
 @fragment fn fs_main(in: Out) -> @location(0) vec4<f32> {
     // u >= 2: flat vertex colour masked by the texture's alpha (enchantment glint).
-    if in.uv.x >= 2.0 {
-        let m = textureSample(atlas, atlas_sampler, in.uv - vec2(2.0, 0.0)).a * in.color.a;
+    // One sample, before any branch: WebGPU samples only in uniform control flow.
+    let glint = in.uv.x >= 2.0;
+    let t = textureSample(atlas, atlas_sampler, select(in.uv, in.uv - vec2(2.0, 0.0), glint));
+    if glint {
+        let m = t.a * in.color.a;
         if m < 0.004 { discard; }
         return vec4(in.color.rgb, m);
     }
-    let c = textureSample(atlas, atlas_sampler, in.uv) * in.color;
+    let c = t * in.color;
     if c.a < 0.004 { discard; }
     return c;
 }

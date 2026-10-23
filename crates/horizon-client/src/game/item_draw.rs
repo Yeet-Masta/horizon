@@ -84,8 +84,8 @@ fn civil(days: i64) -> (i64, u32, u32) {
 /// `DateTimeFormatter.ofPattern(pattern).format(now)` for the month, day,
 /// year and time letters item models use (UTC: no time zone database).
 pub(super) fn local_time(pattern: &str) -> String {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    let secs = horizon_platform::time::SystemTime::now()
+        .duration_since(horizon_platform::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs() as i64);
     let (y, mo, d) = civil(secs.div_euclid(86_400));
     let s = secs.rem_euclid(86_400);

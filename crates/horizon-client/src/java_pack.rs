@@ -4,6 +4,7 @@
 //! `final`) to WGSL, and `gfx/java_stages.rs` runs them over Horizon's world
 //! as Iris runs them over its own. Geometry programs (`gbuffers_*`,
 //! `shadow`) don't run yet: the world is drawn by Horizon.
+use horizon_platform::fs::PathExt as _;
 use horizon_shaderpack::{
     JavaPack,
     pipeline::{Directives, Program, TargetSettings},
@@ -56,8 +57,8 @@ impl JavaPasses {
 
 /// A folder holding `shaders/`, or a zip.
 pub fn is_java_pack(path: &Path) -> bool {
-    path.join("shaders").is_dir()
-        || path.is_file()
+    path.join("shaders").fs_is_dir()
+        || path.fs_is_file()
             && path
                 .extension()
                 .is_some_and(|e| e.eq_ignore_ascii_case("zip"))
@@ -185,10 +186,10 @@ mod tests {
     /// of docs/shader-packs.md. Skipped when the variable isn't set.
     #[test]
     fn real_packs_load() {
-        let Some(dir) = std::env::var_os("HORIZON_TEST_SHADERPACKS") else {
+        let Some(dir) = horizon_platform::env::var_os("HORIZON_TEST_SHADERPACKS") else {
             return;
         };
-        let mut entries: Vec<_> = std::fs::read_dir(dir)
+        let mut entries: Vec<_> = horizon_platform::fs::read_dir(dir)
             .unwrap()
             .flatten()
             .map(|e| e.path())

@@ -240,7 +240,7 @@ pub struct BlockTableFile<'r> {
 impl<'r> BlockTableFile<'r> {
     /// [`Self::read`] of the file at `path`.
     pub fn open(path: &std::path::Path, registry: &'r BlockRegistry) -> io::Result<Self> {
-        let bytes = std::fs::read(path)?;
+        let bytes = horizon_platform::fs::read(path)?;
         Self::read(&bytes, registry).map_err(|e| invalid(format!("{}: {e}", path.display())))
     }
     /// Reads `bytes`, checking every `states` list of the root compound and

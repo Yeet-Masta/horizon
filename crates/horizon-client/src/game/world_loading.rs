@@ -1,5 +1,6 @@
 //! Prepare local worlds without blocking the window's event loop.
 use super::*;
+use horizon_platform::fs::PathExt as _;
 
 pub(super) struct WorldRequest {
     pub save_root: PathBuf,
@@ -54,8 +55,8 @@ impl WorldRequest {
             name: name.unwrap_or(&folder).to_owned(),
             // WorldOptions.randomSeed when no seed was given.
             seed: seed.unwrap_or_else(|| {
-                let t = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
+                let t = horizon_platform::time::SystemTime::now()
+                    .duration_since(horizon_platform::time::UNIX_EPOCH)
                     .map_or(0, |d| d.as_nanos() as u64);
                 (t ^ (t >> 29)).wrapping_mul(0x9E37_79B9_7F4A_7C15) as i64
             }),
@@ -109,7 +110,7 @@ impl WorldRequest {
         growth::install_live_features(res, pack, options);
 
         // Persist new metadata on the worker too, before publishing the world.
-        if !save_root.join("level.dat").exists() {
+        if !save_root.join("level.dat").fs_exists() {
             level.write(&save_root)?;
         }
         Ok(PreparedWorld {
@@ -138,7 +139,7 @@ impl WorldLoader {
         options: Options,
         settings: Settings,
     ) -> Result<Self> {
-        let handle = std::thread::Builder::new()
+        let handle = horizon_platform::thread::Builder::new()
             .name("World initialization".into())
             .spawn(move || {
                 request
@@ -156,7 +157,7 @@ impl WorldLoader {
     pub fn cancel(self) -> Self {
         Self {
             cancelled: true,
-            handle: std::thread::spawn(move || {
+            handle: horizon_platform::thread::spawn(move || {
                 drop(self.finish());
                 Err("world initialization cancelled".into())
             }),
@@ -264,7 +265,7 @@ mod tests {
         let (release, wait) = std::sync::mpsc::channel();
         let loader = WorldLoader {
             cancelled: false,
-            handle: std::thread::spawn(move || {
+            handle: horizon_platform::thread::spawn(move || {
                 wait.recv().unwrap();
                 Err("test world failure".into())
             }),
@@ -282,7 +283,7 @@ mod tests {
         let (release, wait) = std::sync::mpsc::channel();
         let loader = WorldLoader {
             cancelled: false,
-            handle: std::thread::spawn(move || {
+            handle: horizon_platform::thread::spawn(move || {
                 wait.recv().unwrap();
                 Err("cancelled test world".into())
             }),
@@ -301,7 +302,7 @@ mod tests {
     fn worker_panics_reach_the_client() {
         let loader = WorldLoader {
             cancelled: false,
-            handle: std::thread::spawn(|| panic!("broken world initialization")),
+            handle: horizon_platform::thread::spawn(|| panic!("broken world initialization")),
         };
         assert_eq!(
             loader.finish().err().unwrap().to_string(),

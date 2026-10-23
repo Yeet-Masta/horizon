@@ -7,8 +7,9 @@ use crate::{
     nbt::{self, Limits, NamedTag},
 };
 use horizon_core::position::ChunkPos;
+use horizon_platform::fs::PathExt as _;
+use horizon_platform::fs::{self, File, OpenOptions};
 use std::{
-    fs::{self, File, OpenOptions},
     io::{self, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
@@ -400,7 +401,7 @@ impl RegionWriter {
     pub fn create(destination: impl AsRef<Path>) -> io::Result<Self> {
         let destination = destination.as_ref().to_owned();
         let position = position_from_path(&destination)?;
-        if destination.try_exists()? {
+        if destination.fs_try_exists()? {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
                 "destination region already exists",
@@ -414,7 +415,7 @@ impl RegionWriter {
         let (temporary, file) = loop {
             let path = parent.join(format!(
                 ".horizon-{}-{}.tmp",
-                std::process::id(),
+                horizon_platform::process::id(),
                 NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
             ));
             match OpenOptions::new()

@@ -2,11 +2,19 @@
 #![forbid(unsafe_code)]
 mod game;
 
+#[cfg(not(target_family = "wasm"))]
 use horizon_client::{crash, logging};
 
+/// The web build: the page's start runs the game (`game::web`).
+#[cfg(target_family = "wasm")]
+fn main() {
+    game::web::start();
+}
+
+#[cfg(not(target_family = "wasm"))]
 fn main() {
     horizon_client::telemetry::mark_start();
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let args: Vec<String> = horizon_platform::env::args().skip(1).collect();
     let game_args = args.iter().take_while(|a| *a != "--dedicated");
     let help = game_args.clone().any(|a| a == "--help" || a == "-h");
     // The dedicated server logs in its own folder, as vanilla's does; the game in its home.

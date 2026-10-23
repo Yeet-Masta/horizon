@@ -14,8 +14,8 @@ use horizon_client::{
     text::Text,
 };
 use horizon_friends::{Host, HostConfig, HostEvent, PathMode, host::DEFAULT_PORT, reach, stun};
+use horizon_platform::time::{Duration, Instant};
 use horizon_protocol::{GAME_VERSION, PROTOCOL_VERSION};
-use std::time::{Duration, Instant};
 
 pub(super) struct Sharing {
     host: Host,
@@ -38,10 +38,10 @@ pub const HELP: &[&str] = &[
 
 /// `HORIZON_STUN_SERVERS`, else `friendsStun` in horizon.txt, else the defaults.
 fn stun_servers() -> Vec<String> {
-    if std::env::var_os("HORIZON_STUN_SERVERS").is_some() {
+    if horizon_platform::env::var_os("HORIZON_STUN_SERVERS").is_some() {
         return stun::servers_from_env();
     }
-    let dir = std::env::current_dir().unwrap_or_default();
+    let dir = horizon_platform::env::current_dir().unwrap_or_default();
     match horizon_client::ui_theme::preference(&dir, "friendsStun") {
         Some(list) => stun::parse_servers(&list),
         None => stun::servers_from_env(),
@@ -49,7 +49,7 @@ fn stun_servers() -> Vec<String> {
 }
 
 fn env_flag(name: &str, default: bool) -> bool {
-    std::env::var(name).map_or(default, |v| v != "0")
+    horizon_platform::env::var(name).map_or(default, |v| v != "0")
 }
 
 impl Game<'_> {
@@ -79,7 +79,7 @@ impl Game<'_> {
             game: GAME_VERSION.to_owned(),
             relay: horizon_client::net::friends_relay_setting(),
             path: PathMode::from_env(),
-            port: std::env::var("HORIZON_FRIENDS_PORT")
+            port: horizon_platform::env::var("HORIZON_FRIENDS_PORT")
                 .ok()
                 .and_then(|p| p.parse().ok())
                 .unwrap_or(DEFAULT_PORT),

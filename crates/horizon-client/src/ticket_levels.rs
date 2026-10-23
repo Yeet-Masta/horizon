@@ -409,12 +409,12 @@ mod tests {
                 simulation_distance: 10,
             };
             let rounds = 200;
-            let t = std::time::Instant::now();
+            let t = horizon_platform::time::Instant::now();
             for _ in 0..rounds {
                 std::hint::black_box(compute_sparse(std::hint::black_box(&s)));
             }
             let map_build = t.elapsed().as_secs_f64() * 1e3 / rounds as f64;
-            let t = std::time::Instant::now();
+            let t = horizon_platform::time::Instant::now();
             for _ in 0..rounds {
                 std::hint::black_box(compute(std::hint::black_box(&s)));
             }
@@ -422,7 +422,7 @@ mod tests {
             // A tick's questions: every chunk within 12 of every player.
             let (map, grid) = (Map::Sparse(compute_sparse(&s)), compute(&s));
             let ask = |m: &Map| {
-                let t = std::time::Instant::now();
+                let t = horizon_platform::time::Instant::now();
                 let mut n = 0u32;
                 for _ in 0..rounds {
                     for &(px, pz) in &at {

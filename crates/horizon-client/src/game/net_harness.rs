@@ -6,11 +6,9 @@
 //! server kept it connected throughout).
 use super::Game;
 use horizon_client::Result;
+use horizon_platform::time::{Duration, Instant};
 use serde_json::json;
-use std::{
-    path::Path,
-    time::{Duration, Instant},
-};
+use std::path::Path;
 
 impl Game<'_> {
     pub(super) fn run_net_harness(&mut self, report: &Path) -> Result<()> {
@@ -77,7 +75,7 @@ impl Game<'_> {
                 }
                 _ => {}
             }
-            std::thread::sleep(Duration::from_millis(5));
+            horizon_platform::thread::sleep(Duration::from_millis(5));
         }
         if step < 3 && error.is_none() {
             error = Some(format!("timed out at step {step}"));
@@ -90,7 +88,7 @@ impl Game<'_> {
         if self.remote.is_some() {
             self.leave_server(None)?;
         }
-        std::fs::write(
+        horizon_platform::fs::write(
             report,
             json!({
                 "position": position,

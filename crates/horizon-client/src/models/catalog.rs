@@ -14,6 +14,7 @@ use horizon_core::{
     position::BlockPos,
     random::{LegacyRandom, position_seed},
 };
+use horizon_platform::fs;
 use horizon_world::{
     chunk::BlockState,
     registry::{BlockRegistry, BlockStateId},
@@ -21,7 +22,6 @@ use horizon_world::{
 use serde_json::Value;
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs,
     path::Path,
 };
 

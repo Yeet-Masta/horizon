@@ -8,11 +8,9 @@
 //! `portal` sends the player through the nether portal it stands in.
 use super::Game;
 use horizon_client::{Result, text::Text};
+use horizon_platform::time::{Duration, Instant};
 use serde_json::{Value, json};
-use std::{
-    path::Path,
-    time::{Duration, Instant},
-};
+use std::path::Path;
 
 /// A message as `[text, style]` runs with adjacent equal styles merged; the
 /// style lists colour, bold, italic, underlined, strikethrough, obfuscated
@@ -72,7 +70,7 @@ impl Game<'_> {
                     return Ok(());
                 }
             }
-            if std::env::var_os("HORIZON_HARNESS_DEBUG").is_some() {
+            if horizon_platform::env::var_os("HORIZON_HARNESS_DEBUG").is_some() {
                 eprintln!(
                     "settle: player {:?} center {:?} chunks {} pending {}",
                     self.player.as_ref().map(|p| p.position),
@@ -84,20 +82,20 @@ impl Game<'_> {
             if Instant::now() > deadline {
                 return Err("command harness: terrain did not load".into());
             }
-            std::thread::sleep(Duration::from_millis(2));
+            horizon_platform::thread::sleep(Duration::from_millis(2));
         }
     }
     pub(super) fn run_command_harness(&mut self, script: &Path, output: &Path) -> Result<()> {
         let deadline = Instant::now()
             + Duration::from_secs(
-                std::env::var("HORIZON_HARNESS_TIMEOUT")
+                horizon_platform::env::var("HORIZON_HARNESS_TIMEOUT")
                     .ok()
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(600),
             );
         self.harness_settle(deadline)?;
         let mut out = String::new();
-        for line in std::fs::read_to_string(script)?.lines() {
+        for line in horizon_platform::fs::read_to_string(script)?.lines() {
             if line.trim().is_empty() {
                 continue;
             }
@@ -152,7 +150,7 @@ impl Game<'_> {
                 other => return Err(format!("command harness: unknown op {other}").into()),
             }
         }
-        std::fs::write(output, out)?;
+        horizon_platform::fs::write(output, out)?;
         Ok(())
     }
 }

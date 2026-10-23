@@ -10,8 +10,8 @@ use horizon_client::{
     keybinds::{KeyBinds, key_code, mouse_button},
     mouse::Rotation,
 };
+use horizon_platform::time::Instant;
 use serde_json::{Value, json};
-use std::time::Instant;
 use winit::{event_loop::ActiveEventLoop, keyboard::KeyCode};
 
 pub(super) const HELP: &[&str] = &[
