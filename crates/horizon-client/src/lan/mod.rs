@@ -157,8 +157,10 @@ impl NetConfig {
             favicon: None,
             secure_chat: None,
             accepts_transfers: false,
-            announce: true,
-            listen: true,
+            // The web build has no sockets to listen on: friends' browsers
+            // come in through Play with Friends (`Lan::accept_web`).
+            announce: !horizon_platform::WEB,
+            listen: !horizon_platform::WEB,
             bypasses_limit: None,
             gate: None,
             online: None,
@@ -492,16 +494,29 @@ impl Lan {
     pub fn connect_local(&self) -> io::Result<horizon_protocol::connection::Pipe> {
         let (client, server) = horizon_protocol::connection::Pipe::pair();
         let shared = self.shared.clone();
-        horizon_platform::thread::Builder::new()
-            .name("horizon-local-conn".into())
-            .spawn(move || {
-                if let Err(e) = conn::serve_local(server, shared)
-                    && horizon_platform::env::var_os("HORIZON_NET_DEBUG").is_some()
-                {
-                    log::warn!("[lan] local: {e}");
-                }
-            })?;
+        horizon_platform::thread::spawn_task("horizon-local-conn", async move {
+            if let Err(e) = conn::serve_local(server, shared).await
+                && horizon_platform::env::var_os("HORIZON_NET_DEBUG").is_some()
+            {
+                log::warn!("[lan] local: {e}");
+            }
+        })?;
         Ok(client)
+    }
+    /// A friend's browser, through the data channel its page opened to this
+    /// one (the web build's Play with Friends). It joins from the loopback
+    /// address, as friends through a tunnel do.
+    #[cfg(target_family = "wasm")]
+    pub fn accept_web(&self, socket: horizon_platform::web::socket::Socket) {
+        let shared = self.shared.clone();
+        let address = SocketAddr::from(([127, 0, 0, 1], 0));
+        let _ = horizon_platform::thread::spawn_task("horizon-lan-conn", async move {
+            if let Err(e) = conn::serve_web(socket, address, shared).await
+                && horizon_platform::env::var_os("HORIZON_NET_DEBUG").is_some()
+            {
+                log::warn!("[lan] friend: {e}");
+            }
+        });
     }
     /// Everything the connection threads reported since the last call.
     pub fn poll(&self) -> Vec<NetEvent> {

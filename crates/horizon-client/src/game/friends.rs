@@ -6,6 +6,10 @@
 //! configured adds a short code and a fallback. The integrated server is the
 //! LAN one, unchanged: tunnelled guests are LAN guests that connect from the
 //! loopback address.
+//!
+//! The web build has no ports to share: the world gets a room on the page's
+//! WebSocket relay instead ([`WebHost`]), whose code friends join with from
+//! their own browsers over WebRTC (web/README.md).
 use super::{Game, lan::LanSettings};
 use horizon_client::{
     Result,
@@ -13,9 +17,77 @@ use horizon_client::{
     hud::HudBatch,
     text::Text,
 };
-use horizon_friends::{Host, HostConfig, HostEvent, PathMode, host::DEFAULT_PORT, reach, stun};
+#[cfg(target_family = "wasm")]
+use horizon_friends::host::HostState;
+#[cfg(not(target_family = "wasm"))]
+use horizon_friends::{Host, HostConfig, PathMode, host::DEFAULT_PORT, stun};
+use horizon_friends::{HostEvent, reach};
 use horizon_platform::time::{Duration, Instant};
+#[cfg(not(target_family = "wasm"))]
 use horizon_protocol::{GAME_VERSION, PROTOCOL_VERSION};
+
+#[cfg(target_family = "wasm")]
+type Host = WebHost;
+
+/// The web build's sharing: a room on the WebSocket relay. Its events read
+/// as horizon-friends' host's, and the friends' data channels wait in
+/// `guests` for the LAN to take them.
+#[cfg(target_family = "wasm")]
+pub(super) struct WebHost {
+    room: horizon_platform::web::rtc::Host,
+    state: HostState,
+    sessions: u64,
+    guests: Vec<horizon_platform::web::socket::Socket>,
+}
+#[cfg(target_family = "wasm")]
+impl WebHost {
+    fn start(relay: &str) -> Self {
+        Self {
+            room: horizon_platform::web::rtc::Host::start(
+                relay,
+                &horizon_client::net::web_stun_servers(),
+            ),
+            state: HostState::default(),
+            sessions: 0,
+            guests: Vec::new(),
+        }
+    }
+    fn poll(&mut self) -> Vec<HostEvent> {
+        use horizon_platform::web::rtc::HostEvent as Room;
+        let mut events = Vec::new();
+        for event in self.room.poll() {
+            match event {
+                Room::Code(code) => {
+                    self.state.invite = Some(code.clone());
+                    self.state.summary =
+                        "Friends join with this code from their own browser (Join a Friend), through the same relay.".to_owned();
+                    events.push(HostEvent::Code(code));
+                }
+                Room::Guest(socket) => {
+                    self.sessions += 1;
+                    self.guests.push(socket);
+                    events.push(HostEvent::Connected {
+                        session: self.sessions,
+                        direct: true,
+                    });
+                }
+                Room::Closed(reason) => {
+                    self.state.relay_problem = Some(format!("The relay's room closed: {reason}."));
+                }
+            }
+        }
+        events
+    }
+    fn state(&self) -> HostState {
+        self.state.clone()
+    }
+    fn sessions(&self) -> u64 {
+        self.sessions
+    }
+    fn stop(&mut self) {
+        self.room.stop();
+    }
+}
 
 pub(super) struct Sharing {
     host: Host,
@@ -37,6 +109,7 @@ pub const HELP: &[&str] = &[
 ];
 
 /// `HORIZON_STUN_SERVERS`, else `friendsStun` in horizon.txt, else the defaults.
+#[cfg(not(target_family = "wasm"))]
 fn stun_servers() -> Vec<String> {
     if horizon_platform::env::var_os("HORIZON_STUN_SERVERS").is_some() {
         return stun::servers_from_env();
@@ -48,6 +121,7 @@ fn stun_servers() -> Vec<String> {
     }
 }
 
+#[cfg(not(target_family = "wasm"))]
 fn env_flag(name: &str, default: bool) -> bool {
     horizon_platform::env::var(name).map_or(default, |v| v != "0")
 }
@@ -72,7 +146,19 @@ impl Game<'_> {
                 force_game_mode: true,
             })?;
         }
+        #[cfg(target_family = "wasm")]
+        let host = match horizon_client::net::web_relay() {
+            Some(relay) => WebHost::start(&relay),
+            None => {
+                if opened_lan {
+                    self.lan_close(true);
+                }
+                return Err(horizon_client::net::NO_WEB_RELAY.into());
+            }
+        };
+        #[cfg(not(target_family = "wasm"))]
         let port = self.lan_port().ok_or("the world isn't open to LAN")?;
+        #[cfg(not(target_family = "wasm"))]
         let host = match Host::start(HostConfig {
             lan: std::net::SocketAddr::from(([127, 0, 0, 1], port)),
             protocol: PROTOCOL_VERSION,
@@ -159,6 +245,13 @@ impl Game<'_> {
                 HostEvent::Disconnected { .. } => {}
             }
         }
+        // Friends' browsers whose data channels opened join as LAN guests.
+        #[cfg(target_family = "wasm")]
+        if let Some(lan) = &self.lan {
+            for socket in sharing.host.guests.drain(..) {
+                lan.hub.lan.accept_web(socket);
+            }
+        }
         if announce {
             self.system_message(Text::literal(
                 "Your invite code is ready: Game Menu, Play with Friends. Copy it and send it to your friends.",
@@ -242,10 +335,14 @@ impl Game<'_> {
             status.push(' ');
             status.push_str(problem);
         }
-        let reachable = matches!(
-            state.verdict,
-            Some(reach::Verdict::Mapped(_) | reach::Verdict::Public)
-        ) || state.short.is_some();
+        // A browser's friends come through the relay's room: nothing to
+        // troubleshoot on this side.
+        let reachable = horizon_platform::WEB
+            || matches!(
+                state.verdict,
+                Some(reach::Verdict::Mapped(_) | reach::Verdict::Public)
+            )
+            || state.short.is_some();
         FriendsView {
             shown: true,
             sharing: true,

@@ -454,6 +454,10 @@ impl Game<'_> {
             self.lan_start(settings)?;
             self.lan.as_ref().map_or(0, |l| l.settings.port)
         };
+        // No port on the web: Play with Friends says how friends join.
+        if horizon_platform::WEB {
+            return Ok(());
+        }
         self.system_message(Text::translate(
             "menu.multiplayerOptions.publish.started.lan",
             &[Text::literal(port.to_string())],

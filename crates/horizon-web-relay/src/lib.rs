@@ -8,6 +8,11 @@
 //! the page names (`?target=host:port`) when `--allow` lets it. Nothing else
 //! is reached: an open relay would let any page reach any port this machine
 //! can.
+//!
+//! It also introduces browsers to each other ([`rooms`]): a world played in
+//! one page is joined from another over WebRTC, the relay carrying only the
+//! few messages that set the connection up.
+pub mod rooms;
 use base64::Engine;
 use sha1::{Digest, Sha1};
 use std::{
@@ -50,6 +55,10 @@ pub struct Config {
     pub max_connections: usize,
     /// How long the server has to accept the TCP connection.
     pub connect_timeout: Duration,
+    /// Introduce browsers to each other (`?host`, `?join=CODE`).
+    pub rooms: bool,
+    pub max_rooms: usize,
+    pub max_guests: usize,
 }
 impl Default for Config {
     fn default() -> Self {
@@ -59,6 +68,9 @@ impl Default for Config {
             origins: Vec::new(),
             max_connections: 64,
             connect_timeout: Duration::from_secs(10),
+            rooms: true,
+            max_rooms: 256,
+            max_guests: 16,
         }
     }
 }
@@ -78,6 +90,7 @@ pub fn accept_key(key: &str) -> String {
 
 /// Serve WebSockets on `listener` until the process ends.
 pub fn serve(listener: TcpListener, config: Config) {
+    let rooms = Arc::new(rooms::Rooms::new(config.max_rooms, config.max_guests));
     let config = Arc::new(config);
     let open = Arc::new(AtomicUsize::new(0));
     for stream in listener.incoming() {
@@ -86,12 +99,12 @@ pub fn serve(listener: TcpListener, config: Config) {
             open.fetch_sub(1, Ordering::Relaxed);
             continue;
         }
-        let (config, count) = (config.clone(), open.clone());
+        let (config, count, rooms) = (config.clone(), open.clone(), rooms.clone());
         let spawned = std::thread::Builder::new()
             .name("web-relay".into())
             .spawn(move || {
                 let peer = stream.peer_addr().ok();
-                if let Err(e) = relay(stream, &config)
+                if let Err(e) = relay(stream, &config, &rooms)
                     && let Some(peer) = peer
                 {
                     println!("{peer}: {e}");
@@ -157,12 +170,16 @@ fn read_request(reader: &mut impl BufRead) -> io::Result<Request> {
     Ok(request)
 }
 
-/// The `target` of a request's query, percent-decoded.
-fn query_target(path: &str) -> Option<String> {
+/// The value of `name` in a request's query, percent-decoded: `""` for a
+/// name without one.
+fn query(path: &str, name: &str) -> Option<String> {
     let query = path.split_once('?')?.1;
     let value = query
         .split('&')
-        .find_map(|pair| pair.strip_prefix("target="))?;
+        .find_map(|pair| match pair.split_once('=') {
+            Some((n, value)) => (n == name).then_some(value),
+            None => (pair == name).then_some(""),
+        })?;
     let bytes = value.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
@@ -349,7 +366,7 @@ fn respond(stream: &mut TcpStream, status: &str, body: &str) -> io::Result<()> {
 }
 
 /// One page's connection, from its upgrade request to the end.
-fn relay(mut client: TcpStream, config: &Config) -> io::Result<()> {
+fn relay(mut client: TcpStream, config: &Config, rooms: &rooms::Rooms) -> io::Result<()> {
     client.set_read_timeout(Some(Duration::from_secs(10)))?;
     let mut reader = BufReader::new(client.try_clone()?);
     let request = read_request(&mut reader)?;
@@ -391,7 +408,15 @@ fn relay(mut client: TcpStream, config: &Config) -> io::Result<()> {
         accept_key(key)
     )?;
     client.set_read_timeout(None)?;
-    let asked = query_target(&request.path);
+    if config.rooms {
+        if query(&request.path, "host").is_some() {
+            return rooms.host(reader, client);
+        }
+        if let Some(code) = query(&request.path, "join") {
+            return rooms.join(&code, reader, client);
+        }
+    }
+    let asked = query(&request.path, "target");
     // The page learns why through the close frame's reason: a browser shows
     // nothing of a refused upgrade.
     let (shown, addrs) = match resolve(config, asked.as_deref()) {
@@ -508,14 +533,16 @@ mod tests {
     #[test]
     fn targets_parse_and_decode() {
         assert_eq!(
-            query_target("/?target=play.example.net%3A25566"),
+            query("/?target=play.example.net%3A25566", "target"),
             Some("play.example.net:25566".to_owned())
         );
         assert_eq!(
-            query_target("/relay?x=1&target=%5B::1%5D:25565"),
+            query("/relay?x=1&target=%5B::1%5D:25565", "target"),
             Some("[::1]:25565".to_owned())
         );
-        assert_eq!(query_target("/"), None);
+        assert_eq!(query("/", "target"), None);
+        assert_eq!(query("/?host", "host"), Some(String::new()));
+        assert_eq!(query("/?hosts=1", "host"), None);
         assert_eq!(
             split_host_port("[::1]:25570"),
             Some(("::1".to_owned(), 25570))
@@ -590,6 +617,68 @@ mod tests {
         assert!(close.len() - 2 <= 125);
     }
 
+    /// A page's end of a WebSocket to the relay on `port`.
+    struct Page {
+        ws: TcpStream,
+        reader: BufReader<TcpStream>,
+    }
+    impl Page {
+        fn open(port: u16, query: &str) -> Self {
+            let mut ws = TcpStream::connect(("127.0.0.1", port)).unwrap();
+            write!(
+                ws,
+                "GET /?{query} HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
+            )
+            .unwrap();
+            let mut reader = BufReader::new(ws.try_clone().unwrap());
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            assert!(line.starts_with("HTTP/1.1 101"), "{line}");
+            while line != "\r\n" {
+                line.clear();
+                reader.read_line(&mut line).unwrap();
+            }
+            Self { ws, reader }
+        }
+        /// Send a message, masked as pages do.
+        fn send(&mut self, data: &[u8]) {
+            let mask = [9, 8, 7, 6];
+            let mut message = vec![0x82, 0x80 | data.len() as u8];
+            message.extend_from_slice(&mask);
+            message.extend(data.iter().enumerate().map(|(i, b)| b ^ mask[i % 4]));
+            self.ws.write_all(&message).unwrap();
+        }
+        /// The next frame: opcode and payload (short ones only).
+        fn next(&mut self) -> (u8, Vec<u8>) {
+            let mut head = [0u8; 2];
+            self.reader.read_exact(&mut head).unwrap();
+            let mut payload = vec![0u8; usize::from(head[1] & 0x7f)];
+            self.reader.read_exact(&mut payload).unwrap();
+            (head[0] & 0x0f, payload)
+        }
+        fn text(&mut self) -> String {
+            let (opcode, payload) = self.next();
+            assert_eq!(opcode, 0x1);
+            String::from_utf8(payload).unwrap()
+        }
+        /// The close frame's code and reason.
+        fn closed(&mut self) -> (u16, String) {
+            let (opcode, payload) = self.next();
+            assert_eq!(opcode, 0x8);
+            (
+                u16::from_be_bytes([payload[0], payload[1]]),
+                String::from_utf8(payload[2..].to_vec()).unwrap(),
+            )
+        }
+    }
+
+    fn relay_on(config: Config) -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || serve(listener, config));
+        port
+    }
+
     /// A page's bytes reach the server and the server's come back, and
     /// what the relay refuses is said in the close frame.
     #[test]
@@ -602,51 +691,52 @@ mod tests {
             let n = s.read(&mut buf).unwrap();
             s.write_all(&buf[..n]).unwrap();
         });
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let config = Config {
+        let port = relay_on(Config {
             allow: vec![Allow::parse(&format!("127.0.0.1:{echo_port}")).unwrap()],
             ..Config::default()
-        };
-        std::thread::spawn(move || serve(listener, config));
-        let open = |target: &str| {
-            let mut ws = TcpStream::connect(("127.0.0.1", port)).unwrap();
-            write!(
-                ws,
-                "GET /?target={target} HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
-            )
-            .unwrap();
-            let mut reader = BufReader::new(ws.try_clone().unwrap());
-            let mut line = String::new();
-            reader.read_line(&mut line).unwrap();
-            assert!(line.starts_with("HTTP/1.1 101"), "{line}");
-            while line != "\r\n" {
-                line.clear();
-                reader.read_line(&mut line).unwrap();
-            }
-            (ws, reader)
-        };
-        let read_server_frame = |reader: &mut BufReader<TcpStream>| {
-            let mut head = [0u8; 2];
-            reader.read_exact(&mut head).unwrap();
-            let mut payload = vec![0u8; usize::from(head[1] & 0x7f)];
-            reader.read_exact(&mut payload).unwrap();
-            (head[0] & 0x0f, payload)
-        };
+        });
 
-        let (mut ws, mut reader) = open(&format!("127.0.0.1:{echo_port}"));
-        let mask = [9, 8, 7, 6];
-        let mut message = vec![0x82, 0x80 | 5];
-        message.extend_from_slice(&mask);
-        message.extend(b"hello".iter().enumerate().map(|(i, b)| b ^ mask[i % 4]));
-        ws.write_all(&message).unwrap();
-        assert_eq!(read_server_frame(&mut reader), (0x2, b"hello".to_vec()));
+        let mut page = Page::open(port, &format!("target=127.0.0.1:{echo_port}"));
+        page.send(b"hello");
+        assert_eq!(page.next(), (0x2, b"hello".to_vec()));
         // The server hung up: the page is told the connection closed.
-        assert_eq!(read_server_frame(&mut reader).0, 0x8);
+        assert_eq!(page.closed().0, 1000);
 
-        let (_ws, mut reader) = open("127.0.0.1:1");
-        let (opcode, payload) = read_server_frame(&mut reader);
-        assert_eq!((opcode, &payload[..2]), (0x8, &1008u16.to_be_bytes()[..]));
-        assert_eq!(&payload[2..], b"This relay doesn't reach 127.0.0.1:1");
+        let mut page = Page::open(port, "target=127.0.0.1:1");
+        assert_eq!(
+            page.closed(),
+            (1008, "This relay doesn't reach 127.0.0.1:1".to_owned())
+        );
+    }
+
+    /// A host's room carries messages between it and its guests, by id.
+    #[test]
+    fn rooms_introduce_pages() {
+        let port = relay_on(Config::default());
+        let mut host = Page::open(port, "host");
+        let room = host.text();
+        let code = room.strip_prefix("room ").unwrap().to_owned();
+        assert_eq!(code.len(), 9);
+
+        let mut guest = Page::open(port, &format!("join={}", code.to_lowercase()));
+        guest.send(b"offer");
+        assert_eq!(host.text(), "1 offer");
+        host.send(b"1 answer");
+        assert_eq!(guest.text(), "answer");
+        // Another guest's messages are its own.
+        let mut second = Page::open(port, &format!("join={}", code.replace('-', "")));
+        second.send(b"another");
+        assert_eq!(host.text(), "2 another");
+        drop(guest);
+        assert_eq!(host.text(), "left 1");
+
+        let mut lost = Page::open(port, "join=0000-0000");
+        assert_eq!(
+            lost.closed(),
+            (1008, "No world is shared with that code".to_owned())
+        );
+        // The room closes with its host.
+        drop(host);
+        assert_eq!(second.closed(), (1001, "The world closed".to_owned()));
     }
 }

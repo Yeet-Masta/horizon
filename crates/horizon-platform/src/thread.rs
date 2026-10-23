@@ -38,6 +38,30 @@ where
     Ok(JoinHandle((), std::thread::current()))
 }
 
+/// Waits `duration` in a task: the thread sleeps natively; on the web the
+/// task gives the page back until a timer fires.
+pub async fn sleep_task(duration: std::time::Duration) {
+    #[cfg(not(target_family = "wasm"))]
+    std::thread::sleep(duration);
+    #[cfg(target_family = "wasm")]
+    {
+        use wasm_bindgen::JsCast;
+        let promise = js_sys::Promise::new(&mut |resolve, _| {
+            let _ = js_sys::Reflect::get(&js_sys::global(), &"setTimeout".into())
+                .ok()
+                .and_then(|f| f.dyn_into::<js_sys::Function>().ok())
+                .map(|set_timeout| {
+                    set_timeout.call2(
+                        &wasm_bindgen::JsValue::UNDEFINED,
+                        &resolve,
+                        &(duration.as_secs_f64() * 1000.0).into(),
+                    )
+                });
+        });
+        let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
+    }
+}
+
 #[cfg(target_family = "wasm")]
 mod web {
     use std::{io, marker::PhantomData, num::NonZeroUsize, time::Duration};

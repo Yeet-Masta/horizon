@@ -4,7 +4,12 @@
 //! horizon-web-relay --target localhost:25565            every page reaches this server
 //! horizon-web-relay --allow play.example.net:25565      pages name it: ?target=play.example.net:25565
 //! horizon-web-relay --allow '*:25565'                   any public server on port 25565
+//! horizon-web-relay                                     only rooms for worlds shared from browsers
 //! ```
+//!
+//! Rooms (`?host`, `?join=CODE`) introduce browsers to each other over WebRTC;
+//! `--no-rooms` turns them off, `--max-rooms` (256) and `--max-guests` (16)
+//! bound them.
 //!
 //! `--listen` (127.0.0.1:8081 by default) is where WebSockets arrive; serve
 //! them as `wss://` from behind a web server (web/apache.htaccess).
@@ -15,8 +20,8 @@ use std::{net::TcpListener, process::exit};
 
 fn usage() -> ! {
     eprintln!(
-        "usage: horizon-web-relay [--listen ADDR:PORT] (--target HOST:PORT | --allow HOST:PORT|*:PORT ...) \
-         [--origin URL ...] [--max N]"
+        "usage: horizon-web-relay [--listen ADDR:PORT] [--target HOST:PORT | --allow HOST:PORT|*:PORT ...] \
+         [--origin URL ...] [--max N] [--no-rooms] [--max-rooms N] [--max-guests N]"
     );
     exit(2);
 }
@@ -57,6 +62,9 @@ fn main() {
                 .origins
                 .push(value().trim_end_matches('/').to_owned()),
             "--max" => config.max_connections = value().parse().unwrap_or_else(|_| usage()),
+            "--no-rooms" => config.rooms = false,
+            "--max-rooms" => config.max_rooms = value().parse().unwrap_or_else(|_| usage()),
+            "--max-guests" => config.max_guests = value().parse().unwrap_or_else(|_| usage()),
             "-h" | "--help" => usage(),
             _ => {
                 eprintln!("horizon-web-relay: unknown option {arg}");
@@ -64,8 +72,10 @@ fn main() {
             }
         }
     }
-    if config.target.is_none() && config.allow.is_empty() {
-        eprintln!("horizon-web-relay: name the servers it reaches with --target or --allow");
+    if config.target.is_none() && config.allow.is_empty() && !config.rooms {
+        eprintln!(
+            "horizon-web-relay: with --no-rooms, name the servers it reaches (--target, --allow)"
+        );
         usage();
     }
     let listener = TcpListener::bind(&listen).unwrap_or_else(|e| {
@@ -74,6 +84,7 @@ fn main() {
     });
     let reaches = match &config.target {
         Some((host, port)) => format!("{host}:{port}"),
+        None if config.allow.is_empty() => "no servers".to_owned(),
         None => config
             .allow
             .iter()
@@ -82,8 +93,9 @@ fn main() {
             .join(", "),
     };
     println!(
-        "horizon-web-relay {} on ws://{listen}/, reaching {reaches}",
-        env!("CARGO_PKG_VERSION")
+        "horizon-web-relay {} on ws://{listen}/, reaching {reaches}; rooms {}",
+        env!("CARGO_PKG_VERSION"),
+        if config.rooms { "on" } else { "off" },
     );
     serve(listener, config);
 }

@@ -263,16 +263,10 @@ pub fn web_route(address: &str) -> Result<(String, String, u16), String> {
         }
         return Ok((address.to_owned(), host.to_owned(), 25565));
     }
-    if address.starts_with(FRIEND) {
-        return Err("Joining a friend's world isn't in the web version yet.".to_owned());
-    }
     let Some((host, port)) = parse_address(address) else {
         return Err(format!("Invalid server address: {address}"));
     };
-    let relay = horizon_platform::env::var("HORIZON_WEB_RELAY")
-        .ok()
-        .filter(|r| !r.trim().is_empty());
-    let Some(relay) = relay else {
+    let Some(relay) = web_relay() else {
         return Err(format!(
             "A browser can't connect to {address} by itself. Join a ws:// or wss:// address, \
              or set a WebSocket relay (HORIZON_WEB_RELAY) that reaches it."
@@ -286,6 +280,32 @@ pub fn web_route(address: &str) -> Result<(String, String, u16), String> {
     let join = if relay.contains('?') { '&' } else { '?' };
     Ok((format!("{}{join}target={target}", relay.trim()), host, port))
 }
+
+/// The web build's relay: a `ws://` or `wss://` one typed on Join a Friend
+/// (`friendsRelay`), else `HORIZON_WEB_RELAY` (the page's Options).
+pub fn web_relay() -> Option<String> {
+    friends_relay_setting()
+        .filter(|r| r.starts_with("ws://") || r.starts_with("wss://"))
+        .or_else(|| horizon_platform::env::var("HORIZON_WEB_RELAY").ok())
+        .map(|r| r.trim().to_owned())
+        .filter(|r| !r.is_empty())
+}
+
+/// The STUN servers a browser's peer connections ask for their public
+/// address: `HORIZON_STUN_SERVERS` (`none` for none), else Play with Friends'.
+pub fn web_stun_servers() -> Vec<String> {
+    match horizon_platform::env::var("HORIZON_STUN_SERVERS") {
+        Ok(list) => horizon_friends::stun::parse_servers(&list),
+        Err(_) => horizon_friends::stun::DEFAULT_SERVERS
+            .iter()
+            .map(|s| (*s).to_owned())
+            .collect(),
+    }
+}
+
+/// Shown when the web build has no relay to share or join a world through.
+pub const NO_WEB_RELAY: &str =
+    "Set a WebSocket relay (the page's Options, or Join a Friend's relay) to play with friends.";
 
 /// The whole connection. Ok: why it ended for good (the server's reason, or
 /// a refusal no retry fixes); Err: the connection failed.
@@ -302,6 +322,14 @@ async fn run(
 ) -> Result<String, String> {
     let (host, port, mut c) = if let Some(pipe) = local {
         (address.to_owned(), 0, Connection::local(pipe))
+    } else if let (true, Some(code)) = (horizon_platform::WEB, address.strip_prefix(FRIEND)) {
+        // A world shared from a browser: its page answers over WebRTC.
+        let Some(relay) = web_relay() else {
+            return Ok(NO_WEB_RELAY.to_owned());
+        };
+        status(send, "Finding your friend's world...");
+        let c = web_join_friend(&relay, code).await?;
+        ("127.0.0.1".to_owned(), 25565, c)
     } else if horizon_platform::WEB {
         let (url, host, port) = match web_route(address) {
             Ok(route) => route,
@@ -453,6 +481,20 @@ async fn web_connect(url: &str, timeout: Duration) -> Result<Connection, String>
     {
         let _ = (url, timeout);
         Err("only the web build connects through WebSockets".to_owned())
+    }
+}
+
+/// The web build's connection to a world shared from another browser.
+async fn web_join_friend(relay: &str, code: &str) -> Result<Connection, String> {
+    #[cfg(target_family = "wasm")]
+    {
+        let socket = horizon_platform::web::rtc::join(relay, code, &web_stun_servers()).await?;
+        Ok(Connection::web(socket))
+    }
+    #[cfg(not(target_family = "wasm"))]
+    {
+        let _ = (relay, code);
+        Err("only the web build joins over WebRTC".to_owned())
     }
 }
 

@@ -77,6 +77,27 @@ behind the web server (`web/apache.htaccess` has the lines for Apache).
 `--origin https://example.net` admits only your page. Why a server refused the
 relay (or the relay refused the server) shows on the game's disconnect screen.
 
+### Play with friends, browser to browser
+
+A world played in the browser can be shared with friends in theirs. Pause,
+open *Play with Friends* (the friends icon) and *Start Sharing*: the world gets
+a code such as `K7QM-3XPD`. Friends type it on *Join a Friend* (Multiplayer),
+with the same relay set, and their browser connects straight to yours over
+WebRTC. The relay only introduces the two pages (`?host`, `?join=CODE`); the
+game's bytes go between the browsers, encrypted by WebRTC, and the host's
+world is the LAN server friends play on.
+
+The browsers find each other's addresses through STUN (Play with Friends'
+servers, or `HORIZON_STUN_SERVERS`; `none` for the local network only). Two
+networks that both block direct connections can't meet: there is no fallback
+through the relay yet. A native Horizon can't join a browser's world, nor a
+browser a native one's invite code.
+
+The friend's terrain arrives at the speed of both games' frames: the host
+sends chunks in batches each tick, and every batch waits for the guest's
+answer. A host with a high render distance on a slow machine takes a while
+to fill a friend's view.
+
 ## Browsers
 
 - WebGPU: Chrome and Edge 113+, Firefox 141+ on Windows, Safari 26+.
@@ -106,9 +127,11 @@ The web build is the native game with the operating system swapped out
 - **Sound**: WebAudio, mixed by the game's own mixer between frames; it starts
   at the first click or key press (browsers keep a page silent until then).
   Sounds decode where they start, so the first play of a long track stutters.
-- **Network**: servers through WebSockets (see Multiplayer). The connection
-  runs beside the page's event loop rather than on a thread of its own.
+- **Network**: servers through WebSockets, and friends' browsers over WebRTC
+  (see Multiplayer). Connections run beside the page's event loop rather than
+  on threads of their own; a shared world's writers look for packets every
+  few milliseconds.
 - **Off**: controllers, mods with code (content-only mods still load),
-  the system clipboard (copy and paste work inside the game), LAN, Play with
-  friends, online-mode servers and account sign-in, skin downloads and
-  telemetry.
+  the system clipboard (copy and paste work inside the game), LAN discovery
+  and Open to LAN (no ports to open), online-mode servers and account
+  sign-in, skin downloads and telemetry.

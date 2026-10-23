@@ -47,7 +47,11 @@ fn grey() -> u32 {
     rgba(160, 160, 160, 255)
 }
 const WHITE: u32 = u32::MAX;
-const HINT: &str = "Friends paste the code after the title screen's Friends button, in Direct Connection, or on the launcher's Play page.";
+const HINT: &str = if horizon_platform::WEB {
+    "Friends type the code on Join a Friend (Multiplayer) in their browser, with the same relay set."
+} else {
+    "Friends paste the code after the title screen's Friends button, in Direct Connection, or on the launcher's Play page."
+};
 
 struct Button {
     x: f32,
@@ -126,12 +130,12 @@ fn layout(
             add(&mut lines, HINT, grey(), &mut y);
         }
     } else {
-        add(
-            &mut lines,
-            "Share this world behind an invite code: it opens to LAN, and friends on the internet join with the code. No server of ours is involved.",
-            WHITE,
-            &mut y,
-        );
+        let about = if horizon_platform::WEB {
+            "Share this world behind an invite code: friends join with it from their own browser, which connects straight to yours. The page's WebSocket relay introduces the two."
+        } else {
+            "Share this world behind an invite code: it opens to LAN, and friends on the internet join with the code. No server of ours is involved."
+        };
+        add(&mut lines, about, WHITE, &mut y);
         y += 4.0;
         add(&mut lines, HINT, grey(), &mut y);
         buttons.push(Button {
