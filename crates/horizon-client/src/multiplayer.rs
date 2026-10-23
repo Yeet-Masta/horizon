@@ -134,46 +134,43 @@ fn ping_all(servers: &[ServerEntry], pings: &Pings, icons: &Icons, file: &Path) 
             icons.lock().unwrap().insert(address.clone(), pixels);
         }
         let (pings, icons, file) = (pings.clone(), icons.clone(), file.to_owned());
-        let _ = horizon_platform::thread::Builder::new()
-            .name("horizon-ping".into())
-            .spawn(move || {
-                let result = match crate::net::ping(&address, Duration::from_secs(5)) {
-                    Ok((json, ms)) => {
-                        let motd = crate::component::to_text(&json["description"], &mut |s| {
-                            Text::literal(s)
-                        });
-                        let players = json["players"].as_object().map(|p| {
-                            (
-                                p.get("online").and_then(|n| n.as_i64()).unwrap_or(0),
-                                p.get("max").and_then(|n| n.as_i64()).unwrap_or(0),
-                            )
-                        });
-                        let version = json["version"]["name"].as_str().unwrap_or("?").to_owned();
-                        // A new favicon replaces the saved one (an invalid one
-                        // clears it) and servers.dat is saved again.
-                        if let Some(png) = favicon_bytes(&json) {
-                            let encoded = crate::lan::base64(&png);
-                            let pixels = icon_pixels(&png);
-                            match &pixels {
-                                Some(p) => icons.lock().unwrap().insert(address.clone(), p.clone()),
-                                None => icons.lock().unwrap().remove(&address),
-                            };
-                            let icon = pixels.map(|_| encoded);
-                            if icon != saved {
-                                save_icon(&file, &address, icon);
-                            }
-                        }
-                        Ping::Ok {
-                            motd,
-                            players,
-                            ms,
-                            version,
+        let _ = horizon_platform::thread::spawn_task("horizon-ping", async move {
+            let result = match crate::net::ping(&address, Duration::from_secs(5)).await {
+                Ok((json, ms)) => {
+                    let motd =
+                        crate::component::to_text(&json["description"], &mut |s| Text::literal(s));
+                    let players = json["players"].as_object().map(|p| {
+                        (
+                            p.get("online").and_then(|n| n.as_i64()).unwrap_or(0),
+                            p.get("max").and_then(|n| n.as_i64()).unwrap_or(0),
+                        )
+                    });
+                    let version = json["version"]["name"].as_str().unwrap_or("?").to_owned();
+                    // A new favicon replaces the saved one (an invalid one
+                    // clears it) and servers.dat is saved again.
+                    if let Some(png) = favicon_bytes(&json) {
+                        let encoded = crate::lan::base64(&png);
+                        let pixels = icon_pixels(&png);
+                        match &pixels {
+                            Some(p) => icons.lock().unwrap().insert(address.clone(), p.clone()),
+                            None => icons.lock().unwrap().remove(&address),
+                        };
+                        let icon = pixels.map(|_| encoded);
+                        if icon != saved {
+                            save_icon(&file, &address, icon);
                         }
                     }
-                    Err(e) => Ping::Failed(e),
-                };
-                pings.lock().unwrap().insert(address, result);
-            });
+                    Ping::Ok {
+                        motd,
+                        players,
+                        ms,
+                        version,
+                    }
+                }
+                Err(e) => Ping::Failed(e),
+            };
+            pings.lock().unwrap().insert(address, result);
+        });
     }
 }
 /// Save the list after a move or delete, keeping the icons pings stored in

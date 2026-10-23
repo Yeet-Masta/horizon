@@ -277,6 +277,7 @@ function updatePlay() {
 
 const params = new URLSearchParams(location.search);
 $("args").value = params.get("args") ?? localStorageGet("horizon.args") ?? "";
+$("relay").value = params.get("relay") ?? localStorageGet("horizon.relay") ?? "";
 function localStorageGet(key) {
   try { return localStorage.getItem(key); } catch { return null; }
 }
@@ -295,6 +296,10 @@ globalThis.horizonBoot = async () => {
   const args = $("args").value.trim();
   localStorageSet("horizon.args", args);
   boot.args = args ? args.split(/\s+/) : [];
+  // The WebSocket relay that reaches servers named by host:port (web/README.md).
+  const relay = $("relay").value.trim();
+  localStorageSet("horizon.relay", relay);
+  if (relay) boot.env.HORIZON_WEB_RELAY = relay;
   // HORIZON_* variables from the URL: ?env=HORIZON_WEB_WORK_MS=12,HORIZON_SPIKES=30
   for (const pair of (params.get("env") ?? "").split(",").filter(Boolean)) {
     const at = pair.indexOf("=");

@@ -49,6 +49,34 @@ as on the command line). `?env=HORIZON_WEB_WORK_MS=12` sets `HORIZON_*` variable
 The prepared resources are derived from Minecraft: never put the zip, or a page
 serving it, anywhere public.
 
+## Multiplayer
+
+A browser opens WebSockets but no TCP connections, so the web build reaches
+Minecraft servers through a WebSocket. The Minecraft protocol stays end to end,
+between the game in the tab and the server; only offline-mode servers can be
+joined for now (no account sign-in on the web).
+
+- A **`ws://` or `wss://` address** in the server list is joined directly: a
+  server with a WebSocket listener, or any server behind a WebSocket-to-TCP
+  bridge such as `websockify 8081 localhost:25565`.
+- **Any other address** (`play.example.net:25565`) goes through the relay set in
+  the page's Options (*WebSocket relay*, or `?relay=wss://…` in the URL), which
+  opens the TCP connection for it.
+
+`horizon-web-relay` is that relay. It reaches only the servers you name:
+
+```sh
+cargo run --release -p horizon-web-relay -- --target localhost:25565          # every page reaches one server
+cargo run --release -p horizon-web-relay -- --allow play.example.net:25565    # pages name it (?target=)
+cargo run --release -p horizon-web-relay -- --allow '*:25565'                 # any public server on 25565
+```
+
+It listens on `127.0.0.1:8081` (`--listen`), so on `localhost` the relay is
+`ws://127.0.0.1:8081/`. A page served over HTTPS needs `wss://`: put the relay
+behind the web server (`web/apache.htaccess` has the lines for Apache).
+`--origin https://example.net` admits only your page. Why a server refused the
+relay (or the relay refused the server) shows on the game's disconnect screen.
+
 ## Browsers
 
 - WebGPU: Chrome and Edge 113+, Firefox 141+ on Windows, Safari 26+.
@@ -78,7 +106,9 @@ The web build is the native game with the operating system swapped out
 - **Sound**: WebAudio, mixed by the game's own mixer between frames; it starts
   at the first click or key press (browsers keep a page silent until then).
   Sounds decode where they start, so the first play of a long track stutters.
+- **Network**: servers through WebSockets (see Multiplayer). The connection
+  runs beside the page's event loop rather than on a thread of its own.
 - **Off**: controllers, mods with code (content-only mods still load),
   the system clipboard (copy and paste work inside the game), LAN, Play with
-  friends, multiplayer servers, account sign-in, skin downloads and telemetry.
-  A browser tab has no sockets.
+  friends, online-mode servers and account sign-in, skin downloads and
+  telemetry.

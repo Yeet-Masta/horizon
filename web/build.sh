@@ -47,7 +47,7 @@ fi
 dist="$here/dist"
 rm -rf "$dist"
 mkdir -p "$dist/pkg" "$dist/fonts"
-wasm="target/$target/$profile/horizon-client.wasm"
+wasm="${CARGO_TARGET_DIR:-target}/$target/$profile/horizon-client.wasm"
 wasm-bindgen --target web --no-typescript --out-dir "$dist/pkg" "$wasm"
 if command -v wasm-opt >/dev/null; then
   flags=(-O2 --enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext --enable-mutable-globals --enable-reference-types --enable-multivalue)

@@ -352,7 +352,6 @@ impl Logger {
         {
             let _ = stderr;
             horizon_platform::web::console(level as u8, &lines.join("\n"));
-            return;
         }
         #[cfg(not(target_family = "wasm"))]
         let msg = Out::Write {

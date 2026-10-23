@@ -1,6 +1,7 @@
 //! What the web build asks of its page (`web/horizon.js`): the arguments,
 //! the prepared resources and the kept game folder before the game starts,
 //! a place to keep what the game writes, the console and randomness.
+pub mod socket;
 pub mod vfs;
 
 use crate::time::{Duration, SystemTime, UNIX_EPOCH};

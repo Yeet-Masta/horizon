@@ -15,6 +15,29 @@ pub use std::thread::{
 #[cfg(target_family = "wasm")]
 pub use web::*;
 
+/// Runs `task` on a thread named `name`, blocked on there, as a thread that
+/// waits on the network does.
+#[cfg(not(target_family = "wasm"))]
+pub fn spawn_task<F>(name: &str, task: F) -> std::io::Result<JoinHandle<()>>
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    Builder::new()
+        .name(name.to_owned())
+        .spawn(move || crate::block_on(task))
+}
+/// On the web nothing may block: the task runs beside the page's event loop
+/// (and may hold the browser's objects, which never leave its thread). The
+/// handle's `join` does not wait for it.
+#[cfg(target_family = "wasm")]
+pub fn spawn_task<F>(_name: &str, task: F) -> std::io::Result<JoinHandle<()>>
+where
+    F: std::future::Future<Output = ()> + 'static,
+{
+    wasm_bindgen_futures::spawn_local(task);
+    Ok(JoinHandle((), std::thread::current()))
+}
+
 #[cfg(target_family = "wasm")]
 mod web {
     use std::{io, marker::PhantomData, num::NonZeroUsize, time::Duration};
@@ -70,7 +93,7 @@ mod web {
     }
 
     /// A finished thread's result.
-    pub struct JoinHandle<T>(T, std::thread::Thread);
+    pub struct JoinHandle<T>(pub(super) T, pub(super) std::thread::Thread);
     impl<T> JoinHandle<T> {
         pub fn join(self) -> std::thread::Result<T> {
             Ok(self.0)

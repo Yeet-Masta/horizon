@@ -2,7 +2,8 @@
 //! encryption, VarInt21 framing and threshold compression. After login it
 //! splits into a reader (for a receive thread) and a shareable writer. It runs
 //! over TCP, or over an in-memory pipe between two threads of one process
-//! (vanilla's `LocalChannel`, which an integrated server's player uses).
+//! (vanilla's `LocalChannel`, which an integrated server's player uses), or
+//! on the web build over a WebSocket, whose reads wait in [`ConnReader::recv_async`].
 use crate::{Error, Result, buf::Reader, crypto::Cfb8, frame};
 use horizon_platform::time::{Duration, Instant};
 use std::{
@@ -109,12 +110,17 @@ impl Write for Pipe {
 enum Stream {
     Tcp(TcpStream),
     Memory(Pipe),
+    /// The web build's socket: reads never block (`WouldBlock` until bytes arrive).
+    #[cfg(target_family = "wasm")]
+    Web(horizon_platform::web::socket::Socket),
 }
 impl Stream {
     fn try_clone(&self) -> std::io::Result<Self> {
         Ok(match self {
             Self::Tcp(s) => Self::Tcp(s.try_clone()?),
             Self::Memory(p) => Self::Memory(p.try_clone()),
+            #[cfg(target_family = "wasm")]
+            Self::Web(s) => Self::Web(s.clone()),
         })
     }
     fn set_read_timeout(&self, timeout: Option<Duration>) -> std::io::Result<()> {
@@ -124,6 +130,8 @@ impl Stream {
                 *p.timeout.lock().unwrap() = timeout;
                 Ok(())
             }
+            #[cfg(target_family = "wasm")]
+            Self::Web(_) => Ok(()),
         }
     }
     fn shutdown(&self) {
@@ -132,6 +140,8 @@ impl Stream {
                 let _ = s.shutdown(Shutdown::Both);
             }
             Self::Memory(p) => p.shutdown(),
+            #[cfg(target_family = "wasm")]
+            Self::Web(s) => s.close(),
         }
     }
 }
@@ -140,6 +150,8 @@ impl Read for Stream {
         match self {
             Self::Tcp(s) => s.read(out),
             Self::Memory(p) => p.read(out),
+            #[cfg(target_family = "wasm")]
+            Self::Web(s) => s.read(out),
         }
     }
 }
@@ -148,12 +160,16 @@ impl Write for Stream {
         match self {
             Self::Tcp(s) => s.write(data),
             Self::Memory(p) => p.write(data),
+            #[cfg(target_family = "wasm")]
+            Self::Web(s) => s.write(data),
         }
     }
     fn flush(&mut self) -> std::io::Result<()> {
         match self {
             Self::Tcp(s) => s.flush(),
             Self::Memory(p) => p.flush(),
+            #[cfg(target_family = "wasm")]
+            Self::Web(_) => Ok(()),
         }
     }
 }
@@ -208,6 +224,11 @@ impl Connection {
     pub fn local(pipe: Pipe) -> Self {
         Self::over(Stream::Memory(pipe)).expect("a pipe end clones")
     }
+    /// A connection over the web build's open socket.
+    #[cfg(target_family = "wasm")]
+    pub fn web(socket: horizon_platform::web::socket::Socket) -> Self {
+        Self::over(Stream::Web(socket)).expect("a socket clones")
+    }
     fn over(stream: Stream) -> Result<Self> {
         let counters = Arc::new(Counters::default());
         let write = stream.try_clone()?;
@@ -251,6 +272,9 @@ impl Connection {
     pub fn recv(&mut self) -> Result<(i32, Vec<u8>)> {
         self.reader.recv()
     }
+    pub async fn recv_async(&mut self) -> Result<(i32, Vec<u8>)> {
+        self.reader.recv_async().await
+    }
     pub fn split(self) -> (ConnReader, ConnWriter) {
         (self.reader, self.writer)
     }
@@ -259,28 +283,55 @@ impl ConnReader {
     /// Block until a whole packet arrives: (id, payload).
     pub fn recv(&mut self) -> Result<(i32, Vec<u8>)> {
         loop {
-            if let Some(frame) = frame::split(&mut self.buffer)? {
-                let body = frame::decompress(frame, self.threshold)?;
-                let mut r = Reader::new(&body);
-                let id = r.varint()?;
-                let start = r.position();
-                self.counters.received.fetch_add(1, Ordering::Relaxed);
-                return Ok((id, body[start..].to_vec()));
+            if let Some(packet) = self.next_packet()? {
+                return Ok(packet);
             }
-            let mut chunk = [0u8; 16384];
-            let n = self.stream.read(&mut chunk)?;
-            if n == 0 {
-                return Err(Error::new("Connection closed by the server"));
-            }
-            self.counters
-                .bytes_in
-                .fetch_add(n as i64, Ordering::Relaxed);
-            let data = &mut chunk[..n];
-            if let Some(c) = &mut self.decrypt {
-                c.decrypt(data);
-            }
-            self.buffer.extend_from_slice(data);
+            self.fill()?;
         }
+    }
+    /// [`Self::recv`] for a task: on the web build it waits for the socket
+    /// without blocking the page; elsewhere it blocks as `recv` does (the
+    /// task runs on a thread of its own there).
+    pub async fn recv_async(&mut self) -> Result<(i32, Vec<u8>)> {
+        loop {
+            if let Some(packet) = self.next_packet()? {
+                return Ok(packet);
+            }
+            #[cfg(target_family = "wasm")]
+            if let Stream::Web(socket) = &self.stream {
+                socket.readable().await;
+            }
+            self.fill()?;
+        }
+    }
+    /// The next whole packet already read, if there is one.
+    fn next_packet(&mut self) -> Result<Option<(i32, Vec<u8>)>> {
+        let Some(frame) = frame::split(&mut self.buffer)? else {
+            return Ok(None);
+        };
+        let body = frame::decompress(frame, self.threshold)?;
+        let mut r = Reader::new(&body);
+        let id = r.varint()?;
+        let start = r.position();
+        self.counters.received.fetch_add(1, Ordering::Relaxed);
+        Ok(Some((id, body[start..].to_vec())))
+    }
+    /// Read what the stream has into the buffer.
+    fn fill(&mut self) -> Result<()> {
+        let mut chunk = [0u8; 16384];
+        let n = self.stream.read(&mut chunk)?;
+        if n == 0 {
+            return Err(Error::new("Connection closed by the server"));
+        }
+        self.counters
+            .bytes_in
+            .fetch_add(n as i64, Ordering::Relaxed);
+        let data = &mut chunk[..n];
+        if let Some(c) = &mut self.decrypt {
+            c.decrypt(data);
+        }
+        self.buffer.extend_from_slice(data);
+        Ok(())
     }
     pub fn set_read_timeout(&self, timeout: Option<Duration>) -> Result<()> {
         Ok(self.stream.set_read_timeout(timeout)?)

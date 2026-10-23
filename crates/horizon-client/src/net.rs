@@ -6,6 +6,10 @@
 //! Online-mode servers need the Microsoft account the launcher signed in
 //! (crate::auth): the login joins the server through the session service and
 //! encrypts the connection (ClientHandshakePacketListenerImpl.handleHello).
+//!
+//! The session is one task, which waits on the connection: natively it runs
+//! on the network thread, and on the web build beside the page's event loop
+//! over a WebSocket ([`web_route`]).
 use crate::auth::AuthSession;
 use horizon_platform::{thread::JoinHandle, time::Duration};
 use horizon_protocol::{
@@ -92,31 +96,30 @@ impl Session {
         let counters = Arc::new(Mutex::new(None));
         let (thread_writer, thread_counters) = (writer.clone(), counters.clone());
         let (address_owned, name_owned) = (address.to_owned(), name.to_owned());
-        let thread = horizon_platform::thread::Builder::new()
-            .name("horizon-net".into())
-            .spawn(move || {
-                let result = run(
-                    local,
-                    &address_owned,
-                    &name_owned,
-                    auth.as_deref(),
-                    view_distance,
-                    &lang,
-                    &send,
-                    &thread_writer,
-                    &thread_counters,
-                );
-                let from_server = result.is_ok();
-                let reason = result.unwrap_or_else(|e| e);
-                if let Some(w) = thread_writer.lock().unwrap().take() {
-                    w.shutdown();
-                }
-                let _ = send.send(Event::Disconnected {
-                    reason,
-                    from_server,
-                });
-            })
-            .ok();
+        let thread = horizon_platform::thread::spawn_task("horizon-net", async move {
+            let result = run(
+                local,
+                &address_owned,
+                &name_owned,
+                auth.as_deref(),
+                view_distance,
+                &lang,
+                &send,
+                &thread_writer,
+                &thread_counters,
+            )
+            .await;
+            let from_server = result.is_ok();
+            let reason = result.unwrap_or_else(|e| e);
+            if let Some(w) = thread_writer.lock().unwrap().take() {
+                w.shutdown();
+            }
+            let _ = send.send(Event::Disconnected {
+                reason,
+                from_server,
+            });
+        })
+        .ok();
         let debug = horizon_platform::env::var_os("HORIZON_NET_DEBUG").is_some();
         Self {
             events,
@@ -239,9 +242,54 @@ fn tr(lang: &Language, key: &str) -> String {
     lang.get(key).cloned().unwrap_or_else(|| key.to_owned())
 }
 
+/// The web build reaches servers through WebSockets (web/README.md): a
+/// `ws://` or `wss://` address is one, and any other goes through the relay
+/// `HORIZON_WEB_RELAY` names (`crates/horizon-web-relay`), which opens the TCP
+/// connection for it. The WebSocket's URL, then the host and port the
+/// handshake names; Err: why the address can't be joined.
+pub fn web_route(address: &str) -> Result<(String, String, u16), String> {
+    let address = address.trim();
+    if let Some(rest) = address
+        .strip_prefix("ws://")
+        .or_else(|| address.strip_prefix("wss://"))
+    {
+        let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+        let host = match authority.strip_prefix('[') {
+            Some(v6) => v6.split(']').next().unwrap_or_default(),
+            None => authority.rsplit_once(':').map_or(authority, |(h, _)| h),
+        };
+        if host.is_empty() {
+            return Err(format!("Invalid server address: {address}"));
+        }
+        return Ok((address.to_owned(), host.to_owned(), 25565));
+    }
+    if address.starts_with(FRIEND) {
+        return Err("Joining a friend's world isn't in the web version yet.".to_owned());
+    }
+    let Some((host, port)) = parse_address(address) else {
+        return Err(format!("Invalid server address: {address}"));
+    };
+    let relay = horizon_platform::env::var("HORIZON_WEB_RELAY")
+        .ok()
+        .filter(|r| !r.trim().is_empty());
+    let Some(relay) = relay else {
+        return Err(format!(
+            "A browser can't connect to {address} by itself. Join a ws:// or wss:// address, \
+             or set a WebSocket relay (HORIZON_WEB_RELAY) that reaches it."
+        ));
+    };
+    let target = if host.contains(':') {
+        format!("%5B{host}%5D:{port}")
+    } else {
+        format!("{host}:{port}")
+    };
+    let join = if relay.contains('?') { '&' } else { '?' };
+    Ok((format!("{}{join}target={target}", relay.trim()), host, port))
+}
+
 /// The whole connection. Ok: why it ended for good (the server's reason, or
 /// a refusal no retry fixes); Err: the connection failed.
-fn run(
+async fn run(
     local: Option<horizon_protocol::connection::Pipe>,
     address: &str,
     name: &str,
@@ -254,6 +302,17 @@ fn run(
 ) -> Result<String, String> {
     let (host, port, mut c) = if let Some(pipe) = local {
         (address.to_owned(), 0, Connection::local(pipe))
+    } else if horizon_platform::WEB {
+        let (url, host, port) = match web_route(address) {
+            Ok(route) => route,
+            Err(reason) => return Ok(reason),
+        };
+        status(send, "Connecting to the server...");
+        (
+            host,
+            port,
+            web_connect(&url, Duration::from_secs(10)).await?,
+        )
     } else {
         let (host, port) = match address.strip_prefix(FRIEND) {
             Some(code) => join_friend(code, send)?,
@@ -292,7 +351,7 @@ fn run(
     )
     .map_err(e)?;
     let profile = loop {
-        let (id, payload) = c.recv().map_err(e)?;
+        let (id, payload) = c.recv_async().await.map_err(e)?;
         match login::Clientbound::decode(id, &payload).map_err(e)? {
             login::Clientbound::Compression(p) => c.set_compression(p.threshold),
             login::Clientbound::LoginFinished(p) => {
@@ -374,23 +433,37 @@ fn run(
     .map_err(e)?;
     let (mut reader, writer) = c.split();
     *shared_writer.lock().unwrap() = Some(writer);
-    let registries = configure(&mut reader, shared_writer, lang, send)?;
+    let registries = configure(&mut reader, shared_writer, lang, send).await?;
     let _ = send.send(Event::Joined {
         registries: Arc::new(registries),
         uuid: profile.uuid,
         name: profile.name,
     });
-    receive_play(&mut reader, shared_writer, lang, send)
+    receive_play(&mut reader, shared_writer, lang, send).await
 }
 
-fn receive_play(
+/// The web build's connection: a WebSocket to `url`, open within `timeout`.
+async fn web_connect(url: &str, timeout: Duration) -> Result<Connection, String> {
+    #[cfg(target_family = "wasm")]
+    {
+        let socket = horizon_platform::web::socket::Socket::connect(url, timeout).await?;
+        Ok(Connection::web(socket))
+    }
+    #[cfg(not(target_family = "wasm"))]
+    {
+        let _ = (url, timeout);
+        Err("only the web build connects through WebSockets".to_owned())
+    }
+}
+
+async fn receive_play(
     reader: &mut ConnReader,
     shared_writer: &Mutex<Option<ConnWriter>>,
     lang: &Language,
     send: &Sender<Event>,
 ) -> Result<String, String> {
     loop {
-        let (id, payload) = reader.recv().map_err(|e| e.to_string())?;
+        let (id, payload) = reader.recv_async().await.map_err(|e| e.to_string())?;
         let packet = match play::Clientbound::decode(id, &payload) {
             Ok(p) => p,
             Err(err) => {
@@ -421,7 +494,7 @@ fn receive_play(
             }
             play::Clientbound::StartConfiguration(_) => {
                 reply(play::Serverbound::ConfigurationAcknowledged(Empty));
-                let registries = configure(reader, shared_writer, lang, send)?;
+                let registries = configure(reader, shared_writer, lang, send).await?;
                 let _ = send.send(Event::Reconfigured(Arc::new(registries)));
             }
             play::Clientbound::Disconnect(d) => return Ok(plain(&d.reason, lang)),
@@ -439,7 +512,7 @@ fn receive_play(
 
 /// The configuration phase: registries, tags and known packs until the
 /// server finishes it (ClientConfigurationPacketListenerImpl).
-fn configure(
+async fn configure(
     reader: &mut ConnReader,
     writer: &Mutex<Option<ConnWriter>>,
     lang: &Language,
@@ -453,7 +526,7 @@ fn configure(
         }
     };
     loop {
-        let (id, payload) = reader.recv().map_err(|e| e.to_string())?;
+        let (id, payload) = reader.recv_async().await.map_err(|e| e.to_string())?;
         match cfg::Clientbound::decode(id, &payload).map_err(|e| e.to_string())? {
             cfg::Clientbound::KeepAlive(k) => reply(cfg::Serverbound::KeepAlive(k))?,
             cfg::Clientbound::CustomPayload(p) => receive_brand(&p, send),
@@ -553,10 +626,16 @@ pub fn load_language(resources: &std::path::Path) -> Language {
 
 /// Ask a server for its status (ServerStatusPinger): MOTD, players and the
 /// round trip time in milliseconds.
-pub fn ping(address: &str, timeout: Duration) -> Result<(serde_json::Value, u128), String> {
+pub async fn ping(address: &str, timeout: Duration) -> Result<(serde_json::Value, u128), String> {
     use horizon_protocol::packets::status;
-    let (host, port) = parse_address(address).ok_or("Invalid address")?;
-    let mut c = Connection::connect(&host, port, timeout).map_err(|e| e.to_string())?;
+    let (host, port, mut c) = if horizon_platform::WEB {
+        let (url, host, port) = web_route(address)?;
+        (host, port, web_connect(&url, timeout).await?)
+    } else {
+        let (host, port) = parse_address(address).ok_or("Invalid address")?;
+        let c = Connection::connect(&host, port, timeout).map_err(|e| e.to_string())?;
+        (host, port, c)
+    };
     c.reader
         .set_read_timeout(Some(timeout))
         .map_err(|e| e.to_string())?;
@@ -573,7 +652,7 @@ pub fn ping(address: &str, timeout: Duration) -> Result<(serde_json::Value, u128
     .map_err(e)?;
     c.send(&status::Serverbound::StatusRequest(Empty).encode())
         .map_err(e)?;
-    let (id, payload) = c.recv().map_err(e)?;
+    let (id, payload) = c.recv_async().await.map_err(e)?;
     let json = match status::Clientbound::decode(id, &payload).map_err(e)? {
         status::Clientbound::StatusResponse(s) => {
             serde_json::from_str(&s.json).map_err(|e| e.to_string())?
@@ -583,7 +662,7 @@ pub fn ping(address: &str, timeout: Duration) -> Result<(serde_json::Value, u128
     let start = horizon_platform::time::Instant::now();
     c.send(&status::Serverbound::PingRequest(status::Ping { time: 1 }).encode())
         .map_err(e)?;
-    let _ = c.recv().map_err(e)?;
+    let _ = c.recv_async().await.map_err(e)?;
     Ok((json, start.elapsed().as_millis()))
 }
 
@@ -599,7 +678,12 @@ mod tests {
         let (send, events) = channel();
         let thread_writer = writer.clone();
         let thread = horizon_platform::thread::spawn(move || {
-            receive_play(&mut reader, &thread_writer, &Language::new(), &send)
+            horizon_platform::block_on(receive_play(
+                &mut reader,
+                &thread_writer,
+                &Language::new(),
+                &send,
+            ))
         });
         let mut server = Connection::local(server);
         let teleport = play::Clientbound::PlayerPosition(play::PlayerPosition {

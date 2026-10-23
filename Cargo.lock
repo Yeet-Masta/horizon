@@ -1653,6 +1653,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "horizon-web-relay"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "sha1",
+]
+
+[[package]]
 name = "horizon-world"
 version = "0.1.0"
 dependencies = [
