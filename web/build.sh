@@ -58,6 +58,7 @@ else
 fi
 
 cp "$here/index.html" "$here/horizon.js" "$dist/"
+cp "$here/apache.htaccess" "$dist/.htaccess"
 cp website/public/favicon.svg "$dist/"
 cp website/public/fonts/Geist-Regular.woff2 website/public/fonts/Geist-Medium.woff2 \
   website/public/fonts/PixelifySans-SemiBold.woff2 website/public/fonts/OFL-*.txt "$dist/fonts/"

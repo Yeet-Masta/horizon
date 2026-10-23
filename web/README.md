@@ -31,6 +31,16 @@ the browser's IndexedDB: later visits start without it. Anywhere else, drop the
 zip on the page, or pick the prepared folder itself. A release folder's
 `resources/` works as well as `.local/horizon-client/26.3/`.
 
+### On a server of your own
+
+Any static server works; `web/apache.htaccess` (copied into `web/dist` as
+`.htaccess`) sets Apache up. Copy `web/dist` into the document root, put the
+resources zip beside `index.html` as `local-resources.zip`, and open
+`index.html?resources=local-resources.zip`: the page downloads it once and keeps
+it. Browsers give WebGPU only to secure pages, so anywhere but `localhost` the
+server needs HTTPS (a self-signed certificate does for testing). Keep such a
+server to yourself: the `.htaccess` has a password block to uncomment.
+
 Game arguments go in the page's Options (`--world Survival --seed 5 --creative`,
 as on the command line). `?env=HORIZON_WEB_WORK_MS=12` sets `HORIZON_*` variables.
 

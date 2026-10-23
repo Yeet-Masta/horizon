@@ -32,21 +32,31 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         self.send_header("Cache-Control", "no-cache")
         super().end_headers()
 
-    def do_GET(self):
-        if self.path.split("?")[0] == "/local-resources.zip":
-            if self.resources is None or not self.resources.is_file():
-                self.send_error(404, "no local resources (web/pack-resources.sh)")
-                return
-            size = self.resources.stat().st_size
-            self.send_response(200)
-            self.send_header("Content-Type", "application/zip")
-            self.send_header("Content-Length", str(size))
-            self.end_headers()
+    def serve_resources(self, body):
+        if self.resources is None or not self.resources.is_file():
+            self.send_error(404, "no local resources (web/pack-resources.sh)")
+            return
+        size = self.resources.stat().st_size
+        self.send_response(200)
+        self.send_header("Content-Type", "application/zip")
+        self.send_header("Content-Length", str(size))
+        self.end_headers()
+        if body:
             with self.resources.open("rb") as f:
                 while chunk := f.read(1 << 20):
                     self.wfile.write(chunk)
+
+    def do_GET(self):
+        if self.path.split("?")[0] == "/local-resources.zip":
+            self.serve_resources(True)
             return
         super().do_GET()
+
+    def do_HEAD(self):
+        if self.path.split("?")[0] == "/local-resources.zip":
+            self.serve_resources(False)
+            return
+        super().do_HEAD()
 
 
 def main():

@@ -1,0 +1,31 @@
+# Horizon's web build on Apache (web/README.md). web/build.sh copies this into web/dist as
+# .htaccess; Apache reads it where the folder allows overrides (AllowOverride All, or at least
+# FileInfo, Indexes and AuthConfig).
+
+# The module streams in as it compiles only when it is served as application/wasm.
+AddType application/wasm .wasm
+AddType text/javascript .js
+
+# No listing: the resources zip is found by its name only.
+Options -Indexes
+
+# The module and the page compress well; the resources zip is compressed already.
+<IfModule mod_deflate.c>
+  AddOutputFilterByType DEFLATE application/wasm text/javascript text/html application/json
+  SetEnvIfNoCase Request_URI "\.zip$" no-gzip
+</IfModule>
+
+# Every build replaces the page and the module: ask each time (an unchanged file is a 304).
+<IfModule mod_headers.c>
+  <FilesMatch "\.(html|js|json|wasm)$">
+    Header set Cache-Control "no-cache"
+  </FilesMatch>
+</IfModule>
+
+# local-resources.zip holds files prepared from your own copy of Minecraft. Keep this server to
+# yourself; to ask for a password, make one (htpasswd -c /etc/apache2/horizon.htpasswd NAME)
+# and uncomment:
+#AuthType Basic
+#AuthName "Horizon"
+#AuthUserFile /etc/apache2/horizon.htpasswd
+#Require valid-user

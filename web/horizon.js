@@ -319,19 +319,47 @@ $("play").addEventListener("click", () => {
   started();
 });
 
-// The resources kept from last time, else the zip the local server offers (web/serve.py
+// `url`'s body, with its progress on the status line.
+async function download(url) {
+  const response = await fetch(url);
+  if (!response.ok) throw new Error(`${url}: ${response.status} ${response.statusText}`);
+  const total = Number(response.headers.get("Content-Length")) || 0;
+  const reader = response.body.getReader();
+  const parts = [];
+  let got = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    parts.push(value);
+    got += value.length;
+    setStatus(total
+      ? `Downloading the resources… ${Math.floor((got * 100) / total)}%`
+      : `Downloading the resources… ${got >> 20} MB`, false, true);
+  }
+  return new Blob(parts, { type: "application/zip" });
+}
+
+// The resources kept from last time. Else the zip the URL names (?resources=local-resources.zip,
+// on a server of your own: web/README.md), or on localhost the zip beside the page (web/serve.py
 // serves the one web/pack-resources.sh made, to this machine only).
+let resourceProblem = null;
 async function findResources() {
   try {
     chosen = await storedResources();
   } catch (e) {
     console.warn("Horizon: no IndexedDB:", e);
   }
-  if (!chosen && ["localhost", "127.0.0.1", "[::1]"].includes(location.hostname)) {
-    const local = await fetch("local-resources.zip").catch(() => null);
+  const named = params.get("resources");
+  if (!chosen && named) {
+    try {
+      await choose({ name: named.split("/").pop(), blob: await download(named) });
+    } catch (e) {
+      resourceProblem = `Could not download the resources (${e.message}).`;
+    }
+  } else if (!chosen && ["localhost", "127.0.0.1", "[::1]"].includes(location.hostname)) {
+    const local = await fetch("local-resources.zip", { method: "HEAD" }).catch(() => null);
     if (local?.ok) {
-      const blob = await local.blob();
-      await choose({ name: "local-resources.zip (from web/serve.py)", blob });
+      await choose({ name: "local-resources.zip", blob: await download("local-resources.zip") });
     }
   }
   showChosen();
@@ -341,7 +369,8 @@ setStatus("Checking this browser…", false, true);
 const [ok] = await Promise.all([checkBrowser(), findResources()]);
 browserOk = ok;
 updatePlay();
-setStatus(ok ? "" : "This browser can't run Horizon's web build.", !ok);
+if (!ok) setStatus("This browser can't run Horizon's web build.", true);
+else setStatus(resourceProblem ?? "", !!resourceProblem);
 
 // The game itself: its JS glue and module, built by web/build.sh into pkg/. Instantiating
 // it runs `main`, which waits in horizonBoot until Play.
