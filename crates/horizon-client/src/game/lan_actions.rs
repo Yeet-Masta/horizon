@@ -87,7 +87,7 @@ pub(super) struct GuestCommand {
     conn: u32,
     command: String,
     permission: u8,
-    /// An integrated server's: no admin feedback or level teleports (yet).
+    /// An integrated server's: no level teleports (yet).
     integrated: bool,
 }
 
@@ -160,6 +160,9 @@ impl GuestPlay {
 
 struct ItemRules<'a>(&'a horizon_client::items::Items);
 impl Rules for ItemRules<'_> {
+    fn items(&self) -> &horizon_client::items::Items {
+        self.0
+    }
     fn max_stack(&self, item: &str) -> u32 {
         self.0.get(item).map_or(64, |i| i.max_stack)
     }
@@ -361,6 +364,7 @@ impl Game<'_> {
             self.apply_equipment();
             play.equipped = Some(equipped);
         }
+        self.update_totem_ready();
         Some(GuestSwap {
             conn,
             i,
@@ -414,6 +418,8 @@ impl Game<'_> {
     /// The second half of `as_guest`: the guest's state back into their
     /// record, the game's back in place, and what the turn changed sent.
     pub(super) fn leave_guest(&mut self, host: &mut LanHost, swap: GuestSwap) {
+        // A totem that saved the guest this turn (its hurt set it off).
+        let totem = self.apply_totem();
         let GuestSwap {
             conn,
             i,
@@ -623,6 +629,16 @@ impl Game<'_> {
         if new_mode != g.game_mode {
             let conn = g.conn;
             host.hub.set_game_mode(conn, new_mode);
+        }
+        // LivingEntity.checkTotemDeathProtection's entity event, to every
+        // client around, the guest's own included; this window draws it too.
+        if let Some(body) = totem {
+            let id = host.hub.guests[i].entity_id;
+            host.hub
+                .entity_event(id, super::totem::TOTEM_EVENT, body.at);
+            if self.player.is_some() {
+                self.totem_event(body, false);
+            }
         }
         host.play.insert(conn, play);
         self.stat_criteria_changed(&name, stat_events);
@@ -961,9 +977,14 @@ impl Game<'_> {
                     .look_at_entity(host, gi, p.id, Some(p.location))
                     .is_some()
                 {
+                    // handleInteract: the entity and that hand only; a click the
+                    // entity passes comes back as UseItem.
+                    let hand = if p.hand == 1 { Hand::Off } else { Hand::Main };
                     let swung = self.as_guest(host, conn, |g| {
+                        g.guest_use = Some(GuestUse::Entity(hand));
                         let swings = g.swings_started;
                         let _ = g.use_item();
+                        g.guest_use = None;
                         g.swings_started != swings
                     });
                     self.lan_swing_back(host, conn, swung);
@@ -1401,6 +1422,8 @@ impl Game<'_> {
                 // A teleport into another level happens before its feedback is sent.
                 self.run_level_teleports(&mut host);
             }
+            // What the command earned is announced before its feedback.
+            self.announce_guest_advancements(&mut host);
             for line in lines {
                 host.hub.send_to(
                     c.conn,
@@ -1410,9 +1433,8 @@ impl Game<'_> {
                     }),
                 );
             }
-            if !c.integrated {
-                self.send_admin_feedback(&mut host, Some(c.conn));
-            }
+            // The other operators hear of it; never the player whose command it was.
+            self.send_admin_feedback(&mut host, Some(c.conn));
             self.lan = Some(host);
         }
     }
@@ -1801,7 +1823,7 @@ impl Game<'_> {
 
     /// `PlayerList.broadcastSystemMessage` of the advancements guests made
     /// (their own actions, commands and ticks).
-    fn announce_guest_advancements(&mut self, host: &mut LanHost) {
+    pub(super) fn announce_guest_advancements(&mut self, host: &mut LanHost) {
         for text in std::mem::take(&mut self.adv.announced) {
             host.hub
                 .system_message(horizon_client::lan::data::component_nbt(&text.component()));

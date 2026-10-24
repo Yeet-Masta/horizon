@@ -1,7 +1,11 @@
 //! `horizon-mod.toml`, a mod's manifest, and the `.hmod` file around it.
 use horizon_platform::fs::PathExt as _;
 use serde::Deserialize;
-use std::{fmt, io::Read, path::Path};
+use std::{
+    fmt,
+    io::Read,
+    path::{Path, PathBuf},
+};
 
 /// The manifest's file name, beside `mod.wasm`.
 pub const MANIFEST: &str = "horizon-mod.toml";
@@ -281,6 +285,20 @@ impl Package {
         }
         Ok(zip.finish().map_err(err)?.into_inner())
     }
+}
+
+/// The `.hmod` files and mod folders in `dir`, by name.
+pub fn find(dir: &Path) -> Vec<PathBuf> {
+    let Ok(read) = horizon_platform::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut found: Vec<PathBuf> = read
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|e| e == "hmod") || p.join(MANIFEST).fs_is_file())
+        .collect();
+    found.sort();
+    found
 }
 
 /// Turns a `wasm32-unknown-unknown` cdylib built with the SDK into the
