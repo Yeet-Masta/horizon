@@ -206,6 +206,9 @@ pub struct Guest {
     /// (Entity.DATA_AIR_SUPPLY_ID, Player.DATA_PLAYER_ABSORPTION_ID); their
     /// defaults until either changes.
     pub sent_air: (i32, f32),
+    /// The shared flags (Entity.DATA_SHARED_FLAGS_ID) the player's client was
+    /// last sent about itself.
+    pub sent_shared: i8,
     /// Where the player last died (Player.lastDeathLocation), sent with the respawn.
     pub last_death: Option<[i32; 3]>,
     /// The last action sequence to acknowledge at the next tick (-1: none).
@@ -336,6 +339,7 @@ impl Guest {
             sent_health: None,
             sent_xp: None,
             sent_air: (300, 0.0),
+            sent_shared: 0,
             last_death: None,
             ack_up_to: std::cell::Cell::new(-1),
             sent_selected: 0,
@@ -433,6 +437,13 @@ pub fn stack_to_network(
     enchantment_id: impl Fn(&str) -> Option<i32>,
     s: &Option<ItemStack>,
 ) -> Option<Stack> {
+    network_stack(&item_id, &enchantment_id, s)
+}
+fn network_stack(
+    item_id: &dyn Fn(&str) -> i32,
+    enchantment_id: &dyn Fn(&str) -> Option<i32>,
+    s: &Option<ItemStack>,
+) -> Option<Stack> {
     let s = s.as_ref()?;
     let mut stack = Stack::new(item_id(&s.item), s.count as i32);
     if s.damage > 0 {
@@ -486,6 +497,18 @@ pub fn stack_to_network(
             stack.added.push((
                 horizon_protocol::item::component::MAP_POST_PROCESSING,
                 horizon_protocol::item::Component::Int(i32::from(mode)),
+            ));
+        }
+        // A loaded crossbow's ammunition.
+        if !d.charged.is_empty() {
+            let charged = d
+                .charged
+                .iter()
+                .filter_map(|c| network_stack(item_id, enchantment_id, &Some(c.clone())))
+                .collect();
+            stack.added.push((
+                horizon_protocol::item::component::CHARGED_PROJECTILES,
+                horizon_protocol::item::Component::Stacks(charged),
             ));
         }
         // The books a lectern shows and a guest reads.

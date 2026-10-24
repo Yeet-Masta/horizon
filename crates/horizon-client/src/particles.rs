@@ -1337,6 +1337,16 @@ impl ParticleEngine {
             ParticleType::ExplosionEmitter
         };
         self.add(&ParticleOptions::simple(ty), center, [1.0, 0.0, 0.0]);
+        self.explosion_blocks(center, radius, block_count, is_air);
+    }
+    /// `ClientExplosionTracker` with `Level.DEFAULT_EXPLOSION_BLOCK_PARTICLES`.
+    pub fn explosion_blocks(
+        &mut self,
+        center: [f64; 3],
+        radius: f32,
+        block_count: usize,
+        is_air: &dyn Fn([i32; 3]) -> bool,
+    ) {
         for _ in 0..block_count.min(512) {
             let r = &mut self.random;
             let d = Vec3::new(
@@ -3224,7 +3234,7 @@ impl ParticleEngine {
             } => {
                 p.base_tick(level);
                 let (fluid, source) = level.fluid_source(ParticleLevel::block_at(p.position));
-                if !p.removed && !(fluid == Fluid::Water && source) {
+                if !(p.removed || (fluid == Fluid::Water && source)) {
                     p.removed = true;
                 }
                 if !p.removed && p.position[1] >= y_end {
