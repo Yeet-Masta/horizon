@@ -215,6 +215,8 @@ struct Inline {
     run: Box<dyn FnMut(Job) -> Done + Send>,
     send: mpsc::Sender<Done>,
 }
+/// Finished jobs the threaded web build takes in a frame (`Streaming::update`).
+const WEB_RESULTS_PER_FRAME: usize = 48;
 /// Jobs the web build's frames run, as if it had this many workers.
 #[cfg(all(target_family = "wasm", not(target_feature = "atomics")))]
 const INLINE_WORKERS: usize = 2;
@@ -899,7 +901,15 @@ impl Streaming {
         ExtraCover::refresh(&mut self.cover, &self.extra);
         self.relight_edits(world);
         let deferred = std::mem::take(&mut self.deferred);
-        let received = std::iter::from_fn(|| self.results.try_recv().ok());
+        // The threaded web build's workers can finish more in a frame than the
+        // page's thread should take up in one (each mesh is uploaded, each
+        // lit column relit): the rest wait in the channel for later frames.
+        let take = if cfg!(all(target_family = "wasm", target_feature = "atomics")) {
+            WEB_RESULTS_PER_FRAME
+        } else {
+            usize::MAX
+        };
+        let received = std::iter::from_fn(|| self.results.try_recv().ok()).take(take);
         for done in deferred.into_iter().chain(received.collect::<Vec<_>>()) {
             match done {
                 Done::Proto(x, z, proto, decorated) => {

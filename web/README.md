@@ -128,13 +128,17 @@ The web build is the native game with the operating system swapped out
   saves, screenshots) is kept in IndexedDB, written back every two seconds and as
   the page is hidden. Options → *Download the game folder* exports it as a zip.
 - **Threads**: chunk generation, lighting and meshing run on Web Workers that
-  share the page's memory (`web/worker.js`), one per core but the page's, as
-  the native game's workers do. Everything else runs on the page's thread:
+  share the page's memory (`web/worker.js`), as the native game's workers do.
+  A browser can't run them behind the page as the native game does, so there
+  are half as many as cores (`?env=HORIZON_WEB_WORKERS=3` sets it), and a
+  frame takes at most 48 finished jobs. Each thread keeps the small blocks it
+  frees for its next allocations (std's wasm allocator is one spinning lock
+  for every thread). Everything else runs on the page's thread:
   single player runs in the frame (`--in-frame`), not on the server thread the
   native game uses by default, and loaders run where they are started, so
   loading the resources holds the page for a while. The page's thread may not
-  wait on a lock, so the locks the workers share spin
-  (`horizon_platform::sync`). The `--no-threads` build has no workers: chunk
+  wait on a lock, so it spins on the locks it shares with the workers
+  (`horizon_platform::sync`); the workers wait on them. The `--no-threads` build has no workers: chunk
   work runs between frames, most urgent first, for 8 ms a frame (more while
   the level loads; `HORIZON_WEB_WORK_MS` sets it), and a job that wouldn't fit
   what is left of a frame waits for the next. Region files are written as

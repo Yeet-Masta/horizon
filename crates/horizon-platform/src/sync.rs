@@ -1,10 +1,11 @@
 //! `std::sync`'s `Mutex` and `RwLock`. A browser traps the page's thread
 //! when it would wait on shared memory (`memory.atomic.wait`), so on the web
 //! build with threads (`target_feature = "atomics"`, web/README.md) these
-//! locks never sleep: a contended lock spins until it is free, which the
-//! short holds the game makes allow. The guards are std's, so std's
-//! `Condvar` works with them (on a worker: workers may wait). Everywhere
-//! else these are std's own types.
+//! locks never sleep there: on the page's thread a contended lock spins
+//! until it is free, which the short holds the game makes allow. Workers
+//! wait as std's locks do (a worldgen lock can be held for a whole chunk).
+//! The guards are std's, so std's `Condvar` works with them (on a worker).
+//! Everywhere else these are std's own types.
 #[cfg(all(target_family = "wasm", target_feature = "atomics"))]
 pub use spin::{Mutex, RwLock};
 #[cfg(not(all(target_family = "wasm", target_feature = "atomics")))]
@@ -20,8 +21,14 @@ mod spin {
         },
     };
 
-    /// Taken by spinning on `try`, never by waiting.
-    fn spin<G>(mut attempt: impl FnMut() -> TryLockResult<G>) -> LockResult<G> {
+    /// Taken by spinning on `try` on the page's thread; elsewhere by `wait`.
+    fn spin<G>(
+        mut attempt: impl FnMut() -> TryLockResult<G>,
+        wait: impl FnOnce() -> LockResult<G>,
+    ) -> LockResult<G> {
+        if !crate::web::on_page_thread() {
+            return wait();
+        }
         loop {
             match attempt() {
                 Ok(guard) => return Ok(guard),
@@ -42,7 +49,7 @@ mod spin {
     }
     impl<T: ?Sized> Mutex<T> {
         pub fn lock(&self) -> LockResult<MutexGuard<'_, T>> {
-            spin(|| self.0.try_lock())
+            spin(|| self.0.try_lock(), || self.0.lock())
         }
         pub fn try_lock(&self) -> TryLockResult<MutexGuard<'_, T>> {
             self.0.try_lock()
@@ -84,10 +91,10 @@ mod spin {
     }
     impl<T: ?Sized> RwLock<T> {
         pub fn read(&self) -> LockResult<RwLockReadGuard<'_, T>> {
-            spin(|| self.0.try_read())
+            spin(|| self.0.try_read(), || self.0.read())
         }
         pub fn write(&self) -> LockResult<RwLockWriteGuard<'_, T>> {
-            spin(|| self.0.try_write())
+            spin(|| self.0.try_write(), || self.0.write())
         }
         pub fn try_read(&self) -> TryLockResult<RwLockReadGuard<'_, T>> {
             self.0.try_read()

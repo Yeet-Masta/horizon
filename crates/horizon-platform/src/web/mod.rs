@@ -1,6 +1,8 @@
 //! What the web build asks of its page (`web/horizon.js`): the arguments,
 //! the prepared resources and the kept game folder before the game starts,
 //! a place to keep what the game writes, the console and randomness.
+#[cfg(target_feature = "atomics")]
+mod alloc;
 pub mod rtc;
 pub mod socket;
 pub mod vfs;
@@ -199,6 +201,15 @@ mod threads {
     /// Work handed out and not yet taken up, by number.
     static WORK: Mutex<Vec<Option<Work>>> = Mutex::new(Vec::new());
 
+    thread_local! {
+        /// This thread is one of `spawn_thread`'s, not the page's.
+        static WORKER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+    /// Whether this is the page's thread, the one that may not wait.
+    pub fn on_page_thread() -> bool {
+        !WORKER.get()
+    }
+
     #[wasm_bindgen]
     extern "C" {
         /// Starts `web/worker.js` with the module and memory, to run `work`.
@@ -231,6 +242,7 @@ mod threads {
     /// `web/worker.js` runs this once its module is up: the thread's work.
     #[wasm_bindgen]
     pub fn horizon_thread_entry(work: u32) {
+        WORKER.set(true);
         let work = WORK
             .lock()
             .unwrap()
@@ -251,7 +263,7 @@ mod threads {
     }
 }
 #[cfg(target_feature = "atomics")]
-pub use threads::{hardware_concurrency, horizon_thread_entry, spawn_thread};
+pub use threads::{hardware_concurrency, horizon_thread_entry, on_page_thread, spawn_thread};
 
 /// getrandom 0.3's source (`--cfg getrandom_backend="custom"`, .cargo/config.toml).
 ///
