@@ -26,6 +26,7 @@ use horizon_core::{
 };
 use horizon_platform::fs;
 use horizon_platform::fs::PathExt as _;
+use horizon_platform::sync::Mutex;
 use horizon_world::{
     DATA_VERSION,
     chunk::BlockState,
@@ -41,7 +42,7 @@ use std::{
     collections::{BTreeMap, HashMap},
     path::{Path, PathBuf},
     sync::{
-        Arc, Condvar, Mutex, OnceLock,
+        Arc, Condvar, OnceLock,
         atomic::{AtomicU64, Ordering},
         mpsc,
     },

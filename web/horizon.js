@@ -117,6 +117,14 @@ const MEMORY64 = new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0, 5, 3, 1, 4, 1]);
 const build = await fetch("build.json").then((r) => r.json()).catch(() => ({ target: "wasm64-unknown-unknown" }));
 const wasm64 = build.target.startsWith("wasm64");
 
+// The threaded build's threads (web/README.md): Web Workers that instantiate the page's module
+// over its shared memory, each running the work the game hands it.
+globalThis.horizonSpawnThread = (name, module, memory, work) => {
+  const worker = new Worker(new URL("worker.js", import.meta.url), { type: "module", name });
+  worker.onerror = (e) => console.error(`Horizon: ${name} stopped:`, e.message ?? e);
+  worker.postMessage([module, memory, work]);
+};
+
 async function checkBrowser() {
   const checks = [];
   let adapter = null;
@@ -134,6 +142,14 @@ async function checkBrowser() {
     const ok = WebAssembly.validate(MEMORY64);
     checks.push([ok, ok ? "64-bit WebAssembly (memory64)"
       : "This build is wasm64 and needs memory64 (Chrome 133+, Firefox 134+). Use the wasm32 build otherwise."]);
+  }
+  // Shared memory exists only on a cross-origin isolated page: the server sends COOP and COEP.
+  if (build.threads) {
+    const ok = globalThis.crossOriginIsolated === true;
+    checks.push([ok, ok ? `Threads: ${navigator.hardwareConcurrency || "?"} cores`
+      : "This build uses threads, which need the page cross-origin isolated: serve it with the headers "
+        + "Cross-Origin-Opener-Policy: same-origin and Cross-Origin-Embedder-Policy: require-corp "
+        + "(web/serve.py and web/apache.htaccess do), or build with --no-threads."]);
   }
   const list = $("checks");
   list.replaceChildren(...checks.map(([ok, text]) => {

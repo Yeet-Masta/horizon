@@ -22,12 +22,13 @@ use horizon_client::{
     text::Text,
 };
 use horizon_platform::fs::PathExt as _;
+use horizon_platform::sync::Mutex;
 use horizon_platform::time::{Duration, Instant};
 use horizon_protocol::text::translatable;
 use horizon_world::nbt::{JavaString, Tag};
 use std::{
     path::PathBuf,
-    sync::{Arc, Mutex, OnceLock, mpsc},
+    sync::{Arc, OnceLock, mpsc},
 };
 
 mod status;

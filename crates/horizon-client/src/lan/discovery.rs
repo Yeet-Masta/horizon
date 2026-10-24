@@ -2,12 +2,13 @@
 //! multicast group 224.0.2.60:4445 every 1.5 seconds as
 //! `[MOTD]text[/MOTD][AD]port[/AD]`, and LanServerDetection collects those
 //! announcements for the multiplayer screen.
+use horizon_platform::sync::Mutex;
 use horizon_platform::{thread::JoinHandle, time::Duration};
 use std::{
     io,
     net::{Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket},
     sync::{
-        Arc, Mutex,
+        Arc,
         atomic::{AtomicBool, Ordering},
     },
 };

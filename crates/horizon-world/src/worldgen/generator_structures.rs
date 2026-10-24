@@ -12,12 +12,13 @@ use super::{
     },
 };
 use horizon_core::{density::Beardifier, position::ChunkPos};
+use horizon_platform::sync::{Mutex, RwLock};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::{
     collections::{BTreeSet, HashMap},
     sync::{
-        Arc, Condvar, Mutex, OnceLock, RwLock,
+        Arc, Condvar, OnceLock,
         atomic::{AtomicUsize, Ordering},
     },
 };

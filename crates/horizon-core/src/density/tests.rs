@@ -455,8 +455,8 @@ fn grid_interpolation_keeps_incremental_bulk_rounding() {
 fn grid_interpolation_uses_child_bulk_corners_and_preserves_aligned_delegation() {
     #[derive(Debug, Default)]
     struct Traced {
-        volumes: std::sync::Mutex<Vec<DensityVolume>>,
-        points: std::sync::Mutex<Vec<[i32; 3]>>,
+        volumes: horizon_platform::sync::Mutex<Vec<DensityVolume>>,
+        points: horizon_platform::sync::Mutex<Vec<[i32; 3]>>,
     }
     impl DensitySampler for Traced {
         fn sample_value(
@@ -530,7 +530,7 @@ fn grid_interpolation_uses_child_bulk_corners_and_preserves_aligned_delegation()
 #[test]
 fn surface_search_fixes_upper_bound_y_and_visits_descending_cell_boundaries() {
     #[derive(Debug, Default)]
-    struct DensityTrace(std::sync::Mutex<Vec<[i32; 3]>>);
+    struct DensityTrace(horizon_platform::sync::Mutex<Vec<[i32; 3]>>);
     impl DensitySampler for DensityTrace {
         fn sample_value(
             &self,
@@ -895,7 +895,7 @@ fn binary_bulk_preserves_child_failure_order_and_output() {
         name: &'static str,
         value: f32,
         fail: bool,
-        calls: Arc<std::sync::Mutex<Vec<&'static str>>>,
+        calls: Arc<horizon_platform::sync::Mutex<Vec<&'static str>>>,
     }
     impl DensitySampler for Input {
         fn sample_value(&self, _: &mut SamplerContext, _: [i32; 3]) -> Result<f32, SampleError> {
@@ -918,7 +918,7 @@ fn binary_bulk_preserves_child_failure_order_and_output() {
     }
     let volume = DensityVolume::new([1; 3], [0; 3], [1; 3]).unwrap();
     for left_fails in [true, false] {
-        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let calls = Arc::new(horizon_platform::sync::Mutex::new(Vec::new()));
         let sampler = BinarySampler {
             left: Arc::new(Input {
                 name: "left",

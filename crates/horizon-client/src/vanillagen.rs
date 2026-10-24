@@ -34,7 +34,7 @@ pub struct VanillaTerrain {
     /// Loot tables for generated containers.
     loot: Option<Arc<horizon_world::loot::LootData>>,
     /// A worker for structure queries from the game thread.
-    query: std::sync::Mutex<Option<GeneratorWorker>>,
+    query: horizon_platform::sync::Mutex<Option<GeneratorWorker>>,
     /// Block state id -> block index, the game's block tick type: worldgen
     /// schedules block ticks by default state id.
     tick_blocks: Vec<u32>,
@@ -135,7 +135,7 @@ impl VanillaTerrain {
             generator,
             biome_map,
             loot,
-            query: std::sync::Mutex::new(None),
+            query: horizon_platform::sync::Mutex::new(None),
             tick_blocks,
             tick_states,
             seed,
@@ -284,8 +284,8 @@ pub fn shared_data(
     dir: &Path,
     registry: &'static BlockRegistry,
 ) -> crate::Result<Arc<GeneratorData>> {
-    static CACHE: std::sync::Mutex<Vec<(std::path::PathBuf, Arc<GeneratorData>)>> =
-        std::sync::Mutex::new(Vec::new());
+    static CACHE: horizon_platform::sync::Mutex<Vec<(std::path::PathBuf, Arc<GeneratorData>)>> =
+        horizon_platform::sync::Mutex::new(Vec::new());
     let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
     if let Some((_, data)) = cache.iter().find(|(path, _)| path == dir) {
         return Ok(data.clone());

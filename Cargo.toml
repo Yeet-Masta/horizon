@@ -25,7 +25,16 @@ large_enum_variant = "allow"
 # wgpu, wgpu-core and wgpu-types 30.0.1 (and wgpu-hal) with `target_arch = "wasm32"`
 # read as `target_family = "wasm"`: wgpu 30 counts wasm64 as a native target, so
 # the web build on wasm64-unknown-unknown (web/README.md) had no WebGPU backend.
+#
+# The wasm-bindgen family from its main branch: threads on memory64 (#5378), which
+# the web build's workers need (web/README.md), aren't in a release yet. The CLI
+# must be built from the commit Cargo.lock pins (web/build.sh installs it). Back to
+# crates.io once a release has them.
 [patch.crates-io]
+wasm-bindgen = { git = "https://github.com/wasm-bindgen/wasm-bindgen", branch = "main" }
+wasm-bindgen-futures = { git = "https://github.com/wasm-bindgen/wasm-bindgen", branch = "main" }
+js-sys = { git = "https://github.com/wasm-bindgen/wasm-bindgen", branch = "main" }
+web-sys = { git = "https://github.com/wasm-bindgen/wasm-bindgen", branch = "main" }
 wgpu = { path = "third_party/wgpu" }
 wgpu-core = { path = "third_party/wgpu-core" }
 wgpu-hal = { path = "third_party/wgpu-hal" }

@@ -30,6 +30,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
     def end_headers(self):
         self.send_header("Cache-Control", "no-cache")
+        # Cross-origin isolation: the threaded build's shared memory needs it.
+        self.send_header("Cross-Origin-Opener-Policy", "same-origin")
+        self.send_header("Cross-Origin-Embedder-Policy", "require-corp")
         super().end_headers()
 
     def serve_resources(self, body):

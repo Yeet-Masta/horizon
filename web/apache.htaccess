@@ -16,10 +16,14 @@ Options -Indexes
 </IfModule>
 
 # Every build replaces the page and the module: ask each time (an unchanged file is a 304).
+# Cross-origin isolation (COOP and COEP) on every response: the threaded build's shared memory
+# exists only on an isolated page, so without mod_headers only a --no-threads build runs.
 <IfModule mod_headers.c>
   <FilesMatch "\.(html|js|json|wasm)$">
     Header set Cache-Control "no-cache"
   </FilesMatch>
+  Header always set Cross-Origin-Opener-Policy "same-origin"
+  Header always set Cross-Origin-Embedder-Policy "require-corp"
 </IfModule>
 
 # local-resources.zip holds files prepared from your own copy of Minecraft. Keep this server to

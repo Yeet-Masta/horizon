@@ -34,8 +34,8 @@ pub fn on_page(attributes: winit::window::WindowAttributes) -> winit::window::Wi
 /// seeing the key.
 #[cfg(target_family = "wasm")]
 pub mod pointer_lock {
+    use horizon_platform::sync::Mutex;
     use horizon_platform::time::{Duration, Instant};
-    use std::sync::Mutex;
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum Lock {

@@ -12,13 +12,13 @@ pub use web::*;
 
 #[cfg(target_family = "wasm")]
 mod web {
+    use crate::sync::Mutex;
     pub use std::env::{VarError, consts};
     use std::{
         collections::BTreeMap,
         ffi::{OsStr, OsString},
         io,
         path::{Path, PathBuf},
-        sync::Mutex,
     };
 
     pub(crate) struct Env {

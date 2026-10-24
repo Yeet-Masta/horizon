@@ -93,7 +93,8 @@ use horizon_core::{
     position::{BlockPos, ChunkPos},
     random::LegacyRandom,
 };
-use std::{collections::HashMap, io, path::Path, sync::Arc, sync::Mutex};
+use horizon_platform::sync::Mutex;
+use std::{collections::HashMap, io, path::Path, sync::Arc};
 
 pub mod classes;
 pub mod data;

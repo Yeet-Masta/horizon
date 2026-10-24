@@ -12,6 +12,7 @@
 pub mod env;
 pub mod fs;
 pub mod process;
+pub mod sync;
 pub mod thread;
 pub mod time;
 #[cfg(target_family = "wasm")]

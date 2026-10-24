@@ -6,13 +6,14 @@
 //! under a mounted folder shadows the zip's file. The folders `persist` names
 //! (the game folder) are kept by the page in IndexedDB: `drain` hands it
 //! what changed since the last call.
+use crate::sync::Mutex;
 use crate::time::SystemTime;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     ffi::OsString,
     io::{self, Cursor, Read, Seek, SeekFrom, Write},
     path::{Component, Path, PathBuf},
-    sync::{Arc, LazyLock, Mutex, MutexGuard},
+    sync::{Arc, LazyLock, MutexGuard},
 };
 
 struct Data {

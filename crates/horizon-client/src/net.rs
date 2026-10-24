@@ -11,6 +11,7 @@
 //! on the network thread, and on the web build beside the page's event loop
 //! over a WebSocket ([`web_route`]).
 use crate::auth::AuthSession;
+use horizon_platform::sync::Mutex;
 use horizon_platform::{thread::JoinHandle, time::Duration};
 use horizon_protocol::{
     PROTOCOL_VERSION,
@@ -23,7 +24,7 @@ use horizon_protocol::{
     text::{Language, plain, translatable},
 };
 use std::sync::{
-    Arc, Mutex,
+    Arc,
     mpsc::{Receiver, Sender, channel},
 };
 

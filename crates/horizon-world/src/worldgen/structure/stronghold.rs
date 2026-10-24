@@ -10,7 +10,8 @@ use horizon_core::{
     position::ChunkPos,
     random::{LegacyRandom, RandomSource, WorldgenRandom},
 };
-use std::{collections::BTreeSet, f64::consts::PI, sync::Mutex};
+use horizon_platform::sync::Mutex;
+use std::{collections::BTreeSet, f64::consts::PI};
 
 /// ChunkGeneratorStructureState.generateRingPositions with
 /// BiomeSource.findBiomeHorizontal (radius 112, step 1, not closest).

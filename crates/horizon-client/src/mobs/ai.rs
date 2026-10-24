@@ -1563,7 +1563,8 @@ pub fn step_sound(
 }
 /// A block sound id as a static string (the block facts intern them).
 pub fn intern_sound(s: &std::sync::Arc<str>) -> &'static str {
-    use std::{collections::HashSet, sync::Mutex};
+    use horizon_platform::sync::Mutex;
+    use std::collections::HashSet;
     static NAMES: Mutex<Option<HashSet<&'static str>>> = Mutex::new(None);
     let mut names = NAMES.lock().unwrap_or_else(|e| e.into_inner());
     let set = names.get_or_insert_with(HashSet::new);

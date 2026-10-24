@@ -8,12 +8,13 @@ use crate::{
     streaming::{LodSource, WorkerContext},
 };
 mod mesh;
+use horizon_platform::sync::Mutex;
 use horizon_platform::thread;
 use horizon_world::registry::BlockStateId;
 use std::{
     collections::VecDeque,
     sync::{
-        Arc, Condvar, Mutex,
+        Arc, Condvar,
         atomic::{AtomicBool, Ordering},
         mpsc,
     },

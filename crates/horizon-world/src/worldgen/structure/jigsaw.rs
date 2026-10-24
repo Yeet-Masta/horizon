@@ -17,12 +17,13 @@ use horizon_core::{
     position::BlockPos,
     random::{LegacyRandom, RandomSource, position_seed},
 };
+use horizon_platform::sync::RwLock;
 use serde_json::Value;
 use std::{
     cell::RefCell,
     collections::{BTreeMap, HashMap, VecDeque},
     rc::Rc,
-    sync::{Arc, OnceLock, RwLock},
+    sync::{Arc, OnceLock},
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

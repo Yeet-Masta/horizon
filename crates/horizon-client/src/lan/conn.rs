@@ -14,6 +14,7 @@ use super::{
     Joined, NetEvent, Out, Shared,
     data::{CORE_PACK, SyncData},
 };
+use horizon_platform::sync::Mutex;
 use horizon_platform::time::{Duration, Instant};
 use horizon_protocol::{
     PROTOCOL_VERSION,
@@ -30,7 +31,7 @@ use std::{
     cell::Cell,
     net::TcpStream,
     sync::{
-        Arc, Mutex, PoisonError,
+        Arc, PoisonError,
         atomic::{AtomicI32, AtomicI64, AtomicU32, AtomicUsize, Ordering},
         mpsc::{Receiver, RecvTimeoutError, Sender, TryRecvError, channel},
     },

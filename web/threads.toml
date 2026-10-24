@@ -1,0 +1,30 @@
+# The web build's threads (web/README.md): shared memory and atomics, so the chunk
+# workers run on Web Workers beside the page. web/build.sh passes this with
+# `--config web/threads.toml` (it adds to .cargo/config.toml's rustflags) and builds
+# std with -Zbuild-std, since std must be built with atomics too. The page must be
+# cross-origin isolated (COOP and COEP headers: web/serve.py, web/apache.htaccess).
+[target.wasm64-unknown-unknown]
+rustflags = [
+  "-Ctarget-feature=+atomics,+bulk-memory,+mutable-globals",
+  "-Clink-arg=--shared-memory",
+  # 8 GiB: shared memory declares its maximum.
+  "-Clink-arg=--max-memory=8589934592",
+  "-Clink-arg=--import-memory",
+  "-Clink-arg=--export=__wasm_init_tls",
+  "-Clink-arg=--export=__tls_size",
+  "-Clink-arg=--export=__tls_align",
+  "-Clink-arg=--export=__tls_base",
+]
+
+[target.wasm32-unknown-unknown]
+rustflags = [
+  "-Ctarget-feature=+atomics,+bulk-memory,+mutable-globals",
+  "-Clink-arg=--shared-memory",
+  # 4 GiB, all wasm32 addresses.
+  "-Clink-arg=--max-memory=4294967296",
+  "-Clink-arg=--import-memory",
+  "-Clink-arg=--export=__wasm_init_tls",
+  "-Clink-arg=--export=__tls_size",
+  "-Clink-arg=--export=__tls_align",
+  "-Clink-arg=--export=__tls_base",
+]

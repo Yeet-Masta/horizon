@@ -11,12 +11,13 @@ use horizon_core::geometry::{
     Direction,
     trig::{self, Mth},
 };
+use horizon_platform::sync::Mutex;
 use horizon_world::{
     block_render::FaceVisibility,
     registry::{BlockRegistry, BlockStateId},
 };
 use serde_json::Value;
-use std::{collections::HashMap, f32::consts::PI, path::Path, sync::Mutex};
+use std::{collections::HashMap, f32::consts::PI, path::Path};
 
 /// One baked `ModelPart`: initial pose, textured polygons (pixel units,
 /// normalized UVs) and named children.

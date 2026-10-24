@@ -5,6 +5,7 @@ use crate::{
     lod::{Column, Span, Surface},
     streaming::LodDetail,
 };
+use horizon_platform::sync::Mutex;
 use horizon_platform::thread;
 use horizon_world::{
     heightmap::HeightmapState,
@@ -14,7 +15,7 @@ use horizon_world::{
 use std::{
     collections::VecDeque,
     sync::{
-        Condvar, Mutex,
+        Condvar,
         atomic::{AtomicBool, Ordering},
         mpsc,
     },

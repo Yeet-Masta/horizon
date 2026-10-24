@@ -38,7 +38,7 @@ pub(super) struct EndState {
     /// Ticks until the player can use a gateway again (TheEndGatewayBlockEntity cooldown).
     gateway_cooldown: u32,
     /// The Overworld generator, for stronghold positions (ServerLevel.findNearestMapStructure).
-    locator: std::sync::Mutex<Option<Arc<VanillaTerrain>>>,
+    locator: horizon_platform::sync::Mutex<Option<Arc<VanillaTerrain>>>,
     /// Thrown eyes of ender in flight.
     eyes: Vec<EyeOfEnder>,
     flash: EndFlash,

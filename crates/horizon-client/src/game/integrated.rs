@@ -22,6 +22,7 @@ use horizon_client::{
     settings::Settings,
     title::WorldOptions,
 };
+use horizon_platform::sync::Mutex;
 use horizon_platform::{
     thread::JoinHandle,
     time::{Duration, Instant},
@@ -32,7 +33,7 @@ use std::{
     net::TcpListener,
     path::Path,
     sync::{
-        Arc, Mutex,
+        Arc,
         atomic::{AtomicBool, AtomicI32, AtomicU16, AtomicU32, Ordering},
         mpsc::{Receiver, Sender, channel, sync_channel},
     },

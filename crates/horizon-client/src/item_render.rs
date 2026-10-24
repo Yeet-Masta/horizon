@@ -27,12 +27,13 @@ use horizon_assets::{
     resolve::{MISSING_MODEL, ModelLibrary},
 };
 use horizon_platform::fs;
+use horizon_platform::sync::Mutex;
 use horizon_world::nbt::Tag;
 use serde_json::Value;
 use std::{
     collections::{BTreeMap, HashMap},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::Arc,
 };
 
 /// One quad as submitted for drawing: pose-space corners, atlas UVs, the

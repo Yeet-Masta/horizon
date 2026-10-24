@@ -3,9 +3,10 @@
 //! from `pack.mcmeta` `language` sections, and a process-wide current
 //! language used by every screen.
 use horizon_platform::fs::PathExt as _;
+use horizon_platform::sync::RwLock;
 use std::{
     collections::{BTreeMap, HashMap},
-    sync::{Arc, RwLock},
+    sync::Arc,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]

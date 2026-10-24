@@ -9,13 +9,20 @@ of Minecraft: Java Edition 26.3. The page never downloads game files.
 ## Build
 
 ```sh
-cargo install wasm-bindgen-cli --version 0.2.129 --locked   # the version Cargo.lock pins
-web/build.sh             # wasm64: nightly Rust and -Zbuild-std (rustup installs rust-src)
-web/build.sh --wasm32    # wasm32 on stable Rust, for browsers without memory64 (Safari)
-web/build.sh --release   # thin LTO instead of the quicker `fast` profile
+# The wasm-bindgen CLI from the commit Cargo.lock pins (web/build.sh prints this command too):
+cargo install wasm-bindgen-cli --git https://github.com/wasm-bindgen/wasm-bindgen --rev 39ae823bbc14c9d0a4a2869361483b5453a9b133 --locked --force
+web/build.sh               # wasm64 with threads: nightly Rust and -Zbuild-std (rustup installs rust-src)
+web/build.sh --wasm32      # wasm32, for browsers without memory64 (Safari)
+web/build.sh --no-threads  # one thread: for servers that can't send the COOP/COEP headers
+web/build.sh --release     # thin LTO instead of the quicker `fast` profile
 ```
 
-On Windows, `web\build.bat` takes the same options (`--wasm32`, `--release`).
+On Windows, `web\build.bat` takes the same options.
+
+wasm-bindgen comes from its main branch for now (`[patch.crates-io]` in the
+root `Cargo.toml`): threads on memory64 aren't in a release yet. The CLI must
+be built from the same commit as the crates; `web/build.sh` says so when it
+isn't.
 
 The page and module land in `web/dist/`. When `wasm-opt` (binaryen) is on the
 `PATH` the module is optimized further.
@@ -104,8 +111,12 @@ to fill a friend's view.
 - The wasm64 build also needs memory64: Chrome and Edge 133+, Firefox 134+. Safari
   needs the wasm32 build.
 
-The page checks both and says what is missing. No cross-origin isolation is
-needed: the game runs on the page's one thread.
+- The threaded build (the default) needs a cross-origin isolated page: the
+  server sends `Cross-Origin-Opener-Policy: same-origin` and
+  `Cross-Origin-Embedder-Policy: require-corp`. `web/serve.py` does, and so does
+  `web/apache.htaccess` with `mod_headers`. Anywhere else, use `--no-threads`.
+
+The page checks all of these and says what is missing.
 
 ## What differs from the native game
 
@@ -116,11 +127,17 @@ The web build is the native game with the operating system swapped out
   `/app/resources` and read in place; the game folder (`/home/horizon`: options,
   saves, screenshots) is kept in IndexedDB, written back every two seconds and as
   the page is hidden. Options → *Download the game folder* exports it as a zip.
-- **Threads**: none. Single player runs in the frame (`--in-frame`), not on
-  the server thread the native game uses by default. Chunk generation,
-  lighting and meshing run between frames, most urgent first, for 8 ms a frame (more while the level loads;
-  `HORIZON_WEB_WORK_MS` sets it). Loaders run where they are started, so
-  loading the resources holds the page for a while. Region files are written as
+- **Threads**: chunk generation, lighting and meshing run on Web Workers that
+  share the page's memory (`web/worker.js`), one per core but the page's, as
+  the native game's workers do. Everything else runs on the page's thread:
+  single player runs in the frame (`--in-frame`), not on the server thread the
+  native game uses by default, and loaders run where they are started, so
+  loading the resources holds the page for a while. The page's thread may not
+  wait on a lock, so the locks the workers share spin
+  (`horizon_platform::sync`). The `--no-threads` build has no workers: chunk
+  work runs between frames, most urgent first, for 8 ms a frame (more while
+  the level loads; `HORIZON_WEB_WORK_MS` sets it), and a job that wouldn't fit
+  what is left of a frame waits for the next. Region files are written as
   they are saved.
 - **Graphics**: WebGPU only. The device opens before the game starts. Block
   textures are split across texture arrays at the adapter's layer limit.

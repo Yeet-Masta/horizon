@@ -392,6 +392,7 @@ fn noise_aquifer_probe(line: &str, out: &mut impl Write) -> Result<(), Box<dyn s
         density::{ConstantSampler, DensitySampler, SampleError},
         random::PositionalRandom,
     };
+    use horizon_platform::sync::Mutex;
     use horizon_world::{
         registry::BlockStateId,
         worldgen::aquifer::{
@@ -399,7 +400,7 @@ fn noise_aquifer_probe(line: &str, out: &mut impl Write) -> Result<(), Box<dyn s
             FluidStatus, GlobalFluidPicker, NoiseBasedAquifer,
         },
     };
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
     #[derive(Debug)]
     struct Traced {
         sampler: Arc<dyn DensitySampler>,

@@ -10,7 +10,7 @@ use horizon_core::{
     position::BlockPos,
     random::{LegacyRandom, PositionalRandom, RandomSource},
 };
-use std::sync::Mutex;
+use horizon_platform::sync::Mutex;
 
 #[derive(Debug)]
 pub struct DesertPyramidPiece {

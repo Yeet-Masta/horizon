@@ -6,12 +6,13 @@ use crate::hud::{HudAtlas, HudBatch, rgba};
 use crate::lan::discovery::Scanner;
 use crate::text::{DARK_GRAY, GRAY, Text, format_translation};
 use crate::title::confirm_top;
+use horizon_platform::sync::Mutex;
 use horizon_platform::time::Duration;
 use horizon_protocol::servers::{self, ServerEntry};
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::Arc,
 };
 
 /// The result of pinging one address.

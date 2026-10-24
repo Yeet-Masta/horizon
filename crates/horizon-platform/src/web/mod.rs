@@ -33,6 +33,9 @@ extern "C" {
     fn console_debug(message: &str);
     #[wasm_bindgen(js_namespace = crypto, js_name = getRandomValues)]
     fn get_random_values(buf: &mut [u8]);
+    /// Browsers refuse a view of shared memory, as the threaded build's is.
+    #[wasm_bindgen(js_namespace = crypto, js_name = getRandomValues)]
+    fn get_random_values_into(buf: &Uint8Array);
 }
 
 /// The browser console: 1 error, 2 warning, 3 info, else debug.
@@ -174,9 +177,81 @@ pub fn flush() {
 fn fill(buf: &mut [u8]) {
     // getRandomValues fills at most 64 KiB per call.
     for chunk in buf.chunks_mut(65536) {
-        get_random_values(chunk);
+        if cfg!(target_feature = "atomics") {
+            let copy = Uint8Array::new_with_length(chunk.len() as u32);
+            get_random_values_into(&copy);
+            copy.copy_to(chunk);
+        } else {
+            get_random_values(chunk);
+        }
     }
 }
+
+/// The threaded build's threads (web/README.md): each is a Web Worker
+/// (`web/worker.js`) that instantiates the page's module over its memory and
+/// runs the work handed to it here.
+#[cfg(target_feature = "atomics")]
+mod threads {
+    use crate::sync::Mutex;
+    use wasm_bindgen::prelude::*;
+
+    type Work = Box<dyn FnOnce() + Send>;
+    /// Work handed out and not yet taken up, by number.
+    static WORK: Mutex<Vec<Option<Work>>> = Mutex::new(Vec::new());
+
+    #[wasm_bindgen]
+    extern "C" {
+        /// Starts `web/worker.js` with the module and memory, to run `work`.
+        #[wasm_bindgen(js_namespace = globalThis, js_name = horizonSpawnThread)]
+        fn horizon_spawn_thread(name: &str, module: JsValue, memory: JsValue, work: u32);
+    }
+
+    pub fn spawn_thread(name: &str, work: Work) {
+        let id = {
+            let mut pending = WORK.lock().unwrap();
+            match pending.iter().position(Option::is_none) {
+                Some(free) => {
+                    pending[free] = Some(work);
+                    free
+                }
+                None => {
+                    pending.push(Some(work));
+                    pending.len() - 1
+                }
+            }
+        };
+        horizon_spawn_thread(
+            name,
+            wasm_bindgen::module(),
+            wasm_bindgen::memory(),
+            id as u32,
+        );
+    }
+
+    /// `web/worker.js` runs this once its module is up: the thread's work.
+    #[wasm_bindgen]
+    pub fn horizon_thread_entry(work: u32) {
+        let work = WORK
+            .lock()
+            .unwrap()
+            .get_mut(work as usize)
+            .and_then(Option::take);
+        if let Some(work) = work {
+            work();
+        }
+    }
+
+    /// `navigator.hardwareConcurrency`: the cores the browser reports.
+    pub fn hardware_concurrency() -> usize {
+        let navigator = super::get(&js_sys::global(), "navigator");
+        super::get(&navigator, "hardwareConcurrency")
+            .as_f64()
+            .map_or(1, |n| n as usize)
+            .max(1)
+    }
+}
+#[cfg(target_feature = "atomics")]
+pub use threads::{hardware_concurrency, horizon_thread_entry, spawn_thread};
 
 /// getrandom 0.3's source (`--cfg getrandom_backend="custom"`, .cargo/config.toml).
 ///

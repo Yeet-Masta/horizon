@@ -6,8 +6,9 @@ use crate::{
     text::Text,
 };
 use horizon_platform::fs::PathExt as _;
+use horizon_platform::sync::RwLock;
 use horizon_platform::time::Instant;
-use std::{collections::HashMap, path::Path, sync::RwLock};
+use std::{collections::HashMap, path::Path};
 
 /// `GuiSpriteScaling.NineSlice`: the sprite's size in GUI pixels, whatever
 /// its texture's resolution, its borders (left, top, right, bottom) in the

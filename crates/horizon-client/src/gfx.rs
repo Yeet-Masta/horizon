@@ -560,10 +560,10 @@ fn sprite_split() -> u32 {
     // WebGPU promises only 256 layers: the web build splits at what its
     // adapter has, opened before the textures are prepared.
     #[cfg(target_family = "wasm")]
-    let split = match WEB_DEVICE.lock().unwrap().as_ref() {
+    let split = WEB_DEVICE.with_borrow(|opened| match opened {
         Some(opened) => split.min(opened.1.limits().max_texture_array_layers.max(1)),
         None => split,
-    };
+    });
     split
 }
 /// Sprite arrays terrain.wgsl binds (`sprites`, `sprites_1`...).
@@ -829,12 +829,14 @@ fn surface_format(
 }
 /// The web build's device: requesting one waits on the browser, which
 /// `Renderer::new` (blocked on where it is called) can't, so the page's start
-/// opens it ([`open_web_device`]) before the game does.
+/// opens it ([`open_web_device`]) before the game does. WebGPU's objects stay
+/// on the page's thread.
 #[cfg(target_family = "wasm")]
-#[allow(clippy::type_complexity)]
-static WEB_DEVICE: std::sync::Mutex<
-    Option<(wgpu::Instance, wgpu::Adapter, wgpu::Device, wgpu::Queue)>,
-> = std::sync::Mutex::new(None);
+type WebDevice = (wgpu::Instance, wgpu::Adapter, wgpu::Device, wgpu::Queue);
+#[cfg(target_family = "wasm")]
+thread_local! {
+    static WEB_DEVICE: std::cell::RefCell<Option<WebDevice>> = const { std::cell::RefCell::new(None) };
+}
 /// Opens the browser's WebGPU device, with what `open_device` asks natively.
 #[cfg(target_family = "wasm")]
 pub async fn open_web_device() -> Result<()> {
@@ -872,7 +874,7 @@ pub async fn open_web_device() -> Result<()> {
         })
         .await
         .map_err(|e| format!("{NO_GPU_DRIVER} (device: {e})"))?;
-    *WEB_DEVICE.lock().unwrap() = Some((instance, adapter, device, queue));
+    WEB_DEVICE.set(Some((instance, adapter, device, queue)));
     Ok(())
 }
 /// The device [`open_web_device`] opened, and a surface on the window's canvas.
@@ -884,9 +886,7 @@ async fn open_device(
     layers: u32,
 ) -> Result<Opened> {
     let (instance, adapter, device, queue) = WEB_DEVICE
-        .lock()
-        .unwrap()
-        .clone()
+        .with_borrow(Clone::clone)
         .ok_or("the WebGPU device is not open")?;
     check_layers(&adapter.limits(), layers)?;
     let surface = if offscreen {

@@ -48,12 +48,13 @@ use horizon_core::{
 };
 use horizon_platform::fs;
 use horizon_platform::fs::PathExt as _;
+use horizon_platform::sync::Mutex;
 use serde_json::Value;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     io,
     path::Path,
-    sync::{Arc, Mutex, OnceLock},
+    sync::{Arc, OnceLock},
 };
 
 #[derive(Debug)]

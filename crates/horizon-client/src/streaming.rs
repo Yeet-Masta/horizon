@@ -10,13 +10,14 @@ use crate::{
     world::World,
 };
 use horizon_core::biome::BiomeZoom;
+use horizon_platform::sync::{Mutex, RwLock};
 use horizon_platform::thread;
 use horizon_world::block_render::FaceVisibility;
 use horizon_world::worldgen::decoration_order::DecorationOrder;
 use std::{
     collections::{BinaryHeap, HashSet},
     sync::{
-        Arc, Condvar, Mutex, RwLock,
+        Arc, Condvar,
         atomic::{AtomicBool, Ordering},
         mpsc,
     },
@@ -206,22 +207,49 @@ struct Shared {
     /// packs reload; each mesh job takes the current one.
     context: RwLock<Arc<WorkerContext>>,
 }
-/// The web build's worker: the job runner, and where its results go.
-#[cfg(target_family = "wasm")]
+/// The single-threaded web build's worker: the job runner, and where its
+/// results go. The threaded web build (web/README.md) has a pool of Web
+/// Workers, as natively.
+#[cfg(all(target_family = "wasm", not(target_feature = "atomics")))]
 struct Inline {
     run: Box<dyn FnMut(Job) -> Done + Send>,
     send: mpsc::Sender<Done>,
 }
 /// Jobs the web build's frames run, as if it had this many workers.
-#[cfg(target_family = "wasm")]
+#[cfg(all(target_family = "wasm", not(target_feature = "atomics")))]
 const INLINE_WORKERS: usize = 2;
+#[cfg(all(target_family = "wasm", not(target_feature = "atomics")))]
+impl Job {
+    /// Its kind, for the web build's cost estimates (`Streaming::pump`).
+    fn kind(&self) -> usize {
+        match self {
+            Self::Generate(..) => 0,
+            Self::Decorate(..) => 1,
+            Self::Finish(..) => 2,
+            Self::Light(..) => 3,
+            Self::Mesh(..) => 4,
+            Self::Save(..) => 5,
+        }
+    }
+}
 
 pub struct Streaming {
     shared: Arc<Shared>,
     results: mpsc::Receiver<Done>,
     threads: Vec<thread::JoinHandle<()>>,
-    #[cfg(target_family = "wasm")]
+    /// The pool's workers (the threaded web build's are never joined, so
+    /// `threads` holds none of them).
+    #[cfg_attr(
+        all(target_family = "wasm", not(target_feature = "atomics")),
+        allow(dead_code)
+    )]
+    worker_count: usize,
+    #[cfg(all(target_family = "wasm", not(target_feature = "atomics")))]
     inline: Inline,
+    /// What a job of each kind ([`Job::kind`]) has lately taken the web
+    /// build's frames, in seconds.
+    #[cfg(all(target_family = "wasm", not(target_feature = "atomics")))]
+    job_costs: [f64; 6],
     order: u64,
     generating: FxHashSet<(i32, i32)>,
     generation_scan: GenerationScan,
@@ -505,8 +533,8 @@ impl Streaming {
                 }
             }
         };
-        #[cfg(target_family = "wasm")]
-        let (inline, threads): (Inline, Vec<thread::JoinHandle<()>>) = {
+        #[cfg(all(target_family = "wasm", not(target_feature = "atomics")))]
+        let (inline, threads, worker_count): (Inline, Vec<thread::JoinHandle<()>>, usize) = {
             let _ = threads;
             (
                 Inline {
@@ -514,49 +542,70 @@ impl Streaming {
                     send: send.clone(),
                 },
                 Vec::new(),
+                INLINE_WORKERS,
             )
         };
-        #[cfg(not(target_family = "wasm"))]
-        let threads = (0..threads.max(1))
-            .map(|i| {
+        // The threaded web build's pool is Web Workers, one per core but the
+        // page's (`spawn_worker`); they end with `stop` and are never joined.
+        #[cfg(any(not(target_family = "wasm"), target_feature = "atomics"))]
+        let (threads, worker_count) = {
+            let count = if horizon_platform::WEB {
+                horizon_platform::thread::worker_count()
+            } else {
+                threads.max(1)
+            };
+            #[cfg_attr(target_family = "wasm", allow(unused_mut))]
+            let mut handles = Vec::new();
+            for i in 0..count {
                 let shared = shared.clone();
                 let send = send.clone();
                 let generator = generator.clone();
                 let light = context.light.clone();
                 let worker = worker.clone();
-                thread::Builder::new()
-                    .name(format!("horizon-worker-{i}"))
-                    .spawn(move || {
-                        // Ticks and frames come first (horizon_threads).
-                        horizon_threads::behind_server();
-                        let mut run = worker(generator, light);
-                        loop {
-                            let job = {
-                                let mut queue = shared.queue.lock().unwrap();
-                                loop {
-                                    if shared.stop.load(Ordering::Relaxed) {
-                                        return;
-                                    }
-                                    if let Some(job) = queue.pop() {
-                                        break job.job;
-                                    }
-                                    queue = shared.ready.wait(queue).unwrap();
+                let work = move || {
+                    // Ticks and frames come first (horizon_threads).
+                    horizon_threads::behind_server();
+                    let mut run = worker(generator, light);
+                    loop {
+                        let job = {
+                            let mut queue = shared.queue.lock().unwrap();
+                            loop {
+                                if shared.stop.load(Ordering::Relaxed) {
+                                    return;
                                 }
-                            };
-                            if send.send(run(job)).is_err() {
-                                return;
+                                if let Some(job) = queue.pop() {
+                                    break job.job;
+                                }
+                                queue = shared.ready.wait(queue).unwrap();
                             }
+                        };
+                        if send.send(run(job)).is_err() {
+                            return;
                         }
-                    })
-                    .expect("spawn worker")
-            })
-            .collect();
+                    }
+                };
+                let name = format!("horizon-worker-{i}");
+                #[cfg(not(target_family = "wasm"))]
+                handles.push(
+                    thread::Builder::new()
+                        .name(name)
+                        .spawn(work)
+                        .expect("spawn worker"),
+                );
+                #[cfg(target_family = "wasm")]
+                horizon_platform::thread::spawn_worker(&name, work).expect("spawn worker");
+            }
+            (handles, count)
+        };
         Self {
             shared,
             results,
             threads,
-            #[cfg(target_family = "wasm")]
+            worker_count,
+            #[cfg(all(target_family = "wasm", not(target_feature = "atomics")))]
             inline,
+            #[cfg(all(target_family = "wasm", not(target_feature = "atomics")))]
+            job_costs: [0.0; 6],
             order: 0,
             generating: Default::default(),
             generation_scan: GenerationScan::default(),
@@ -842,7 +891,7 @@ impl Streaming {
         world: &mut World,
     ) -> (Vec<((i32, i32, i32), SectionMesh)>, Vec<Arc<Chunk>>) {
         let mut uploads = Vec::new();
-        #[cfg(target_family = "wasm")]
+        #[cfg(all(target_family = "wasm", not(target_feature = "atomics")))]
         self.pump();
         if self.paused {
             return (uploads, Vec::new());
@@ -1392,13 +1441,12 @@ impl Streaming {
     }
     /// The workers work is scheduled for.
     fn workers(&self) -> usize {
-        #[cfg(target_family = "wasm")]
-        return INLINE_WORKERS;
-        #[cfg(not(target_family = "wasm"))]
-        self.threads.len()
+        self.worker_count
     }
-    /// The next finished job, waiting until `deadline` for one. The web build
-    /// has no worker to wait on: it runs the next queued job itself.
+    /// The next finished job, waiting until `deadline` for one. The
+    /// single-threaded web build has no worker to wait on: it runs the next
+    /// queued job itself; the threaded one may not wait on the page's thread,
+    /// so it looks until one comes.
     fn next_result(
         &mut self,
         deadline: horizon_platform::time::Instant,
@@ -1408,7 +1456,21 @@ impl Streaming {
             let left = deadline.saturating_duration_since(horizon_platform::time::Instant::now());
             self.results.recv_timeout(left)
         }
-        #[cfg(target_family = "wasm")]
+        #[cfg(all(target_family = "wasm", target_feature = "atomics"))]
+        loop {
+            match self.results.try_recv() {
+                Ok(done) => return Ok(done),
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    return Err(mpsc::RecvTimeoutError::Disconnected);
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
+            if horizon_platform::time::Instant::now() >= deadline {
+                return Err(mpsc::RecvTimeoutError::Timeout);
+            }
+            std::hint::spin_loop();
+        }
+        #[cfg(all(target_family = "wasm", not(target_feature = "atomics")))]
         loop {
             if let Ok(done) = self.results.try_recv() {
                 return Ok(done);
@@ -1427,8 +1489,12 @@ impl Streaming {
         }
     }
     /// The web build's workers: queued jobs, most urgent first, for a slice
-    /// of the frame (`HORIZON_WEB_WORK_MS`, more while the level loads).
-    #[cfg(target_family = "wasm")]
+    /// of the frame (`HORIZON_WEB_WORK_MS`, more while the level loads). A
+    /// job runs to its end, so one that would overrun what is left of the
+    /// slice (by what its kind lately took) waits for a later frame, and
+    /// cheaper ones behind it (meshes, mostly) fill the slice instead. The
+    /// first job of a frame always runs, so the heavy kinds still get done.
+    #[cfg(all(target_family = "wasm", not(target_feature = "atomics")))]
     fn pump(&mut self) {
         use horizon_platform::time::{Duration, Instant};
         static BUDGET: std::sync::OnceLock<Duration> = std::sync::OnceLock::new();
@@ -1439,16 +1505,39 @@ impl Streaming {
                 .unwrap_or(8u64);
             Duration::from_millis(ms)
         });
+        /// Jobs looked past for one that fits, a frame.
+        const LOOK_AHEAD: usize = 64;
         let budget = if self.loading { budget * 6 } else { budget };
         let started = Instant::now();
-        while started.elapsed() < budget {
+        let mut ran = 0;
+        let mut waiting = Vec::new();
+        loop {
+            let left = budget.saturating_sub(started.elapsed()).as_secs_f64();
+            if left <= 0.0 || waiting.len() >= LOOK_AHEAD {
+                break;
+            }
             let job = self.shared.queue.lock().unwrap().pop();
             let Some(queued) = job else {
                 break;
             };
+            let kind = queued.job.kind();
+            if ran > 0 && self.job_costs[kind] > left {
+                waiting.push(queued);
+                continue;
+            }
+            let at = Instant::now();
             let done = (self.inline.run)(queued.job);
+            let took = at.elapsed().as_secs_f64();
+            let cost = &mut self.job_costs[kind];
+            *cost = if *cost == 0.0 {
+                took
+            } else {
+                *cost * 0.8 + took * 0.2
+            };
+            ran += 1;
             let _ = self.inline.send.send(done);
         }
+        self.shared.queue.lock().unwrap().extend(waiting);
     }
     fn in_range(&self, x: i32, z: i32, margin: i32) -> bool {
         self.ranges().in_range(x, z, margin)

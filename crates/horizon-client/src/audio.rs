@@ -13,10 +13,11 @@ use crate::sound_events::{Sound, SoundRegistry};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use horizon_core::random::{LegacyRandom, RandomSource};
 use horizon_platform::fs;
+use horizon_platform::sync::Mutex;
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::Arc,
 };
 
 /// An OpenAL source's state.
@@ -1110,7 +1111,8 @@ mod tests {
 #[cfg(target_family = "wasm")]
 mod web_output {
     use super::{Mixer, Result, mix};
-    use std::sync::{Arc, Mutex};
+    use horizon_platform::sync::Mutex;
+    use std::sync::Arc;
     use wasm_bindgen::{JsCast, closure::Closure};
 
     /// Frames per callback: about 43 ms at 48 kHz.

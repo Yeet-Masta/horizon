@@ -9,10 +9,11 @@
 //! (another server's or a mod's) gets the type its parser and properties
 //! describe.
 use super::{ArgType, Dispatcher, Node, NodeKind, Suggests};
+use horizon_platform::sync::Mutex;
 use horizon_protocol::packets::play::{ARGUMENT_TYPES, ArgumentProperties, Commands};
 use std::{
     collections::{HashSet, VecDeque},
-    sync::{Mutex, OnceLock},
+    sync::OnceLock,
 };
 
 /// The command id of every executable node of a server's tree: the chat

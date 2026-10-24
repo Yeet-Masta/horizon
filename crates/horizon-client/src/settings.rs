@@ -13,7 +13,8 @@ pub const SOUND_SOURCES: [&str; 11] = [
 ];
 
 /// Per-source volumes for the mixer (soundCategory_* except master).
-static SOURCE_VOLUMES: std::sync::RwLock<[f32; 11]> = std::sync::RwLock::new([1.0; 11]);
+static SOURCE_VOLUMES: horizon_platform::sync::RwLock<[f32; 11]> =
+    horizon_platform::sync::RwLock::new([1.0; 11]);
 pub fn set_source_volumes(volumes: [f32; 11]) {
     *SOURCE_VOLUMES.write().unwrap_or_else(|e| e.into_inner()) = volumes;
 }

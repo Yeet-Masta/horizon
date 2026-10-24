@@ -70,7 +70,7 @@ pub(super) struct Decoration {
     blocks: FeatureBlocks,
     catalog: FeatureCatalog,
     /// Placed features referenced by name (feature pool elements), decoded lazily.
-    named: std::sync::Mutex<HashMap<String, Option<Arc<PlacedFeatureDefinition>>>>,
+    named: horizon_platform::sync::Mutex<HashMap<String, Option<Arc<PlacedFeatureDefinition>>>>,
     /// BlockBehaviour.Properties.postProcess: states whose worldgen writes mark
     /// their own position (mushrooms) or the one above (soul sand, magma).
     postprocess_self: Vec<BlockStateId>,
@@ -237,7 +237,7 @@ impl Decoration {
             blocks: FeatureBlocks::from_registry(registry)?,
             bindings,
             catalog,
-            named: std::sync::Mutex::new(HashMap::new()),
+            named: horizon_platform::sync::Mutex::new(HashMap::new()),
         }))
     }
     fn named_feature(&self, name: &str) -> Option<Arc<PlacedFeatureDefinition>> {

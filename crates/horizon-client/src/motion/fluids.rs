@@ -2,6 +2,7 @@
 //! (water, waterlogged blocks, bubble columns and lava, with their currents), the
 //! water-entry splash and the fall resets that hinge on touching water.
 use super::*;
+use horizon_platform::sync::Mutex;
 use horizon_world::{
     entity_fluid::{
         CurrentTarget, EntityFluidInteraction, FluidInteractionWorld, FluidMembership,
@@ -13,7 +14,6 @@ use horizon_world::{
     fluid_shape::FluidShapeCache,
     water_splash::{self, SplashParticle, WaterSplashWorld},
 };
-use std::sync::Mutex;
 
 /// `FluidTags.WATER` and `FluidTags.LAVA`, the fluids with a current.
 pub const WATER: FluidTagId = FluidTagId(0);

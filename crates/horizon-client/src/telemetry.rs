@@ -3,10 +3,11 @@
 //! summary, in the outbox. It never sends those itself: the launcher does, at its next start (the
 //! game's only sending is the anonymous "I'm playing" ping, `heartbeat.rs`).
 //! Without the player's yes for that kind nothing is kept, and crash-reports/ stays local.
+use horizon_platform::sync::Mutex;
 use horizon_platform::time::Instant;
 use std::path::Path;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Mutex, OnceLock};
 
 use horizon_telemetry::payload::{Crash, Display, Perf, Settings, System, Timings};
 use horizon_telemetry::scrub::Scrubber;

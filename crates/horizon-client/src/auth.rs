@@ -183,7 +183,8 @@ fn agent() -> ureq::Agent {
 /// The discovery document, fetched once per game (a failure is retried next time).
 #[cfg(not(target_family = "wasm"))]
 fn discovery() -> Result<Arc<serde_json::Value>, JoinError> {
-    static CACHE: std::sync::Mutex<Option<Arc<serde_json::Value>>> = std::sync::Mutex::new(None);
+    static CACHE: horizon_platform::sync::Mutex<Option<Arc<serde_json::Value>>> =
+        horizon_platform::sync::Mutex::new(None);
     if let Some(d) = CACHE.lock().unwrap().clone() {
         return Ok(d);
     }

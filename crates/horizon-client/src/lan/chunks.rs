@@ -98,9 +98,9 @@ pub struct ChunkEncoder {
     /// The save's tables, for the heightmaps.
     pub tables: Option<Arc<crate::save::SaveTables>>,
     /// Sections already looked at, by address (see `Encoded`).
-    cache: std::sync::Mutex<FxHashMap<usize, Encoded>>,
+    cache: horizon_platform::sync::Mutex<FxHashMap<usize, Encoded>>,
     /// Each column's heightmaps, with the sections they were made from.
-    heights: std::sync::Mutex<HashMap<(i32, i32), Heights>>,
+    heights: horizon_platform::sync::Mutex<HashMap<(i32, i32), Heights>>,
     /// The level's sections among a column's: all of them in the Overworld,
     /// y 0 to 255 in the Nether and the End (`DimensionType` min_y and height).
     sections: std::ops::Range<usize>,
@@ -337,7 +337,7 @@ impl Warm {
 /// The warm-up threads (one per core besides the tick's) and the job they
 /// take: its number, and the job while it has sections left to take.
 struct WarmPool {
-    job: std::sync::Mutex<(u64, Option<Arc<Warm>>)>,
+    job: horizon_platform::sync::Mutex<(u64, Option<Arc<Warm>>)>,
     ready: std::sync::Condvar,
 }
 

@@ -11,10 +11,11 @@
 // The web build has no log file: its writer goes unused there.
 #![cfg_attr(target_family = "wasm", allow(dead_code))]
 use horizon_platform::fs::{self, File, OpenOptions};
+use horizon_platform::sync::Mutex;
 use std::collections::VecDeque;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, mpsc};
+use std::sync::mpsc;
 
 use chrono::{DateTime, Local, NaiveDate};
 

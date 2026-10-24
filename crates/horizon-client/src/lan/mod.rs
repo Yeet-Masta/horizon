@@ -26,6 +26,7 @@ pub mod tracking;
 pub mod waypoints;
 
 pub use conn::{Holding, PlayerSender, flush_all};
+use horizon_platform::sync::Mutex;
 use horizon_platform::{thread::JoinHandle, time::Duration};
 use horizon_protocol::packets::play;
 use horizon_protocol::{
@@ -37,7 +38,7 @@ use std::{
     io,
     net::{SocketAddr, TcpListener, TcpStream},
     sync::{
-        Arc, Mutex,
+        Arc,
         atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicUsize, Ordering},
         mpsc::{Receiver, Sender, channel},
     },

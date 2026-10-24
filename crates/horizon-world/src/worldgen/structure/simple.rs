@@ -9,7 +9,8 @@ use super::{
 };
 use crate::heightmap::HeightmapType;
 use horizon_core::{geometry::Direction, random::RandomSource};
-use std::sync::{Arc, Mutex};
+use horizon_platform::sync::Mutex;
+use std::sync::Arc;
 
 fn empty_processors() -> Arc<ProcessorList> {
     Arc::new(ProcessorList::default())

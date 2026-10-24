@@ -28,12 +28,13 @@ use crate::{
     registry::{BlockRegistry, BlockStateId},
 };
 use horizon_core::geometry::Direction;
+use horizon_platform::sync::RwLock;
 use processor::ProcessorList;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     io::Read,
     path::{Path, PathBuf},
-    sync::{Arc, RwLock},
+    sync::Arc,
 };
 pub use template::{BlockInfo, JigsawInfo, StructureTemplate};
 

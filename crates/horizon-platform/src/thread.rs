@@ -38,6 +38,31 @@ where
     Ok(JoinHandle((), std::thread::current()))
 }
 
+/// Starts a long-lived worker, such as the chunk workers, on a thread of
+/// its own: a std thread natively; a Web Worker sharing the page's memory on
+/// the web build with threads (web/README.md). Unlike [`spawn`], which runs
+/// where it is called on the web, the work then runs beside the page, so it
+/// may wait on locks and channels; it is never joined.
+#[cfg(not(all(target_family = "wasm", target_feature = "atomics")))]
+pub fn spawn_worker(name: &str, work: impl FnOnce() + Send + 'static) -> std::io::Result<()> {
+    Builder::new().name(name.to_owned()).spawn(work).map(drop)
+}
+#[cfg(all(target_family = "wasm", target_feature = "atomics"))]
+pub fn spawn_worker(name: &str, work: impl FnOnce() + Send + 'static) -> std::io::Result<()> {
+    crate::web::spawn_thread(name, Box::new(work));
+    Ok(())
+}
+/// How many [`spawn_worker`] threads make sense: the cores less the one the
+/// game runs on. The web build without threads has only the page's.
+pub fn worker_count() -> usize {
+    #[cfg(all(target_family = "wasm", target_feature = "atomics"))]
+    return crate::web::hardware_concurrency()
+        .saturating_sub(1)
+        .clamp(1, 7);
+    #[allow(unreachable_code)]
+    available_parallelism().map_or(1, |n| n.get().saturating_sub(1).max(1))
+}
+
 /// Waits `duration` in a task: the thread sleeps natively; on the web the
 /// task gives the page back until a timer fires.
 pub async fn sleep_task(duration: std::time::Duration) {
