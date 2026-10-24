@@ -1461,7 +1461,8 @@ impl Streaming {
     /// The next finished job, waiting until `deadline` for one. The
     /// single-threaded web build has no worker to wait on: it runs the next
     /// queued job itself; the threaded one may not wait on the page's thread,
-    /// so it looks until one comes.
+    /// so it looks until one comes (an integrated server's, on a worker,
+    /// sleeps between looks).
     fn next_result(
         &mut self,
         deadline: horizon_platform::time::Instant,
@@ -1472,18 +1473,9 @@ impl Streaming {
             self.results.recv_timeout(left)
         }
         #[cfg(all(target_family = "wasm", target_feature = "atomics"))]
-        loop {
-            match self.results.try_recv() {
-                Ok(done) => return Ok(done),
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    return Err(mpsc::RecvTimeoutError::Disconnected);
-                }
-                Err(mpsc::TryRecvError::Empty) => {}
-            }
-            if horizon_platform::time::Instant::now() >= deadline {
-                return Err(mpsc::RecvTimeoutError::Timeout);
-            }
-            std::hint::spin_loop();
+        {
+            let left = deadline.saturating_duration_since(horizon_platform::time::Instant::now());
+            horizon_platform::sync::recv_timeout(&self.results, left)
         }
         #[cfg(all(target_family = "wasm", not(target_feature = "atomics")))]
         loop {

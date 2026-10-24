@@ -146,16 +146,19 @@ The web build is the native game with the operating system swapped out
   frees for its next allocations (std's wasm allocator is one spinning lock
   for every thread). Sounds decode on two more workers (effects, and
   streamed music and ambience), and region files are written on another, as
-  natively. Everything else runs on the page's thread:
-  single player runs in the frame (`--in-frame`), not on the server thread the
-  native game uses by default, and loaders run where they are started, so
-  loading the resources holds the page for a while. The page's thread may not
+  natively. Single player runs on the integrated server's thread, a worker
+  too, as natively, so a world tick never holds a frame up; a worker starts
+  only once the page's event loop turns, so the window joins it through
+  memory at once and the server answers when the world is open
+  (`game/integrated.rs`). `--in-frame` (or `?env=HORIZON_SERVER_THREAD=0`)
+  runs the world in the frame instead. Loaders run where they are started,
+  so loading the resources holds the page for a while. The page's thread may not
   wait on a lock, so it spins on the locks it shares with the workers
   (`horizon_platform::sync`); the workers wait on them. The `--no-threads` build has no workers: chunk
   work runs between frames, most urgent first, for 8 ms a frame (more while
   the level loads; `HORIZON_WEB_WORK_MS` sets it), and a job that wouldn't fit
   what is left of a frame waits for the next. Region files are written as
-  they are saved.
+  they are saved, and single player runs in the frame.
 - **Graphics**: WebGPU only. The device opens before the game starts. Block
   textures are split across texture arrays at the adapter's layer limit.
   Occlusion culling runs on the render thread. Far terrain (`lodDistance`) is off.
@@ -163,9 +166,10 @@ The web build is the native game with the operating system swapped out
   at the first click or key press (browsers keep a page silent until then).
   Sounds decode where they start, so the first play of a long track stutters.
 - **Network**: servers through WebSockets, and friends' browsers over WebRTC
-  (see Multiplayer). Connections run beside the page's event loop rather than
-  on threads of their own; a shared world's writers look for packets every
-  few milliseconds.
+  (see Multiplayer). Those connections run beside the page's event loop
+  rather than on threads of their own (their sockets live on the page's
+  thread); a shared world's writers look for packets every few milliseconds.
+  Single player's connection through memory runs on workers, as natively.
 - **Off**: controllers, mods with code (content-only mods still load),
   the system clipboard (copy and paste work inside the game), LAN discovery
   and Open to LAN (no ports to open), online-mode servers and account

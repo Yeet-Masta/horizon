@@ -966,14 +966,22 @@ async fn play(c: Connection, shared: &Arc<Shared>, parts: Parts, address: std::n
     let sender = PlayerSender::new(tx.clone(), pending.clone());
     let writer_thread = {
         let (alive, latency, pending) = (alive.clone(), latency.clone(), pending.clone());
-        horizon_platform::thread::spawn_task(&format!("horizon-lan-out-{conn_id}"), async move {
+        let name = format!("horizon-lan-out-{conn_id}");
+        let task = async move {
             // Ticks and frames come first (horizon_threads).
             if !horizon_platform::WEB {
                 horizon_threads::behind_server();
             }
             write_loop(writer, rx, alive, latency, pending).await
-        })
-        .ok()
+        };
+        // The web build's page runs it beside its events (a friend's data
+        // channel stays there); on a worker (the integrated server's player)
+        // it gets a worker of its own, as it gets a thread natively.
+        if horizon_platform::thread::may_block() {
+            horizon_platform::thread::spawn_blocking_task(&name, task).ok()
+        } else {
+            horizon_platform::thread::spawn_task(&name, task).ok()
+        }
     };
     let name = parts.name.clone();
     let joined = Joined {
@@ -1131,11 +1139,11 @@ fn send_body(writer: &mut ConnWriter, body: &[u8]) -> horizon_protocol::Result<(
 }
 
 /// The next thing to send, or the timeout or the end: the writer thread
-/// waits on the queue; the web build's task looks at it every few
-/// milliseconds between the page's events.
+/// waits on the queue; the web build's task on the page's thread looks at it
+/// every few milliseconds between the page's events.
 async fn next_out(rx: &mut Receiver<Out>, timeout: Duration) -> Result<Out, RecvTimeoutError> {
-    if !horizon_platform::WEB {
-        return rx.recv_timeout(timeout);
+    if horizon_platform::thread::may_block() {
+        return horizon_platform::sync::recv_timeout(rx, timeout);
     }
     let deadline = Instant::now() + timeout;
     loop {

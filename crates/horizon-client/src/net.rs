@@ -107,30 +107,44 @@ impl Session {
         let (thread_writer, thread_counters) = (writer.clone(), counters.clone());
         let thread_configuring = configuring.clone();
         let (address_owned, name_owned) = (address.to_owned(), name.to_owned());
-        let thread = horizon_platform::thread::spawn_task("horizon-net", async move {
-            let result = run(
-                local,
-                &address_owned,
-                &name_owned,
-                auth.as_deref(),
-                view_distance,
-                &lang,
-                &send,
-                &thread_writer,
-                &thread_configuring,
-                &thread_counters,
-            )
-            .await;
-            let from_server = result.is_ok();
-            let reason = result.unwrap_or_else(|e| e);
-            if let Some(w) = thread_writer.lock().unwrap().take() {
-                w.shutdown();
+        let thread = match local {
+            // A memory connection blocks on its pipe: a thread of its own,
+            // a worker on the web build with threads.
+            Some(pipe) => {
+                horizon_platform::thread::spawn_blocking_task("horizon-net", async move {
+                    let result = login(
+                        address_owned,
+                        0,
+                        Connection::local(pipe),
+                        &name_owned,
+                        None,
+                        view_distance,
+                        &lang,
+                        &send,
+                        &thread_writer,
+                        &thread_configuring,
+                        &thread_counters,
+                    )
+                    .await;
+                    ended(result, &thread_writer, &send);
+                })
             }
-            let _ = send.send(Event::Disconnected {
-                reason,
-                from_server,
-            });
-        })
+            None => horizon_platform::thread::spawn_task("horizon-net", async move {
+                let result = run(
+                    &address_owned,
+                    &name_owned,
+                    auth.as_deref(),
+                    view_distance,
+                    &lang,
+                    &send,
+                    &thread_writer,
+                    &thread_configuring,
+                    &thread_counters,
+                )
+                .await;
+                ended(result, &thread_writer, &send);
+            }),
+        }
         .ok();
         let debug = horizon_platform::env::var_os("HORIZON_NET_DEBUG").is_some();
         Self {
@@ -331,6 +345,19 @@ pub fn web_stun_servers() -> Vec<String> {
     }
 }
 
+/// The connection ended (`run`'s result): the writer goes, and the game hears why.
+fn ended(result: Result<String, String>, writer: &Mutex<Option<ConnWriter>>, send: &Sender<Event>) {
+    let from_server = result.is_ok();
+    let reason = result.unwrap_or_else(|e| e);
+    if let Some(w) = writer.lock().unwrap().take() {
+        w.shutdown();
+    }
+    let _ = send.send(Event::Disconnected {
+        reason,
+        from_server,
+    });
+}
+
 /// Shown when the web build has no relay to share or join a world through.
 pub const NO_WEB_RELAY: &str =
     "Set a WebSocket relay (the page's Options, or Join a Friend's relay) to play with friends.";
@@ -338,7 +365,6 @@ pub const NO_WEB_RELAY: &str =
 /// The whole connection. Ok: why it ended for good (the server's reason, or
 /// a refusal no retry fixes); Err: the connection failed.
 async fn run(
-    local: Option<horizon_protocol::connection::Pipe>,
     address: &str,
     name: &str,
     auth: Option<&AuthSession>,
@@ -349,47 +375,76 @@ async fn run(
     configuring: &AtomicBool,
     shared_counters: &Mutex<Option<Arc<Counters>>>,
 ) -> Result<String, String> {
-    let (host, port, mut c) = if let Some(pipe) = local {
-        (address.to_owned(), 0, Connection::local(pipe))
-    } else if let (true, Some(code)) = (horizon_platform::WEB, address.strip_prefix(FRIEND)) {
-        // A world shared from a browser: its page answers over WebRTC.
-        let Some(relay) = web_relay() else {
-            return Ok(NO_WEB_RELAY.to_owned());
-        };
-        status(send, "Finding your friend's world...");
-        let c = web_join_friend(&relay, code).await?;
-        ("127.0.0.1".to_owned(), 25565, c)
-    } else if horizon_platform::WEB {
-        let (url, host, port) = match web_route(address) {
-            Ok(route) => route,
-            Err(reason) => return Ok(reason),
-        };
-        status(send, "Connecting to the server...");
-        (
-            host,
-            port,
-            web_connect(&url, Duration::from_secs(10)).await?,
-        )
-    } else {
-        let (host, port) = match address.strip_prefix(FRIEND) {
-            Some(code) => join_friend(code, send)?,
-            None => {
-                let Some(target) = parse_address(address) else {
-                    return Ok(format!("Invalid server address: {address}"));
-                };
-                status(send, "Connecting to the server...");
-                target
-            }
-        };
-        let c = if address.starts_with(FRIEND) {
-            // The friends relay supplies a concrete endpoint, not a Minecraft hostname.
-            Connection::connect(&host, port, Duration::from_secs(10))
+    let (host, port, c) =
+        if let (true, Some(code)) = (horizon_platform::WEB, address.strip_prefix(FRIEND)) {
+            // A world shared from a browser: its page answers over WebRTC.
+            let Some(relay) = web_relay() else {
+                return Ok(NO_WEB_RELAY.to_owned());
+            };
+            status(send, "Finding your friend's world...");
+            let c = web_join_friend(&relay, code).await?;
+            ("127.0.0.1".to_owned(), 25565, c)
+        } else if horizon_platform::WEB {
+            let (url, host, port) = match web_route(address) {
+                Ok(route) => route,
+                Err(reason) => return Ok(reason),
+            };
+            status(send, "Connecting to the server...");
+            (
+                host,
+                port,
+                web_connect(&url, Duration::from_secs(10)).await?,
+            )
         } else {
-            Connection::connect_server(&host, port, Duration::from_secs(10))
-        }
-        .map_err(|e| e.to_string())?;
-        (host, port, c)
-    };
+            let (host, port) = match address.strip_prefix(FRIEND) {
+                Some(code) => join_friend(code, send)?,
+                None => {
+                    let Some(target) = parse_address(address) else {
+                        return Ok(format!("Invalid server address: {address}"));
+                    };
+                    status(send, "Connecting to the server...");
+                    target
+                }
+            };
+            let c = if address.starts_with(FRIEND) {
+                // The friends relay supplies a concrete endpoint, not a Minecraft hostname.
+                Connection::connect(&host, port, Duration::from_secs(10))
+            } else {
+                Connection::connect_server(&host, port, Duration::from_secs(10))
+            }
+            .map_err(|e| e.to_string())?;
+            (host, port, c)
+        };
+    login(
+        host,
+        port,
+        c,
+        name,
+        auth,
+        view_distance,
+        lang,
+        send,
+        shared_writer,
+        configuring,
+        shared_counters,
+    )
+    .await
+}
+
+/// The rest once the connection is open: login, configuration and play.
+async fn login(
+    host: String,
+    port: u16,
+    mut c: Connection,
+    name: &str,
+    auth: Option<&AuthSession>,
+    view_distance: i8,
+    lang: &Language,
+    send: &Sender<Event>,
+    shared_writer: &Mutex<Option<ConnWriter>>,
+    configuring: &AtomicBool,
+    shared_counters: &Mutex<Option<Arc<Counters>>>,
+) -> Result<String, String> {
     *shared_counters.lock().unwrap() = Some(c.reader.counters.clone());
     let e = |e: horizon_protocol::Error| e.to_string();
     c.send(

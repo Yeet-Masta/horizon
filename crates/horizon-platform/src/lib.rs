@@ -20,11 +20,15 @@ pub mod web;
 
 /// True on the web build.
 pub const WEB: bool = cfg!(target_family = "wasm");
+/// True where threads run beside the one that starts them: natively, and on
+/// the web build with threads (web/README.md), not on the one-thread one.
+pub const THREADS: bool = !WEB || cfg!(target_feature = "atomics");
 
-/// `pollster::block_on` natively. On the web a future can only finish while
-/// the page's event loop runs, so this polls once and fails if the future
-/// is still waiting: only futures that are ready at once (the renderer's,
-/// once `web::start` has opened the device) may be blocked on there.
+/// `pollster::block_on` natively, and on the web build's workers. On the
+/// page's thread a future can only finish while the page's event loop runs,
+/// so this polls once and fails if the future is still waiting: only futures
+/// that are ready at once (the renderer's, once `web::start` has opened the
+/// device) may be blocked on there.
 pub fn block_on<F: std::future::Future>(future: F) -> F::Output {
     #[cfg(not(target_family = "wasm"))]
     {
@@ -34,6 +38,24 @@ pub fn block_on<F: std::future::Future>(future: F) -> F::Output {
     {
         use std::task::{Context, Poll, Waker};
         let mut future = std::pin::pin!(future);
+        // A worker may wait: it parks until the future's waker unparks it.
+        #[cfg(target_feature = "atomics")]
+        if !web::on_page_thread() {
+            struct Unpark(std::thread::Thread);
+            impl std::task::Wake for Unpark {
+                fn wake(self: std::sync::Arc<Self>) {
+                    self.0.unpark();
+                }
+            }
+            let waker = Waker::from(std::sync::Arc::new(Unpark(std::thread::current())));
+            loop {
+                if let Poll::Ready(output) = future.as_mut().poll(&mut Context::from_waker(&waker))
+                {
+                    return output;
+                }
+                std::thread::park();
+            }
+        }
         match future
             .as_mut()
             .poll(&mut Context::from_waker(Waker::noop()))

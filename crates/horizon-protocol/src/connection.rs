@@ -5,12 +5,13 @@
 //! (vanilla's `LocalChannel`, which an integrated server's player uses), or
 //! on the web build over a WebSocket, whose reads wait in [`ConnReader::recv_async`].
 use crate::{Error, Result, buf::Reader, crypto::Cfb8, frame};
+use horizon_platform::sync::Mutex;
 use horizon_platform::time::{Duration, Instant};
 use std::{
     io::{Read, Write},
     net::{Shutdown, TcpStream, ToSocketAddrs},
     sync::{
-        Arc, Condvar, Mutex,
+        Arc, Condvar,
         atomic::{AtomicI64, Ordering},
     },
 };

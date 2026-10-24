@@ -11,6 +11,40 @@ pub use spin::{Mutex, RwLock};
 #[cfg(not(all(target_family = "wasm", target_feature = "atomics")))]
 pub use std::sync::{Mutex, RwLock};
 
+/// `Receiver::recv_timeout`. std's reads std's clock, which panics on the
+/// web: there the receiver is looked at until the timeout, every half
+/// millisecond on a worker (which sleeps between) and continuously on the
+/// page's thread (which may not).
+pub fn recv_timeout<T>(
+    receiver: &std::sync::mpsc::Receiver<T>,
+    timeout: std::time::Duration,
+) -> Result<T, std::sync::mpsc::RecvTimeoutError> {
+    #[cfg(not(target_family = "wasm"))]
+    return receiver.recv_timeout(timeout);
+    #[allow(unreachable_code)]
+    {
+        use crate::time::{Duration, Instant};
+        use std::sync::mpsc::{RecvTimeoutError, TryRecvError};
+        let deadline = Instant::now() + timeout;
+        loop {
+            match receiver.try_recv() {
+                Ok(value) => return Ok(value),
+                Err(TryRecvError::Disconnected) => return Err(RecvTimeoutError::Disconnected),
+                Err(TryRecvError::Empty) => {}
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return Err(RecvTimeoutError::Timeout);
+            }
+            if crate::thread::may_block() {
+                crate::thread::sleep((deadline - now).min(Duration::from_micros(500)));
+            } else {
+                std::hint::spin_loop();
+            }
+        }
+    }
+}
+
 #[cfg(all(target_family = "wasm", target_feature = "atomics"))]
 mod spin {
     use std::{

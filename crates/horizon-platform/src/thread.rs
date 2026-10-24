@@ -38,6 +38,92 @@ where
     Ok(JoinHandle((), std::thread::current()))
 }
 
+/// Runs `task`, which blocks its thread (it reads a pipe or waits on a
+/// channel), on a thread of its own: as [`spawn_task`] natively, and on the
+/// web build with threads a worker wherever it is started (the page's thread
+/// may not block, and a worker's has no event loop for [`spawn_task`] to run
+/// the task beside). The one-thread web build runs it beside the page.
+#[cfg(not(target_family = "wasm"))]
+pub fn spawn_blocking_task<F>(name: &str, task: F) -> std::io::Result<JoinHandle<()>>
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    spawn_task(name, task)
+}
+#[cfg(all(target_family = "wasm", target_feature = "atomics"))]
+pub fn spawn_blocking_task<F>(name: &str, task: F) -> std::io::Result<JoinHandle<()>>
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    spawn_worker(name, move || crate::block_on(task))?;
+    Ok(JoinHandle((), std::thread::current()))
+}
+#[cfg(all(target_family = "wasm", not(target_feature = "atomics")))]
+pub fn spawn_blocking_task<F>(name: &str, task: F) -> std::io::Result<JoinHandle<()>>
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    spawn_task(name, task)
+}
+
+/// Whether this thread may block: everywhere but the web build's page
+/// thread (every thread of the one-thread build is the page's).
+pub fn may_block() -> bool {
+    #[cfg(all(target_family = "wasm", target_feature = "atomics"))]
+    return !crate::web::on_page_thread();
+    #[allow(unreachable_code)]
+    !crate::WEB
+}
+
+/// A thread that runs beside the one that started it, such as the
+/// integrated server's, and is joined: std's natively; a worker on the web
+/// build with threads, whose `join` waits as [`may_block`] allows (the page's
+/// thread spins). Without threads it ran where it was started.
+#[cfg(not(all(target_family = "wasm", target_feature = "atomics")))]
+pub type ThreadHandle<T> = JoinHandle<T>;
+#[cfg(not(all(target_family = "wasm", target_feature = "atomics")))]
+pub fn spawn_thread<T: Send + 'static>(
+    name: &str,
+    f: impl FnOnce() -> T + Send + 'static,
+) -> std::io::Result<ThreadHandle<T>> {
+    Builder::new().name(name.to_owned()).spawn(f)
+}
+#[cfg(all(target_family = "wasm", target_feature = "atomics"))]
+pub struct ThreadHandle<T>(std::sync::Arc<crate::sync::Mutex<Option<T>>>);
+#[cfg(all(target_family = "wasm", target_feature = "atomics"))]
+impl<T> ThreadHandle<T> {
+    /// What the thread returned, once it has. (A panic aborts the whole
+    /// web build, so there is never one to hand back.)
+    pub fn join(self) -> Result<T> {
+        loop {
+            if let Some(out) = self.0.lock().unwrap().take() {
+                return Ok(out);
+            }
+            if may_block() {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            } else {
+                std::hint::spin_loop();
+            }
+        }
+    }
+    pub fn is_finished(&self) -> bool {
+        self.0.lock().unwrap().is_some()
+    }
+}
+#[cfg(all(target_family = "wasm", target_feature = "atomics"))]
+pub fn spawn_thread<T: Send + 'static>(
+    name: &str,
+    f: impl FnOnce() -> T + Send + 'static,
+) -> std::io::Result<ThreadHandle<T>> {
+    let slot = std::sync::Arc::new(crate::sync::Mutex::new(None));
+    let out = slot.clone();
+    spawn_worker(name, move || {
+        let value = f();
+        *out.lock().unwrap() = Some(value);
+    })?;
+    Ok(ThreadHandle(slot))
+}
+
 /// Starts a long-lived worker, such as the chunk workers, on a thread of
 /// its own: a std thread natively; a Web Worker sharing the page's memory on
 /// the web build with threads (web/README.md). Unlike [`spawn`], which runs
@@ -72,28 +158,16 @@ pub fn worker_count() -> usize {
     available_parallelism().map_or(1, |n| n.get().saturating_sub(1).max(1))
 }
 
-/// Waits `duration` in a task: the thread sleeps natively; on the web the
-/// task gives the page back until a timer fires.
+/// Waits `duration` in a task: the thread sleeps natively and on the web
+/// build's workers; on the page's thread the task gives the page back until
+/// a timer fires. The future is `Send`, as a task's may need to be.
 pub async fn sleep_task(duration: std::time::Duration) {
-    #[cfg(not(target_family = "wasm"))]
-    std::thread::sleep(duration);
-    #[cfg(target_family = "wasm")]
-    {
-        use wasm_bindgen::JsCast;
-        let promise = js_sys::Promise::new(&mut |resolve, _| {
-            let _ = js_sys::Reflect::get(&js_sys::global(), &"setTimeout".into())
-                .ok()
-                .and_then(|f| f.dyn_into::<js_sys::Function>().ok())
-                .map(|set_timeout| {
-                    set_timeout.call2(
-                        &wasm_bindgen::JsValue::UNDEFINED,
-                        &resolve,
-                        &(duration.as_secs_f64() * 1000.0).into(),
-                    )
-                });
-        });
-        let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
+    if may_block() {
+        sleep(duration);
+        return;
     }
+    #[cfg(target_family = "wasm")]
+    web::Timer::new(duration).await;
 }
 
 #[cfg(target_family = "wasm")]
@@ -104,8 +178,68 @@ mod web {
     pub fn available_parallelism() -> io::Result<NonZeroUsize> {
         Ok(NonZeroUsize::MIN)
     }
-    /// Nothing else runs while this thread would wait, so it doesn't.
-    pub fn sleep(_: Duration) {}
+    /// Nothing else runs while the page's thread would wait, so it doesn't;
+    /// the threaded build's workers sleep.
+    pub fn sleep(duration: Duration) {
+        if super::may_block() {
+            std::thread::sleep(duration);
+        }
+    }
+
+    /// The page's `setTimeout`, as a future: what it shares with the
+    /// timer's handler is `Send`, as the task holding it may be.
+    pub(super) struct Timer {
+        duration: Duration,
+        fired: std::sync::Arc<std::sync::Mutex<(bool, Option<std::task::Waker>)>>,
+        set: bool,
+    }
+    impl Timer {
+        pub(super) fn new(duration: Duration) -> Self {
+            Self {
+                duration,
+                fired: Default::default(),
+                set: false,
+            }
+        }
+    }
+    impl std::future::Future for Timer {
+        type Output = ();
+        fn poll(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<()> {
+            use wasm_bindgen::{JsCast, closure::Closure};
+            {
+                let mut fired = self.fired.lock().unwrap();
+                if fired.0 {
+                    return std::task::Poll::Ready(());
+                }
+                fired.1 = Some(cx.waker().clone());
+            }
+            if !self.set {
+                self.set = true;
+                let fired = self.fired.clone();
+                let handler = Closure::once_into_js(move || {
+                    let mut fired = fired.lock().unwrap();
+                    fired.0 = true;
+                    if let Some(waker) = fired.1.take() {
+                        waker.wake();
+                    }
+                });
+                let _ = js_sys::Reflect::get(&js_sys::global(), &"setTimeout".into())
+                    .ok()
+                    .and_then(|f| f.dyn_into::<js_sys::Function>().ok())
+                    .map(|set_timeout| {
+                        set_timeout.call2(
+                            &wasm_bindgen::JsValue::UNDEFINED,
+                            &handler,
+                            &(self.duration.as_secs_f64() * 1000.0).into(),
+                        )
+                    });
+            }
+            std::task::Poll::Pending
+        }
+    }
 
     pub fn spawn<F, T>(f: F) -> JoinHandle<T>
     where

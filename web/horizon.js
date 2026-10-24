@@ -128,6 +128,7 @@ globalThis.horizonSpawnThread = (name, module, memory, work) => {
   worker.onerror = (e) => console.error(`Horizon: ${name} stopped:`, e.message ?? e);
   worker.onmessage = ({ data }) => {
     if (data?.spawn) globalThis.horizonSpawnThread(data.spawn[0], threadModule, threadMemory, data.spawn[1]);
+    if (data?.status) globalThis.horizonStatus(...data.status);
   };
   worker.postMessage([module, memory, work]);
 };

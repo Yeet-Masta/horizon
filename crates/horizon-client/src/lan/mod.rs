@@ -498,30 +498,35 @@ impl Lan {
     /// server end served on its own thread like an accepted socket.
     pub fn connect_local(&self) -> io::Result<horizon_protocol::connection::Pipe> {
         let (client, server) = horizon_protocol::connection::Pipe::pair();
+        self.serve_local(server)?;
+        Ok(client)
+    }
+    /// The player of an integrated server, over the server's end of a pipe
+    /// (the web build's window makes the pair, to join before the world is
+    /// open). The connection blocks on the pipe: a thread of its own.
+    pub fn serve_local(&self, server: horizon_protocol::connection::Pipe) -> io::Result<()> {
         let shared = self.shared.clone();
-        horizon_platform::thread::spawn_task("horizon-local-conn", async move {
+        horizon_platform::thread::spawn_blocking_task("horizon-local-conn", async move {
             if let Err(e) = conn::serve_local(server, shared).await
                 && horizon_platform::env::var_os("HORIZON_NET_DEBUG").is_some()
             {
                 log::warn!("[lan] local: {e}");
             }
         })?;
-        Ok(client)
+        Ok(())
     }
     /// A friend's browser, through the data channel its page opened to this
     /// one (the web build's Play with Friends). It joins from the loopback
     /// address, as friends through a tunnel do.
     #[cfg(target_family = "wasm")]
     pub fn accept_web(&self, socket: horizon_platform::web::socket::Socket) {
-        let shared = self.shared.clone();
-        let address = SocketAddr::from(([127, 0, 0, 1], 0));
-        let _ = horizon_platform::thread::spawn_task("horizon-lan-conn", async move {
-            if let Err(e) = conn::serve_web(socket, address, shared).await
-                && horizon_platform::env::var_os("HORIZON_NET_DEBUG").is_some()
-            {
-                log::warn!("[lan] friend: {e}");
-            }
-        });
+        self.door().accept_web(socket);
+    }
+    /// [`Self::accept_web`] for another thread: the window's, whose friends'
+    /// data channels never leave it, for its integrated server's LAN.
+    #[cfg(target_family = "wasm")]
+    pub fn door(&self) -> Door {
+        Door(self.shared.clone())
     }
     /// Everything the connection threads reported since the last call.
     pub fn poll(&self) -> Vec<NetEvent> {
@@ -539,6 +544,26 @@ impl Lan {
 impl Drop for Lan {
     fn drop(&mut self) {
         self.stop();
+    }
+}
+
+/// Where friends' browsers come in from the page's thread ([`Lan::door`]).
+#[cfg(target_family = "wasm")]
+#[derive(Clone)]
+pub struct Door(Arc<Shared>);
+#[cfg(target_family = "wasm")]
+impl Door {
+    /// The connection runs beside the page, where its data channel is.
+    pub fn accept_web(&self, socket: horizon_platform::web::socket::Socket) {
+        let shared = self.0.clone();
+        let address = SocketAddr::from(([127, 0, 0, 1], 0));
+        let _ = horizon_platform::thread::spawn_task("horizon-lan-conn", async move {
+            if let Err(e) = conn::serve_web(socket, address, shared).await
+                && horizon_platform::env::var_os("HORIZON_NET_DEBUG").is_some()
+            {
+                log::warn!("[lan] friend: {e}");
+            }
+        });
     }
 }
 

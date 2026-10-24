@@ -465,9 +465,16 @@ impl Game<'_> {
         }
         self.server_packs_disconnect();
         // Single player's server thread saves the world before the title shows.
+        let mut reason = reason;
         let single_player = match self.integrated.take() {
             Some(server) => {
-                server.stop()?;
+                match server.stop() {
+                    Ok(()) => {}
+                    // The server failed, perhaps opening the world after the
+                    // window joined it (the web build's): its reason is shown.
+                    Err(e) if reason.is_some() => reason = Some(e.to_string()),
+                    Err(e) => return Err(e),
+                }
                 true
             }
             None => false,
@@ -795,6 +802,9 @@ impl Game<'_> {
     /// the next chunk packet on wait for the next frame, unless they have
     /// already waited `BACKLOG_LIMIT`.
     pub(super) fn poll_remote(&mut self) -> Result<()> {
+        if let Some(server) = self.integrated.as_mut() {
+            server.poll_ready();
+        }
         let Some(r) = self.remote.as_mut() else {
             return Ok(());
         };

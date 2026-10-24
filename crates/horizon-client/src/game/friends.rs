@@ -38,10 +38,13 @@ pub(super) struct WebHost {
     state: HostState,
     sessions: u64,
     guests: Vec<horizon_platform::web::socket::Socket>,
+    /// The integrated server's LAN, on its worker: friends' data channels
+    /// stay on the page's thread, and their connections run beside it.
+    door: Option<horizon_client::lan::Door>,
 }
 #[cfg(target_family = "wasm")]
 impl WebHost {
-    fn start(relay: &str) -> Self {
+    fn start(relay: &str, door: Option<horizon_client::lan::Door>) -> Self {
         Self {
             room: horizon_platform::web::rtc::Host::start(
                 relay,
@@ -50,6 +53,7 @@ impl WebHost {
             state: HostState::default(),
             sessions: 0,
             guests: Vec::new(),
+            door,
         }
     }
     fn poll(&mut self) -> Vec<HostEvent> {
@@ -147,8 +151,14 @@ impl Game<'_> {
             })?;
         }
         #[cfg(target_family = "wasm")]
+        let door = self
+            .integrated
+            .as_ref()
+            .and_then(|server| server.call(|g| g.lan.as_ref().map(|h| h.hub.lan.door())))
+            .flatten();
+        #[cfg(target_family = "wasm")]
         let host = match horizon_client::net::web_relay() {
-            Some(relay) => WebHost::start(&relay),
+            Some(relay) => WebHost::start(&relay, door),
             None => {
                 if opened_lan {
                     self.lan_close(true);
@@ -247,9 +257,11 @@ impl Game<'_> {
         }
         // Friends' browsers whose data channels opened join as LAN guests.
         #[cfg(target_family = "wasm")]
-        if let Some(lan) = &self.lan {
-            for socket in sharing.host.guests.drain(..) {
-                lan.hub.lan.accept_web(socket);
+        for socket in sharing.host.guests.drain(..) {
+            match (&sharing.host.door, &self.lan) {
+                (Some(door), _) => door.accept_web(socket),
+                (None, Some(lan)) => lan.hub.lan.accept_web(socket),
+                (None, None) => {}
             }
         }
         if announce {

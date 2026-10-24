@@ -358,9 +358,9 @@ impl Options {
             dev_mods: Vec::new(),
             // The command harness (HORIZON_COMMAND_SCRIPT) drives the world
             // itself, without the event loop: it stays in the frame.
-            // The server thread is single player's default; the web build has
-            // one thread, so its worlds run in the frame (web/README.md).
-            server_thread: !horizon_platform::WEB
+            // The server thread is single player's default; the one-thread
+            // web build's worlds run in the frame (web/README.md).
+            server_thread: horizon_platform::THREADS
                 && horizon_platform::env::var("HORIZON_SERVER_THREAD").map_or(true, |v| v != "0")
                 && horizon_platform::env::var_os("HORIZON_COMMAND_SCRIPT").is_none(),
             integrated: false,
@@ -385,7 +385,7 @@ impl Options {
                 "--no-pause" => o.no_pause = true,
                 "--offscreen" => o.offscreen = true,
                 "--control" => o.control = Some(horizon_client::control::default_path()),
-                "--server-thread" => o.server_thread = !horizon_platform::WEB,
+                "--server-thread" => o.server_thread = horizon_platform::THREADS,
                 "--in-frame" | "--no-server-thread" => o.server_thread = false,
                 _ => {
                     let value = args
