@@ -66,9 +66,14 @@ pub struct MixerBackend {
     mixer: Arc<Mutex<Mixer>>,
     root: PathBuf,
     cache: Arc<Mutex<SoundCache>>,
-    /// The decoder thread for static sounds, started with the first one.
-    #[cfg(not(target_family = "wasm"))]
+    /// The decoder thread for static sounds, started with the first one
+    /// (a Web Worker on the threaded web build).
+    #[cfg(any(not(target_family = "wasm"), target_feature = "atomics"))]
     decoder: Option<std::sync::mpsc::Sender<Decode>>,
+    /// The threaded web build's thread for streamed sounds: natively each has
+    /// a thread of its own, and a Web Worker is too costly to start for one.
+    #[cfg(all(target_family = "wasm", target_feature = "atomics"))]
+    streams: Option<std::sync::mpsc::Sender<(PathBuf, ChannelId, bool)>>,
     next: ChannelId,
     live: bool,
 }
@@ -118,7 +123,7 @@ impl SoundCache {
     }
 }
 /// A static sound to decode for a channel waiting on it.
-#[cfg(not(target_family = "wasm"))]
+#[cfg(any(not(target_family = "wasm"), target_feature = "atomics"))]
 struct Decode {
     key: String,
     file: PathBuf,
@@ -277,11 +282,29 @@ impl Backend for MixerBackend {
         let file = self.root.join("assets").join(namespace).join(&path);
         if sound.stream {
             // A streamed sound loops by restarting its stream.
-            let mixer = self.mixer.clone();
-            horizon_platform::thread::spawn(move || {
-                let samples = decode(&file).map(|(s, r)| (Arc::new(s), r));
-                attach(&mixer, channel, samples, looping);
-            });
+            #[cfg(all(target_family = "wasm", target_feature = "atomics"))]
+            {
+                let streams = self.streams.get_or_insert_with(|| {
+                    let (send, receive) = std::sync::mpsc::channel::<(PathBuf, ChannelId, bool)>();
+                    let mixer = self.mixer.clone();
+                    let _ = horizon_platform::thread::spawn_worker("sound streams", move || {
+                        for (file, channel, looping) in receive {
+                            let samples = decode(&file).map(|(s, r)| (Arc::new(s), r));
+                            attach(&mixer, channel, samples, looping);
+                        }
+                    });
+                    send
+                });
+                let _ = streams.send((file, channel, looping));
+            }
+            #[cfg(not(all(target_family = "wasm", target_feature = "atomics")))]
+            {
+                let mixer = self.mixer.clone();
+                horizon_platform::thread::spawn(move || {
+                    let samples = decode(&file).map(|(s, r)| (Arc::new(s), r));
+                    attach(&mixer, channel, samples, looping);
+                });
+            }
             return;
         }
         let key = format!("{namespace}:{path}");
@@ -290,8 +313,8 @@ impl Backend for MixerBackend {
             attach(&self.mixer, channel, samples, false);
             return;
         }
-        // The web build has no decoder thread: the sound is decoded here.
-        #[cfg(target_family = "wasm")]
+        // The one-thread web build has no decoder thread: the sound is decoded here.
+        #[cfg(all(target_family = "wasm", not(target_feature = "atomics")))]
         {
             let samples = decode(&file).map(|(s, r)| (Arc::new(s), r));
             if let Ok(mut c) = self.cache.lock() {
@@ -299,28 +322,26 @@ impl Backend for MixerBackend {
             }
             attach(&self.mixer, channel, samples, false);
         }
-        #[cfg(not(target_family = "wasm"))]
+        #[cfg(any(not(target_family = "wasm"), target_feature = "atomics"))]
         {
             let decoder = self.decoder.get_or_insert_with(|| {
                 let (send, receive) = std::sync::mpsc::channel::<Decode>();
                 let (mixer, cache) = (self.mixer.clone(), self.cache.clone());
-                horizon_platform::thread::Builder::new()
-                    .name("sound decoder".into())
-                    .spawn(move || {
-                        for job in receive {
-                            // Queued twice before the first decode finished.
-                            let cached = cache.lock().ok().and_then(|mut c| c.get(&job.key));
-                            let samples = cached.unwrap_or_else(|| {
-                                let samples = decode(&job.file).map(|(s, r)| (Arc::new(s), r));
-                                if let Ok(mut c) = cache.lock() {
-                                    c.insert(job.key, samples.clone());
-                                }
-                                samples
-                            });
-                            attach(&mixer, job.channel, samples, false);
-                        }
-                    })
-                    .expect("sound decoder thread");
+                horizon_platform::thread::spawn_worker("sound decoder", move || {
+                    for job in receive {
+                        // Queued twice before the first decode finished.
+                        let cached = cache.lock().ok().and_then(|mut c| c.get(&job.key));
+                        let samples = cached.unwrap_or_else(|| {
+                            let samples = decode(&job.file).map(|(s, r)| (Arc::new(s), r));
+                            if let Ok(mut c) = cache.lock() {
+                                c.insert(job.key, samples.clone());
+                            }
+                            samples
+                        });
+                        attach(&mixer, job.channel, samples, false);
+                    }
+                })
+                .expect("sound decoder thread");
                 send
             });
             let _ = decoder.send(Decode { key, file, channel });
@@ -604,8 +625,10 @@ impl Audio {
                 mixer,
                 root: root.to_owned(),
                 cache: Arc::default(),
-                #[cfg(not(target_family = "wasm"))]
+                #[cfg(any(not(target_family = "wasm"), target_feature = "atomics"))]
                 decoder: None,
+                #[cfg(all(target_family = "wasm", target_feature = "atomics"))]
+                streams: None,
                 next: 0,
                 live,
             },

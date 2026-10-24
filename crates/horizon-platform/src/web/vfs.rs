@@ -31,6 +31,9 @@ struct Mount {
     /// Where it is mounted, normalized.
     at: String,
     archive: zip::ZipArchive<Cursor<Arc<[u8]>>>,
+    /// The archive's bytes, and where each entry's lie in them (`unzip`).
+    bytes: Arc<[u8]>,
+    raw: Vec<Option<Raw>>,
     /// The archive's files under `at`: entry index and size.
     files: HashMap<String, (usize, u64)>,
     /// The archive's folders under `at` ("" is `at` itself) and their children.
@@ -44,6 +47,43 @@ impl Mount {
             return Some("");
         }
         path.strip_prefix(self.at.as_str())?.strip_prefix('/')
+    }
+}
+
+/// A stored or deflated zip entry's bytes in the archive.
+#[derive(Clone, Copy)]
+struct Raw {
+    start: usize,
+    len: usize,
+    deflated: bool,
+}
+
+/// A zipped file read without holding the file system: the threaded build's
+/// workers read sounds and models out of the resources while the page's
+/// thread opens files.
+struct Unzip {
+    bytes: Arc<[u8]>,
+    raw: Raw,
+    size: u64,
+    modified: SystemTime,
+}
+impl Unzip {
+    fn data(&self, path: &str) -> io::Result<Data> {
+        let packed = self
+            .bytes
+            .get(self.raw.start..self.raw.start + self.raw.len)
+            .ok_or_else(|| error(io::ErrorKind::InvalidData, path, "entry past the zip's end"))?;
+        let bytes = if self.raw.deflated {
+            let mut bytes = Vec::with_capacity(self.size as usize);
+            flate2::read::DeflateDecoder::new(packed).read_to_end(&mut bytes)?;
+            bytes
+        } else {
+            packed.to_vec()
+        };
+        Ok(Data {
+            bytes,
+            modified: self.modified,
+        })
     }
 }
 
@@ -169,6 +209,17 @@ impl Vfs {
     }
     fn is_dir(&mut self, path: &str) -> bool {
         matches!(self.find(path), Some(Found::Dir(_)))
+    }
+    /// Entry `index` of mount `mount`, to read once the lock is let go
+    /// (stored and deflated entries, which are all a resources zip holds).
+    fn unzip(&self, mount: usize, index: usize, size: u64) -> Option<Unzip> {
+        let mount = &self.mounts[mount];
+        Some(Unzip {
+            bytes: mount.bytes.clone(),
+            raw: (*mount.raw.get(index)?)?,
+            size,
+            modified: mount.modified,
+        })
     }
     fn inflate(&mut self, mount: usize, index: usize, size: u64, path: &str) -> io::Result<Data> {
         let mount = &mut self.mounts[mount];
@@ -444,9 +495,10 @@ pub(crate) fn set_cwd(path: &Path) -> io::Result<()> {
 /// (a zip of `26.3/` or of `resources/` mounts the same).
 pub(crate) fn mount_zip(at: &Path, bytes: Vec<u8>, marker: Option<&str>) -> io::Result<()> {
     let bytes: Arc<[u8]> = bytes.into();
-    let mut archive = zip::ZipArchive::new(Cursor::new(bytes))
+    let mut archive = zip::ZipArchive::new(Cursor::new(bytes.clone()))
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
     let mut names = Vec::with_capacity(archive.len());
+    let mut raw = Vec::with_capacity(archive.len());
     for i in 0..archive.len() {
         let entry = archive
             .by_index_raw(i)
@@ -456,6 +508,18 @@ pub(crate) fn mount_zip(at: &Path, bytes: Vec<u8>, marker: Option<&str>) -> io::
             entry.is_dir(),
             entry.size(),
         ));
+        let deflated = match entry.compression() {
+            zip::CompressionMethod::Stored => Some(false),
+            zip::CompressionMethod::Deflated => Some(true),
+            _ => None,
+        };
+        raw.push(deflated.and_then(|deflated| {
+            Some(Raw {
+                start: usize::try_from(entry.data_start()).ok()?,
+                len: usize::try_from(entry.compressed_size()).ok()?,
+                deflated,
+            })
+        }));
     }
     let prefix = marker
         .and_then(|marker| {
@@ -510,6 +574,8 @@ pub(crate) fn mount_zip(at: &Path, bytes: Vec<u8>, marker: Option<&str>) -> io::
     v.mounts.push(Mount {
         at,
         archive,
+        bytes,
+        raw,
         files,
         dirs,
         modified: SystemTime::now(),
@@ -656,7 +722,13 @@ pub mod fs {
         let (mut v, p) = norm(path.as_ref());
         match v.find(&p) {
             Some(Found::File(shared)) => Ok(shared.lock().unwrap().bytes.clone()),
-            Some(Found::Zipped(mount, index, size)) => Ok(v.inflate(mount, index, size, &p)?.bytes),
+            Some(Found::Zipped(mount, index, size)) => match v.unzip(mount, index, size) {
+                Some(unzip) => {
+                    drop(v);
+                    Ok(unzip.data(&p)?.bytes)
+                }
+                None => Ok(v.inflate(mount, index, size, &p)?.bytes),
+            },
             Some(Found::Dir(_)) => Err(error(io::ErrorKind::IsADirectory, &p, "is a directory")),
             None => Err(not_found(&p)),
         }
@@ -1022,6 +1094,22 @@ impl OpenOptions {
             let p = v.normalize(path.as_ref());
             (v, p)
         };
+        // A zipped file opened to read is read once the lock is let go.
+        let reads_only = !(self.write || self.append || self.truncate || self.create_new);
+        if reads_only
+            && let Some(Found::Zipped(mount, index, size)) = v.find(&p)
+            && let Some(unzip) = v.unzip(mount, index, size)
+        {
+            drop(v);
+            return Ok(File {
+                data: Arc::new(Mutex::new(unzip.data(&p)?)),
+                path: p,
+                pos: 0,
+                read: self.read,
+                write: false,
+                append: false,
+            });
+        }
         v.open(&p, self)
     }
 }

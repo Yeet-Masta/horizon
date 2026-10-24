@@ -11479,12 +11479,14 @@ impl ApplicationHandler for Game<'_> {
                                 self.perf.tick(tick.elapsed().as_secs_f32() * 1000.0);
                                 self.debug_charts.log_tick(tick, tick.elapsed());
                             }
-                            self.tick_ambience();
+                            horizon_client::spans::time("tick_ambience", || self.tick_ambience());
                             self.tick_fov();
                         }
                         self.tick_win_screen()?;
-                        self.tick_music();
-                        self.tick_sound_engine();
+                        horizon_client::spans::time("tick_music", || self.tick_music());
+                        horizon_client::spans::time("tick_sound_engine", || {
+                            self.tick_sound_engine()
+                        });
                         self.clock.record(started.elapsed());
                         spent += started.elapsed();
                         if let Some(report) = self.clock.take_sprint_report() {

@@ -110,7 +110,8 @@ to fill a friend's view.
 `?env=HORIZON_SPIKES=25` logs every frame slower than 25 ms to the browser
 console, with where it went: `streaming_results` (finished chunk work taken
 in), `streaming_unload_generate`, `streaming_schedule` (new jobs), `upload`
-(meshes to the GPU), `renderer`, `tick` and the rest. Several can go together:
+(meshes to the GPU), `save_chunks`, `tick_sound_engine`, `tick_music`,
+`renderer`, `tick` and the rest. Several can go together:
 `?env=HORIZON_SPIKES=25,HORIZON_WEB_WORKERS=2`.
 
 ## Browsers
@@ -143,7 +144,9 @@ The web build is the native game with the operating system swapped out
   4 ms on finished jobs, and uploads at most 4 MiB of section meshes (the
   Upload Budget setting). Each thread keeps the small blocks it
   frees for its next allocations (std's wasm allocator is one spinning lock
-  for every thread). Everything else runs on the page's thread:
+  for every thread). Sounds decode on two more workers (effects, and
+  streamed music and ambience), and region files are written on another, as
+  natively. Everything else runs on the page's thread:
   single player runs in the frame (`--in-frame`), not on the server thread the
   native game uses by default, and loaders run where they are started, so
   loading the resources holds the page for a while. The page's thread may not

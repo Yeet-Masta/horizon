@@ -1546,10 +1546,10 @@ type PendingWrites = Mutex<HashMap<(bool, i32, i32), (u64, Record)>>;
 type WriteBatch = (bool, Vec<((i32, i32), Record, u64)>);
 
 /// The background thread that encodes chunks and writes them into the region files, in
-/// submission order.
+/// submission order. The threaded web build's is a Web Worker, which isn't joined.
 struct Writer {
     send: mpsc::Sender<WriteBatch>,
-    thread: horizon_platform::thread::JoinHandle<()>,
+    thread: Option<horizon_platform::thread::JoinHandle<()>>,
 }
 
 /// What the writer writes into: one batch at a time, in submission order.
@@ -1742,14 +1742,14 @@ impl SaveDir {
                 .count
                 .lock()
                 .map_err(|_| "writer poisoned")? += 1;
-            // The web build has no thread to write on: the batch is written here.
-            #[cfg(target_family = "wasm")]
+            // The one-thread web build has no thread to write on: the batch is written here.
+            #[cfg(all(target_family = "wasm", not(target_feature = "atomics")))]
             self.write_target().write(entities, batch);
-            #[cfg(not(target_family = "wasm"))]
+            #[cfg(any(not(target_family = "wasm"), target_feature = "atomics"))]
             let mut writer = self.writer.lock().map_err(|_| "writer poisoned")?;
-            #[cfg(not(target_family = "wasm"))]
+            #[cfg(any(not(target_family = "wasm"), target_feature = "atomics"))]
             let writer = writer.get_or_insert_with(|| self.start_writer());
-            #[cfg(not(target_family = "wasm"))]
+            #[cfg(any(not(target_family = "wasm"), target_feature = "atomics"))]
             if writer.send.send((entities, batch)).is_err() {
                 *self
                     .outstanding
@@ -1770,18 +1770,28 @@ impl SaveDir {
         }
         Ok(())
     }
-    #[cfg(not(target_family = "wasm"))]
+    #[cfg(any(not(target_family = "wasm"), target_feature = "atomics"))]
     fn start_writer(&self) -> Writer {
         let (send, receive) = mpsc::channel::<WriteBatch>();
         let target = self.write_target();
-        let thread = horizon_platform::thread::Builder::new()
-            .name("horizon-region-writer".into())
-            .spawn(move || {
-                for (entities, batch) in receive {
-                    target.write(entities, batch);
-                }
-            })
-            .expect("spawn region writer");
+        let write = move || {
+            for (entities, batch) in receive {
+                target.write(entities, batch);
+            }
+        };
+        #[cfg(not(target_family = "wasm"))]
+        let thread = Some(
+            horizon_platform::thread::Builder::new()
+                .name("horizon-region-writer".into())
+                .spawn(write)
+                .expect("spawn region writer"),
+        );
+        #[cfg(target_family = "wasm")]
+        let thread = {
+            horizon_platform::thread::spawn_worker("horizon-region-writer", write)
+                .expect("spawn region writer");
+            None
+        };
         Writer { send, thread }
     }
     fn write_target(&self) -> WriteTarget {
@@ -1793,8 +1803,15 @@ impl SaveDir {
             outstanding: self.outstanding.clone(),
         }
     }
-    /// Wait until every queued write is on disk.
+    /// Wait until every queued write is on disk. The threaded web build's
+    /// page may not wait on the condition variable: it looks until they are.
     pub fn flush(&self) -> Result<()> {
+        if cfg!(all(target_family = "wasm", target_feature = "atomics")) {
+            while !self.writes_finished()? {
+                std::hint::spin_loop();
+            }
+            return Ok(());
+        }
         let mut count = self
             .outstanding
             .count
@@ -1904,7 +1921,15 @@ impl Drop for SaveDir {
     fn drop(&mut self) {
         if let Some(writer) = self.writer.get_mut().ok().and_then(Option::take) {
             drop(writer.send);
-            let _ = writer.thread.join();
+            match writer.thread {
+                Some(thread) => {
+                    let _ = thread.join();
+                }
+                // The threaded web build's writer: until its batches are in.
+                None => {
+                    let _ = self.flush();
+                }
+            }
         }
     }
 }
