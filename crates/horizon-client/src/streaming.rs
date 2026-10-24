@@ -215,8 +215,10 @@ struct Inline {
     run: Box<dyn FnMut(Job) -> Done + Send>,
     send: mpsc::Sender<Done>,
 }
-/// Finished jobs the threaded web build takes in a frame (`Streaming::update`).
-const WEB_RESULTS_PER_FRAME: usize = 48;
+/// How long the threaded web build's frame takes in finished jobs
+/// (`Streaming::update`).
+const WEB_RESULTS_TIME: horizon_platform::time::Duration =
+    horizon_platform::time::Duration::from_millis(4);
 /// Jobs the web build's frames run, as if it had this many workers.
 #[cfg(all(target_family = "wasm", not(target_feature = "atomics")))]
 const INLINE_WORKERS: usize = 2;
@@ -547,15 +549,11 @@ impl Streaming {
                 INLINE_WORKERS,
             )
         };
-        // The threaded web build's pool is Web Workers, one per core but the
-        // page's (`spawn_worker`); they end with `stop` and are never joined.
+        // The threaded web build's pool is Web Workers (`spawn_worker`); they
+        // end with `stop` and are never joined.
         #[cfg(any(not(target_family = "wasm"), target_feature = "atomics"))]
         let (threads, worker_count) = {
-            let count = if horizon_platform::WEB {
-                horizon_platform::thread::worker_count()
-            } else {
-                threads.max(1)
-            };
+            let count = threads.max(1);
             #[cfg_attr(target_family = "wasm", allow(unused_mut))]
             let mut handles = Vec::new();
             for i in 0..count {
@@ -900,17 +898,25 @@ impl Streaming {
         }
         ExtraCover::refresh(&mut self.cover, &self.extra);
         self.relight_edits(world);
-        let deferred = std::mem::take(&mut self.deferred);
+        let results_span = crate::spans::begin("streaming_results");
         // The threaded web build's workers can finish more in a frame than the
         // page's thread should take up in one (each mesh is uploaded, each
-        // lit column relit): the rest wait in the channel for later frames.
-        let take = if cfg!(all(target_family = "wasm", target_feature = "atomics")) {
-            WEB_RESULTS_PER_FRAME
-        } else {
-            usize::MAX
-        };
-        let received = std::iter::from_fn(|| self.results.try_recv().ok()).take(take);
-        for done in deferred.into_iter().chain(received.collect::<Vec<_>>()) {
+        // lit column relit, a chunk a job still holds copied): past a slice
+        // of the frame the rest wait in the channel for later frames.
+        let until = cfg!(all(target_family = "wasm", target_feature = "atomics"))
+            .then(|| horizon_platform::time::Instant::now() + WEB_RESULTS_TIME);
+        let mut deferred = std::mem::take(&mut self.deferred).into_iter();
+        loop {
+            let done = match deferred.next() {
+                Some(done) => done,
+                None if until.is_some_and(|t| horizon_platform::time::Instant::now() >= t) => {
+                    break;
+                }
+                None => match self.results.try_recv() {
+                    Ok(done) => done,
+                    Err(_) => break,
+                },
+            };
             match done {
                 Done::Proto(x, z, proto, decorated) => {
                     self.generation_scan.exhausted = false;
@@ -975,6 +981,8 @@ impl Streaming {
                 }
             }
         }
+        drop(results_span);
+        let unload_span = crate::spans::begin("streaming_unload_generate");
         // Unload far columns.
         let far: Vec<_> = world
             .chunks
@@ -1171,7 +1179,9 @@ impl Streaming {
             }
         }
         self.schedule_generation(world, workers);
+        drop(unload_span);
         // Lighting once all neighbours exist.
+        let _schedule_span = crate::spans::begin("streaming_schedule");
         let light: Vec<_> = world.dirty_light.iter().copied().collect();
         for (x, z) in light {
             if !world.chunks.contains_key(&(x, z)) {

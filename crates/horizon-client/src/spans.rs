@@ -42,6 +42,31 @@ pub fn time<T>(name: &'static str, f: impl FnOnce() -> T) -> T {
     SPANS.with(|s| s.borrow_mut().push(Span { name, ms, cpu_ms }));
     out
 }
+/// [`time`] for a stretch of code: what passes until the guard drops (or
+/// nothing, when spans are off).
+pub fn begin(name: &'static str) -> Option<Timing> {
+    ENABLED.load(Ordering::Relaxed).then(|| Timing {
+        name,
+        started: Instant::now(),
+        cpu: thread_cpu(),
+    })
+}
+/// A span being timed ([`begin`]).
+pub struct Timing {
+    name: &'static str,
+    started: Instant,
+    cpu: Option<Duration>,
+}
+impl Drop for Timing {
+    fn drop(&mut self) {
+        let ms = self.started.elapsed().as_secs_f32() * 1000.0;
+        let cpu_ms = thread_cpu()
+            .zip(self.cpu)
+            .map_or(ms, |(end, start)| (end - start).as_secs_f32() * 1000.0);
+        let name = self.name;
+        SPANS.with(|s| s.borrow_mut().push(Span { name, ms, cpu_ms }));
+    }
+}
 /// The CPU time this thread has used, where the platform tells it: a tick
 /// with more wall time than CPU time waited (for a lock, or for a core on a
 /// busy machine).

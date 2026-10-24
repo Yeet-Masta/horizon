@@ -269,7 +269,9 @@ impl Default for Graphics {
             cull_leaves: false,
             entity_culling: false,
             chunk_updates: 0,
-            upload_budget_kib: 0,
+            // The web build uploads through the browser's WebGPU, slower than
+            // a native driver: a burst of new sections spreads over frames.
+            upload_budget_kib: if horizon_platform::WEB { 4096 } else { 0 },
             sky: true,
             fog: true,
             weather: true,
@@ -387,6 +389,10 @@ impl Graphics {
     pub fn worker_threads(&self) -> usize {
         if self.workers > 0 {
             return self.workers as usize;
+        }
+        // A browser can't run workers behind the page (web/README.md).
+        if horizon_platform::WEB {
+            return horizon_platform::thread::worker_count();
         }
         // The pool never takes every core. The render thread and the
         // integrated server thread (single player runs on its own server

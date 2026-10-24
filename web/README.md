@@ -105,6 +105,14 @@ sends chunks in batches each tick, and every batch waits for the guest's
 answer. A host with a high render distance on a slow machine takes a while
 to fill a friend's view.
 
+### Finding stutters
+
+`?env=HORIZON_SPIKES=25` logs every frame slower than 25 ms to the browser
+console, with where it went: `streaming_results` (finished chunk work taken
+in), `streaming_unload_generate`, `streaming_schedule` (new jobs), `upload`
+(meshes to the GPU), `renderer`, `tick` and the rest. Several can go together:
+`?env=HORIZON_SPIKES=25,HORIZON_WEB_WORKERS=2`.
+
 ## Browsers
 
 - WebGPU: Chrome and Edge 113+, Firefox 141+ on Windows, Safari 26+.
@@ -130,8 +138,10 @@ The web build is the native game with the operating system swapped out
 - **Threads**: chunk generation, lighting and meshing run on Web Workers that
   share the page's memory (`web/worker.js`), as the native game's workers do.
   A browser can't run them behind the page as the native game does, so there
-  are half as many as cores (`?env=HORIZON_WEB_WORKERS=3` sets it), and a
-  frame takes at most 48 finished jobs. Each thread keeps the small blocks it
+  are half as many as cores, at most 3 (Horizon's graphics settings, Worker
+  Threads, or `?env=HORIZON_WEB_WORKERS=2`, set it). A frame spends at most
+  4 ms on finished jobs, and uploads at most 4 MiB of section meshes (the
+  Upload Budget setting). Each thread keeps the small blocks it
   frees for its next allocations (std's wasm allocator is one spinning lock
   for every thread). Everything else runs on the page's thread:
   single player runs in the frame (`--in-frame`), not on the server thread the

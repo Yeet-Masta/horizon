@@ -55,8 +55,9 @@ pub fn spawn_worker(name: &str, work: impl FnOnce() + Send + 'static) -> std::io
 /// How many [`spawn_worker`] threads make sense: natively the cores less the
 /// one the game runs on (its workers run behind it, `horizon_threads`). A
 /// browser can't put a worker behind the page, so the threaded web build
-/// takes half the cores, leaving the rest to the page and the browser's own
-/// threads; `HORIZON_WEB_WORKERS` sets it.
+/// takes half the cores, at most 3 (more ran slower in Firefox and Chromium
+/// alike), leaving the rest to the page and the browser's own threads;
+/// `HORIZON_WEB_WORKERS` sets it.
 pub fn worker_count() -> usize {
     #[cfg(all(target_family = "wasm", target_feature = "atomics"))]
     {
@@ -64,7 +65,7 @@ pub fn worker_count() -> usize {
             .ok()
             .and_then(|n| n.trim().parse::<usize>().ok());
         return set
-            .unwrap_or(crate::web::hardware_concurrency() / 2)
+            .unwrap_or((crate::web::hardware_concurrency() / 2).min(3))
             .clamp(1, 16);
     }
     #[allow(unreachable_code)]
