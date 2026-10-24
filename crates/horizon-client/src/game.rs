@@ -137,8 +137,8 @@ mod scoreboard;
 mod screens;
 mod sculk;
 mod sculk_fixture;
+mod server_packs;
 mod server_travel;
-mod shader_packs;
 mod shield;
 mod sign_edit;
 mod sniffers;
@@ -1143,6 +1143,8 @@ struct Game<'a> {
     pending_entry: Option<PendingWorldEntry>,
     world_loader: Option<world_loading::WorldLoader>,
     pending_pack_reload: bool,
+    /// A server's resource packs (game/server_packs.rs).
+    server_packs: server_packs::ServerPackState,
     world_renderer_ready: bool,
     collision: &'a BlockCollisionRegistry<'a>,
     motion: &'a MotionResources,
@@ -1215,8 +1217,6 @@ struct Game<'a> {
     modifiers: winit::keyboard::ModifiersState,
     /// The window's fullscreen request and reported state.
     fullscreen: horizon_client::window::FullscreenState,
-    /// The selected Horizon shader pack (`game/shader_packs.rs`).
-    shader_packs: shader_packs::ShaderPacks,
     /// MouseHandler's accumulated look and wheel state.
     mouse: MouseLook,
     /// An agent moved the mouse (`mouse-move`) since the pointer was last
@@ -4818,7 +4818,14 @@ impl Game<'_> {
         hud_layout::paint(batch, &self.gui.atlas, &draws);
     }
     fn hud(&mut self, size: [u32; 2]) -> HudBatch {
-        let mut batch = self.hud_layers(size);
+        // The pack prompt replaces the connecting screen (setScreen), but
+        // in game it opens over the world.
+        let mut batch = if self.server_packs.prompt.is_some() && self.player.is_none() {
+            HudBatch::new(size)
+        } else {
+            self.hud_layers(size)
+        };
+        self.draw_pack_prompt(&mut batch);
         // Gui.extractRenderState: the debug overlay comes after the screen
         // and the toasts, so it is over everything, menus included.
         self.draw_debug_overlay(&mut batch, size);
@@ -7478,30 +7485,17 @@ impl Game<'_> {
         self.tick_player_model();
         Ok(())
     }
-    /// What the loaded Java shader pack changes in this dimension's vanilla
-    /// sky (`sunPathRotation`, `clouds`, `sun`, `moon`); `None` without one.
-    fn java_sky(&self) -> Option<(f32, horizon_shaderpack::properties::SkyDirectives)> {
-        self.shader_packs.java_sky(match self.dim {
-            Dim::Overworld => 0,
-            Dim::Nether => -1,
-            Dim::End => 1,
-        })
-    }
     /// SkyRenderer.renderSunMoonAndStars: bodies on a frame rotated Y -90 then X by angle.
-    /// A Java pack's `sunPathRotation` tilts it about Z in between, and its
-    /// `sun = false` / `moon = false` leave those out, as Iris does. Returns
-    /// the sun and moon quads, and the stars' frame and brightness (the
-    /// renderer keeps their geometry, built once).
+    /// Returns the sun and moon quads, and the stars' frame and brightness
+    /// (the renderer keeps their geometry, built once).
     fn celestial_geometry(
         &self,
         sky: &horizon_client::environment::Sky,
     ) -> (Vec<Vertex>, Option<(glam::Mat4, f32)>) {
         let mut out = Vec::new();
         let atlas = &self.gui.atlas;
-        let (tilt, keep) = self.java_sky().unwrap_or_default();
         let frame = |angle: f32| {
             glam::Mat4::from_rotation_y((-90.0f32).to_radians())
-                * glam::Mat4::from_rotation_z(tilt.to_radians())
                 * glam::Mat4::from_rotation_x(angle.to_radians())
         };
         let mut body = |name: &str, angle: f32, size: f32, color: u32| {
@@ -7523,14 +7517,12 @@ impl Game<'_> {
                 });
             }
         };
-        if keep.sun {
-            body(
-                "environment/celestial/sun",
-                sky.sun_angle,
-                30.0,
-                0xFFFF_FFFF,
-            );
-        }
+        body(
+            "environment/celestial/sun",
+            sky.sun_angle,
+            30.0,
+            0xFFFF_FFFF,
+        );
         let phases = [
             "full_moon",
             "waning_gibbous",
@@ -7542,14 +7534,12 @@ impl Game<'_> {
             "waxing_gibbous",
         ];
         let phase = phases[(self.world.day_time / 24000).rem_euclid(8) as usize];
-        if keep.moon {
-            body(
-                &format!("environment/celestial/moon/{phase}"),
-                sky.moon_angle,
-                20.0,
-                0xFFFF_FFFF,
-            );
-        }
+        body(
+            &format!("environment/celestial/moon/{phase}"),
+            sky.moon_angle,
+            20.0,
+            0xFFFF_FFFF,
+        );
         // SkyRenderer.renderStars: the static star buffer on the same frame.
         let stars =
             (sky.star_brightness > 0.0).then(|| (frame(sky.star_angle), sky.star_brightness));
@@ -9146,21 +9136,11 @@ impl Game<'_> {
         // Options.biomeBlendRadius, ambientOcclusion and cutoutLeaves:
         // LevelExtractor.allChanged when they change.
         let (s, st) = (&self.settings, &self.streaming);
-        let remesh = (
-            s.biome_blend,
-            s.smooth_lighting,
-            s.cutout_leaves,
-            s.horizon.cull_leaves,
-        ) != (
-            st.biome_blend,
-            st.smooth_lighting,
-            st.cutout_leaves,
-            st.cull_leaves,
-        );
+        let remesh = (s.biome_blend, s.smooth_lighting, s.cutout_leaves)
+            != (st.biome_blend, st.smooth_lighting, st.cutout_leaves);
         self.streaming.biome_blend = self.settings.biome_blend;
         self.streaming.smooth_lighting = self.settings.smooth_lighting;
         self.streaming.cutout_leaves = self.settings.cutout_leaves;
-        self.streaming.cull_leaves = self.settings.horizon.cull_leaves;
         if remesh {
             self.all_sections_changed();
         }
@@ -9877,7 +9857,6 @@ impl Game<'_> {
             }
             return Ok(false);
         }
-        self.poll_shader_pack();
         let Some(size) = self
             .renderer
             .as_ref()
@@ -10090,18 +10069,6 @@ impl Game<'_> {
             self.dragon_fireball_geometry(camera, alpha, &mut dragon);
             entities.extend(dragon);
         }
-        // A Java pack's `clouds` replaces the cloud option (`renderClouds`:
-        // "false", "fast", "true"), as Iris overrides `getCloudsType`.
-        let clouds_mode = {
-            use horizon_shaderpack::properties::CloudSetting;
-            match self.java_sky().and_then(|(_, sky)| sky.clouds) {
-                Some(CloudSetting::Off) => "false",
-                Some(CloudSetting::Fast) => "fast",
-                Some(CloudSetting::Fancy) => "true",
-                None => self.settings.clouds.as_str(),
-            }
-            .to_owned()
-        };
         let (celestial, stars) = if title {
             (Vec::new(), None)
         } else if self.dim == Dim::Overworld
@@ -10145,7 +10112,6 @@ impl Game<'_> {
         let frame = Frame {
             weather: &weather,
             weather_time: horizon_client::weather::Time::new(self.world.game_time, alpha as f32),
-            shader: self.shader_inputs(camera, alpha as f32),
             nether_lighting: self.dim == Dim::Nether,
             camera,
             yaw,
@@ -10193,7 +10159,7 @@ impl Game<'_> {
             hud: &hud,
             clouds: (!title
                 && self.dim == Dim::Overworld
-                && horizon_client::clouds::visible(&clouds_mode, sky.cloud_color[3]))
+                && horizon_client::clouds::visible(&self.settings.clouds, sky.cloud_color[3]))
             .then(|| self.gui.atlas.sprites.get("horizon/white"))
             .flatten()
             .map(|white| horizon_client::clouds::Input {
@@ -10203,7 +10169,7 @@ impl Game<'_> {
                 time: self.world.game_time,
                 partial_tick: alpha,
                 range: self.settings.cloud_range,
-                fast: clouds_mode == "fast",
+                fast: self.settings.clouds == "fast",
                 color: sky.cloud_color,
             }),
             entities: &entities,
@@ -10924,9 +10890,6 @@ impl ApplicationHandler for Game<'_> {
                 WindowEvent::CloseRequested => {
                     self.pending_save.as_mut().unwrap().quit = true;
                 }
-                WindowEvent::DroppedFile(path) => {
-                    self.drop_shader_pack(&path);
-                }
                 WindowEvent::Focused(focused) => {
                     self.focused = focused;
                     if !focused {
@@ -11079,6 +11042,13 @@ impl ApplicationHandler for Game<'_> {
                     }
                     if self.screen == Screen::Advancements {
                         self.advancements_scroll(scaled(raw_x) as f32, d);
+                    }
+                }
+                WindowEvent::MouseInput { state, button, .. }
+                    if self.server_packs.prompt.is_some() =>
+                {
+                    if state == ElementState::Pressed && button == MouseButton::Left {
+                        self.pack_prompt_click()?;
                     }
                 }
                 WindowEvent::MouseInput { .. } if self.screen == Screen::Win => {}
@@ -11278,6 +11248,14 @@ impl ApplicationHandler for Game<'_> {
                             self.stats_click(size);
                         }
                         _ => {}
+                    }
+                }
+                // ConfirmScreen.keyPressed: Escape answers no.
+                WindowEvent::KeyboardInput { event, .. } if self.server_packs.prompt.is_some() => {
+                    if event.state == ElementState::Pressed
+                        && event.physical_key == PhysicalKey::Code(KeyCode::Escape)
+                    {
+                        self.answer_pack_prompt(false)?;
                     }
                 }
                 WindowEvent::KeyboardInput { event, .. }
@@ -11667,6 +11645,7 @@ impl ApplicationHandler for Game<'_> {
             event_loop.exit();
             return;
         }
+        self.tick_server_packs();
         self.poll_control(event_loop);
         if self.pending_save.is_some() {
             return;
@@ -11763,6 +11742,7 @@ impl<'a> Game<'a> {
             pending_entry: None,
             world_loader: None,
             pending_pack_reload: false,
+            server_packs: Default::default(),
             world_renderer_ready: false,
             collision: res.collision(),
             motion: res.motion(),
@@ -11820,7 +11800,6 @@ impl<'a> Game<'a> {
             focused: true,
             modifiers: winit::keyboard::ModifiersState::empty(),
             fullscreen: horizon_client::window::FullscreenState::new(false),
-            shader_packs: Default::default(),
             mouse: MouseLook::default(),
             agent_pointer: false,
             smooth_camera: false,
@@ -12779,7 +12758,6 @@ fn loading_frame(hud: &HudBatch) -> Frame<'_> {
         night_vision: 0.0,
         block_flicker: 0.0,
         menu_blur: None,
-        shader: Default::default(),
     }
 }
 
@@ -13379,7 +13357,7 @@ pub fn run() -> Result<()> {
         return run_loading(options, early_settings, vanilla_root, None, started);
     }
     let mut pack_error = None;
-    options.resources = packs::startup_root(&vanilla_root, &early_settings.resource_packs)
+    options.resources = packs::startup_root(&vanilla_root, &early_settings.resource_packs, &[])
         .unwrap_or_else(|e| {
             log::warn!("Horizon: resource packs not applied: {e}");
             pack_error = Some(e.to_string());

@@ -210,7 +210,7 @@ impl Tool {
     pub fn call(&self, args: &Value) -> Result<String, String> {
         let words = self.argv(args)?;
         let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-        let out = std::process::Command::new(exe)
+        let out = horizon_launcher::process::command(exe)
             .arg("--json")
             .args(&words)
             .stdin(std::process::Stdio::null())
@@ -393,14 +393,15 @@ mod tests {
         assert_eq!(schema["inputSchema"]["properties"]["text"]["type"], "array");
         let kinds = &schema["inputSchema"]["properties"]["kind"]["enum"];
         assert!(
-            kinds.as_array().unwrap().contains(&json!("shader")),
+            kinds.as_array().unwrap().contains(&json!("modpack"))
+                && !kinds.as_array().unwrap().contains(&json!("shader")),
             "{kinds}"
         );
         assert_eq!(
             search
-                .argv(&json!({ "text": ["fresh", "animations"], "kind": "shader", "everything": true }))
+                .argv(&json!({ "text": ["fresh", "animations"], "kind": "resource", "everything": true }))
                 .unwrap(),
-            ["mods", "search", "--kind=shader", "--everything", "fresh", "animations"]
+            ["mods", "search", "--kind=resource", "--everything", "fresh", "animations"]
         );
         let run = tool("servers_run");
         assert_eq!(
