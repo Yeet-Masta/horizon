@@ -1136,7 +1136,20 @@ mod web_output {
     use super::{Mixer, Result, mix};
     use horizon_platform::sync::Mutex;
     use std::sync::Arc;
-    use wasm_bindgen::{JsCast, closure::Closure};
+    use wasm_bindgen::{JsCast, closure::Closure, prelude::*};
+
+    #[wasm_bindgen]
+    extern "C" {
+        /// An AudioBuffer, for `copyToChannel` from a JS array: browsers may
+        /// refuse a view of the threaded build's shared memory (Firefox does).
+        type Buffer;
+        #[wasm_bindgen(method, js_name = copyToChannel, catch)]
+        fn copy_to_channel(
+            this: &Buffer,
+            source: &js_sys::Float32Array,
+            channel: i32,
+        ) -> std::result::Result<(), JsValue>;
+    }
 
     /// Frames per callback: about 43 ms at 48 kHz.
     const FRAMES: u32 = 2048;
@@ -1159,6 +1172,7 @@ mod web_output {
                 .map_err(js)?;
             let mut scratch = Vec::new();
             let mut channel = Vec::new();
+            let mut staging = js_sys::Float32Array::new_with_length(FRAMES);
             let process = Closure::<dyn FnMut(web_sys::AudioProcessingEvent)>::new(
                 move |event: web_sys::AudioProcessingEvent| {
                     let Ok(buffer) = event.output_buffer() else {
@@ -1171,11 +1185,17 @@ mod web_output {
                         Err(_) => scratch.fill(0.0),
                     }
                     channel.resize(frames, 0.0f32);
+                    if staging.length() as usize != frames {
+                        staging = js_sys::Float32Array::new_with_length(frames as u32);
+                    }
                     for side in 0..2 {
                         for (i, s) in channel.iter_mut().enumerate() {
                             *s = scratch[i * 2 + side];
                         }
-                        let _ = buffer.copy_to_channel(&channel, side as i32);
+                        staging.copy_from(&channel);
+                        let _ = buffer
+                            .unchecked_ref::<Buffer>()
+                            .copy_to_channel(&staging, side as i32);
                     }
                 },
             );

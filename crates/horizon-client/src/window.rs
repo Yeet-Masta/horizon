@@ -50,6 +50,17 @@ pub mod pointer_lock {
     /// When the game last asked, and whether the browser has given it since.
     static ASKED: Mutex<Option<(Instant, bool)>> = Mutex::new(None);
 
+    /// Whether asking for the lock can work: browsers give it only in answer
+    /// to the player's input (`navigator.userActivation`), and refuse
+    /// otherwise with an error the page reports. True where the browser
+    /// doesn't say.
+    pub fn may_ask() -> bool {
+        let get = |object: &wasm_bindgen::JsValue, key: &str| {
+            js_sys::Reflect::get(object, &key.into()).unwrap_or(wasm_bindgen::JsValue::UNDEFINED)
+        };
+        let activation = get(&get(&js_sys::global(), "navigator"), "userActivation");
+        activation.is_undefined() || get(&activation, "isActive").as_bool() != Some(false)
+    }
     /// The game asked for the lock (`set_cursor_grab(Locked)`).
     pub fn asked() {
         *ASKED.lock().unwrap() = Some((Instant::now(), false));

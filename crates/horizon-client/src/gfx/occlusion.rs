@@ -449,29 +449,28 @@ struct Worker {
 
 impl Worker {
     fn spawn(min_y: i32, sections: i32) -> Option<Self> {
-        // The web build searches on the render thread, its only one.
-        if horizon_platform::WEB {
+        // The one-thread web build searches on the render thread, its only
+        // one; the threaded one on a Web Worker.
+        if cfg!(all(target_family = "wasm", not(target_feature = "atomics"))) {
             return None;
         }
         let (jobs, job_rx) = mpsc::channel::<Job>();
         let (done_tx, done) = mpsc::channel();
-        horizon_platform::thread::Builder::new()
-            .name("occlusion".into())
-            .spawn(move || {
-                let mut columns = Columns::new(min_y, sections);
-                let (mut vis, mut queue) = (Vec::new(), VecDeque::new());
-                while let Ok(mut job) = job_rx.recv() {
-                    for edit in job.edits.drain(..) {
-                        columns.apply(edit);
-                    }
-                    job.graph
-                        .search(&columns, job.camera, job.radius, &mut vis, &mut queue);
-                    if done_tx.send((job.graph, job.edits)).is_err() {
-                        break;
-                    }
+        horizon_platform::thread::spawn_worker("occlusion", move || {
+            let mut columns = Columns::new(min_y, sections);
+            let (mut vis, mut queue) = (Vec::new(), VecDeque::new());
+            while let Ok(mut job) = job_rx.recv() {
+                for edit in job.edits.drain(..) {
+                    columns.apply(edit);
                 }
-            })
-            .ok()?;
+                job.graph
+                    .search(&columns, job.camera, job.radius, &mut vis, &mut queue);
+                if done_tx.send((job.graph, job.edits)).is_err() {
+                    break;
+                }
+            }
+        })
+        .ok()?;
         Some(Self { jobs, done })
     }
 }
@@ -614,7 +613,15 @@ impl Occlusion {
         if self.running.is_none() {
             return;
         }
-        let result = if wait {
+        let result = if wait && cfg!(all(target_family = "wasm", target_feature = "atomics")) {
+            // The page's thread may not wait on the channel: it looks.
+            loop {
+                match worker.done.try_recv() {
+                    Err(TryRecvError::Empty) => std::hint::spin_loop(),
+                    result => break result,
+                }
+            }
+        } else if wait {
             worker.done.recv().map_err(|_| TryRecvError::Disconnected)
         } else {
             worker.done.try_recv()

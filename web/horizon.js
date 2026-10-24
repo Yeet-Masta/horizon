@@ -118,10 +118,17 @@ const build = await fetch("build.json").then((r) => r.json()).catch(() => ({ tar
 const wasm64 = build.target.startsWith("wasm64");
 
 // The threaded build's threads (web/README.md): Web Workers that instantiate the page's module
-// over its shared memory, each running the work the game hands it.
+// over its shared memory, each running the work the game hands it. A thread a worker starts is
+// started here too (worker.js forwards it): a worker's own workers would end with it.
+let threadModule, threadMemory;
 globalThis.horizonSpawnThread = (name, module, memory, work) => {
+  threadModule = module;
+  threadMemory = memory;
   const worker = new Worker(new URL("worker.js", import.meta.url), { type: "module", name });
   worker.onerror = (e) => console.error(`Horizon: ${name} stopped:`, e.message ?? e);
+  worker.onmessage = ({ data }) => {
+    if (data?.spawn) globalThis.horizonSpawnThread(data.spawn[0], threadModule, threadMemory, data.spawn[1]);
+  };
   worker.postMessage([module, memory, work]);
 };
 

@@ -4629,10 +4629,16 @@ impl Game<'_> {
             // so everywhere else warp after grabbing.
             #[cfg(target_os = "macos")]
             warp(window);
-            self.captured = window
-                .set_cursor_grab(CursorGrabMode::Locked)
-                .or_else(|_| window.set_cursor_grab(CursorGrabMode::Confined))
-                .is_ok();
+            // A browser locks the pointer only in answer to the player's input.
+            #[cfg(target_family = "wasm")]
+            let may = horizon_client::window::pointer_lock::may_ask();
+            #[cfg(not(target_family = "wasm"))]
+            let may = true;
+            self.captured = may
+                && window
+                    .set_cursor_grab(CursorGrabMode::Locked)
+                    .or_else(|_| window.set_cursor_grab(CursorGrabMode::Confined))
+                    .is_ok();
             #[cfg(target_family = "wasm")]
             horizon_client::window::pointer_lock::asked();
             #[cfg(not(target_os = "macos"))]
@@ -11426,6 +11432,20 @@ impl ApplicationHandler for Game<'_> {
                     self.mapped_key(key, event.state == ElementState::Pressed, event.repeat)?;
                 }
                 WindowEvent::RedrawRequested => {
+                    // The web build can't sleep out a frame's slot (`limit_frame`):
+                    // under Max Framerate, a frame the page asks for too early is
+                    // skipped, and the next one is asked for (`about_to_wait`).
+                    if horizon_platform::WEB {
+                        let limit = self.framerate_limit();
+                        if limit < 260 {
+                            let slot = Duration::from_secs_f64(1.0 / f64::from(limit.max(1)));
+                            // A display's frames come a little early or late.
+                            let early = Duration::from_millis(2).min(slot / 4);
+                            if self.previous.elapsed() + early < slot {
+                                return Ok(());
+                            }
+                        }
+                    }
                     self.observe_fullscreen();
                     let now = Instant::now();
                     let frame_cpu = self
