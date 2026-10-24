@@ -116,8 +116,9 @@ The web build is the native game with the operating system swapped out
   `/app/resources` and read in place; the game folder (`/home/horizon`: options,
   saves, screenshots) is kept in IndexedDB, written back every two seconds and as
   the page is hidden. Options → *Download the game folder* exports it as a zip.
-- **Threads**: none. Chunk generation, lighting and meshing run between frames,
-  most urgent first, for 8 ms a frame (more while the level loads;
+- **Threads**: none. Single player runs in the frame (`--in-frame`), not on
+  the server thread the native game uses by default. Chunk generation,
+  lighting and meshing run between frames, most urgent first, for 8 ms a frame (more while the level loads;
   `HORIZON_WEB_WORK_MS` sets it). Loaders run where they are started, so
   loading the resources holds the page for a while. Region files are written as
   they are saved.
