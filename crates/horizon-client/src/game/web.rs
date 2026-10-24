@@ -3,6 +3,7 @@
 //! on the browser, as nothing else in the game may), then the game starts as
 //! it does natively, on the page's event loop.
 use horizon_client::Result;
+use horizon_platform::time::{Duration, Instant};
 
 /// `main` on the web: starts the game once the page is ready, and returns.
 pub fn start() {
@@ -44,4 +45,52 @@ pub fn stopped(error: Option<&dyn std::error::Error>) {
             horizon_platform::web::status("Horizon quit. Reload the page to play again.", false)
         }
     }
+}
+
+/// The page's frames, for Max Framerate (`skip_frame`): when the last came,
+/// how far apart they come (the display's refresh), and when the next drawn
+/// frame is due.
+struct Pace {
+    last: Option<Instant>,
+    display: f64,
+    due: Option<Instant>,
+}
+thread_local! {
+    static PACE: std::cell::RefCell<Pace> = const {
+        std::cell::RefCell::new(Pace { last: None, display: 1.0 / 60.0, due: None })
+    };
+}
+
+/// Whether to skip this frame of the page's under Max Framerate `limit`
+/// (260: unlimited). The page's frames come at the display's rate and the
+/// web build can't sleep between them, so a frame draws when its slot has
+/// come, to within half a display frame; slots follow each other by the
+/// limit's interval, so 60 on a 144 Hz display draws 60 a second, not 48. A
+/// browser draws no faster than its display: above that the limit does
+/// nothing.
+pub fn skip_frame(limit: i32) -> bool {
+    let now = Instant::now();
+    PACE.with_borrow_mut(|pace| {
+        if let Some(last) = pace.last.replace(now) {
+            let gap = now.duration_since(last).as_secs_f64();
+            // A frame that took long says nothing of the display.
+            if gap < 0.05 {
+                pace.display = pace.display * 0.9 + gap * 0.1;
+            }
+        }
+        if limit >= 260 {
+            pace.due = None;
+            return false;
+        }
+        let slot = Duration::from_secs_f64(1.0 / f64::from(limit.max(1)));
+        let early = Duration::from_secs_f64(pace.display / 2.0);
+        let due = *pace.due.get_or_insert(now);
+        if now + early < due {
+            return true;
+        }
+        // The next slot follows this one; after a slow frame, it follows now.
+        let next = due + slot;
+        pace.due = Some(if next + early < now { now + slot } else { next });
+        false
+    })
 }

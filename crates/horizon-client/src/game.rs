@@ -11433,18 +11433,11 @@ impl ApplicationHandler for Game<'_> {
                 }
                 WindowEvent::RedrawRequested => {
                     // The web build can't sleep out a frame's slot (`limit_frame`):
-                    // under Max Framerate, a frame the page asks for too early is
-                    // skipped, and the next one is asked for (`about_to_wait`).
-                    if horizon_platform::WEB {
-                        let limit = self.framerate_limit();
-                        if limit < 260 {
-                            let slot = Duration::from_secs_f64(1.0 / f64::from(limit.max(1)));
-                            // A display's frames come a little early or late.
-                            let early = Duration::from_millis(2).min(slot / 4);
-                            if self.previous.elapsed() + early < slot {
-                                return Ok(());
-                            }
-                        }
+                    // under Max Framerate it skips the page's frames until its slot
+                    // (`web::skip_frame`), and the next one is asked for (`about_to_wait`).
+                    #[cfg(target_family = "wasm")]
+                    if web::skip_frame(self.framerate_limit()) {
+                        return Ok(());
                     }
                     self.observe_fullscreen();
                     let now = Instant::now();
