@@ -9,9 +9,14 @@
 //! is reached: an open relay would let any page reach any port this machine
 //! can.
 //!
+//! A server's name may redirect by its SRV record, as the game follows it
+//! (`horizon_protocol::resolver`): the relay connects where it says.
+//!
 //! It also introduces browsers to each other ([`rooms`]): a world played in
 //! one page is joined from another over WebRTC, the relay carrying only the
-//! few messages that set the connection up.
+//! few messages that set the connection up. And it passes a server's
+//! resource pack on to a page whose own fetch the pack's server refuses
+//! (`?download=URL`, [`Config::downloads`]).
 pub mod rooms;
 use base64::Engine;
 use sha1::{Digest, Sha1};
@@ -59,6 +64,9 @@ pub struct Config {
     pub rooms: bool,
     pub max_rooms: usize,
     pub max_guests: usize,
+    /// Pass server resource packs on to pages (`?download=URL`): from public
+    /// addresses only, at most [`MAX_DOWNLOAD`] bytes.
+    pub downloads: bool,
 }
 impl Default for Config {
     fn default() -> Self {
@@ -71,9 +79,14 @@ impl Default for Config {
             rooms: true,
             max_rooms: 256,
             max_guests: 16,
+            downloads: false,
         }
     }
 }
+
+/// The largest download passed on: vanilla's for a server resource pack
+/// (`DownloadedPackSource.MAX_PACK_SIZE_BYTES`).
+pub const MAX_DOWNLOAD: u64 = 262_144_000;
 
 /// The GUID RFC 6455 appends to the client's key.
 const GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
@@ -173,13 +186,26 @@ fn read_request(reader: &mut impl BufRead) -> io::Result<Request> {
 /// The value of `name` in a request's query, percent-decoded: `""` for a
 /// name without one.
 fn query(path: &str, name: &str) -> Option<String> {
-    let query = path.split_once('?')?.1;
-    let value = query
+    query_all(path, name).into_iter().next()
+}
+
+/// Every value of `name` in a request's query, in order.
+fn query_all(path: &str, name: &str) -> Vec<String> {
+    let Some((_, query)) = path.split_once('?') else {
+        return Vec::new();
+    };
+    query
         .split('&')
-        .find_map(|pair| match pair.split_once('=') {
+        .filter_map(|pair| match pair.split_once('=') {
             Some((n, value)) => (n == name).then_some(value),
             None => (pair == name).then_some(""),
-        })?;
+        })
+        .filter_map(decode)
+        .collect()
+}
+
+/// A query value, percent-decoded.
+fn decode(value: &str) -> Option<String> {
     let bytes = value.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
@@ -258,6 +284,15 @@ fn is_public(ip: IpAddr) -> bool {
 
 /// Where a connection for `asked` (the page's target) goes, or why it can't.
 pub fn resolve(config: &Config, asked: Option<&str>) -> Result<(String, Vec<SocketAddr>), String> {
+    resolve_with(config, asked, horizon_protocol::resolver::srv_target)
+}
+
+/// [`resolve`], with `srv` for the SRV redirect a name has.
+fn resolve_with(
+    config: &Config,
+    asked: Option<&str>,
+    srv: impl FnOnce(&str, u16) -> Option<(String, u16)>,
+) -> Result<(String, Vec<SocketAddr>), String> {
     let (host, port) = match (&config.target, asked) {
         (Some(target), _) => target.clone(),
         (None, None) => return Err("Name a server: ?target=host:port".to_owned()),
@@ -279,10 +314,25 @@ pub fn resolve(config: &Config, asked: Option<&str>) -> Result<(String, Vec<Sock
     if !fixed && !exact && !any_public {
         return Err(format!("This relay doesn't reach {shown}"));
     }
+    // A name the relay was given (its target, or one it allows by name) goes
+    // where its SRV record says, as in the game. Anyone can write a record,
+    // so through `*` it leads only to a public address on an unprivileged port.
+    let trusted = fixed || exact;
+    let (host, port, shown) = match srv(&named, port) {
+        Some((target, target_port)) => {
+            let target = target.trim_end_matches('.').to_owned();
+            let shown = format!("{shown} ({target}:{target_port})");
+            if !trusted && target_port < 1024 {
+                return Err(format!("This relay doesn't reach {shown}"));
+            }
+            (target, target_port, shown)
+        }
+        None => (host, port, shown),
+    };
     let addrs: Vec<SocketAddr> = (host.as_str(), port)
         .to_socket_addrs()
         .map_err(|_| format!("Unknown host {host}"))?
-        .filter(|a| fixed || exact || is_public(a.ip()))
+        .filter(|a| trusted || is_public(a.ip()))
         .collect();
     if addrs.is_empty() {
         return Err(format!("This relay doesn't reach {shown}"));
@@ -358,11 +408,135 @@ fn read_frame(reader: &mut impl Read) -> io::Result<(u8, Vec<u8>)> {
 }
 
 fn respond(stream: &mut TcpStream, status: &str, body: &str) -> io::Result<()> {
+    respond_with(stream, status, "", body)
+}
+
+/// [`respond`] with more header lines (each ending in CRLF).
+fn respond_with(out: &mut impl Write, status: &str, headers: &str, body: &str) -> io::Result<()> {
     write!(
-        stream,
-        "HTTP/1.1 {status}\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        out,
+        "HTTP/1.1 {status}\r\nContent-Type: text/plain\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     )
+}
+
+/// A page's `?download=URL`: a server resource pack, passed on with the
+/// header that lets the page read it (`Access-Control-Allow-Origin`) for a
+/// pack whose own server doesn't. `header=Name:Value` sets the game's
+/// download headers (`X-Minecraft-*`, `User-Agent`).
+fn download(client: &mut TcpStream, request: &Request, url: &str) -> io::Result<()> {
+    let headers: Vec<(String, String)> = query_all(&request.path, "header")
+        .into_iter()
+        .filter_map(|header| {
+            let (name, value) = header.split_once(':')?;
+            let name = name.trim();
+            let lower = name.to_ascii_lowercase();
+            (lower.starts_with("x-minecraft-") || lower == "user-agent")
+                .then(|| (name.to_owned(), value.trim().to_owned()))
+        })
+        .collect();
+    let peer = client.peer_addr()?;
+    println!("{peer}: downloading {url}");
+    let origin = request.origin.as_deref().unwrap_or("*");
+    pass_on(client, url, &headers, origin, true)
+}
+
+/// GET `url` and write the response to `out`: from http and https, public
+/// addresses only (after redirects too) unless `public_only` is off, and
+/// at most [`MAX_DOWNLOAD`] bytes (a longer one is cut, which the page sees
+/// as a failed download).
+fn pass_on(
+    out: &mut impl Write,
+    url: &str,
+    headers: &[(String, String)],
+    origin: &str,
+    public_only: bool,
+) -> io::Result<()> {
+    let cors = format!("Access-Control-Allow-Origin: {origin}\r\nVary: Origin\r\n");
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        return respond_with(
+            out,
+            "400 Bad Request",
+            &cors,
+            "Only http and https downloads\n",
+        );
+    }
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(Duration::from_secs(10))
+        .timeout_read(Duration::from_secs(30))
+        .resolver(move |netloc: &str| -> io::Result<Vec<SocketAddr>> {
+            let addrs: Vec<SocketAddr> = netloc
+                .to_socket_addrs()?
+                .filter(|a| !public_only || is_public(a.ip()))
+                .collect();
+            if addrs.is_empty() {
+                return Err(io::Error::other(format!(
+                    "this relay doesn't download from {netloc}"
+                )));
+            }
+            Ok(addrs)
+        })
+        .build();
+    let mut call = agent.get(url);
+    for (name, value) in headers {
+        call = call.set(name, value);
+    }
+    let response = match call.call() {
+        Ok(response) => response,
+        Err(ureq::Error::Status(code, _)) => {
+            let body = format!("The pack's server answered {code}\n");
+            return respond_with(out, "502 Bad Gateway", &cors, &body);
+        }
+        Err(e) => {
+            let body = format!("Can't download the pack: {e}\n");
+            return respond_with(out, "502 Bad Gateway", &cors, &body);
+        }
+    };
+    let size = response
+        .header("Content-Length")
+        .and_then(|v| v.trim().parse::<u64>().ok());
+    if size.is_some_and(|size| size > MAX_DOWNLOAD) {
+        return respond_with(
+            out,
+            "413 Content Too Large",
+            &cors,
+            "The pack is over 250 MiB\n",
+        );
+    }
+    let length = match size {
+        Some(size) => format!("Content-Length: {size}\r\n"),
+        None => "Transfer-Encoding: chunked\r\n".to_owned(),
+    };
+    write!(
+        out,
+        "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\n{cors}{length}Connection: close\r\n\r\n"
+    )?;
+    let mut input = response
+        .into_reader()
+        .take(size.unwrap_or(MAX_DOWNLOAD + 1));
+    let mut chunk = vec![0u8; 65536];
+    let mut sent = 0;
+    loop {
+        let n = input.read(&mut chunk)?;
+        if n == 0 {
+            break;
+        }
+        sent += n as u64;
+        if sent > MAX_DOWNLOAD {
+            return Err(io::Error::other("the pack is over 250 MiB"));
+        }
+        if size.is_some() {
+            out.write_all(&chunk[..n])?;
+        } else {
+            write!(out, "{n:x}\r\n")?;
+            out.write_all(&chunk[..n])?;
+            out.write_all(b"\r\n")?;
+        }
+    }
+    if size.is_none() {
+        out.write_all(b"0\r\n\r\n")?;
+    }
+    out.flush()
 }
 
 /// One page's connection, from its upgrade request to the end.
@@ -370,6 +544,25 @@ fn relay(mut client: TcpStream, config: &Config, rooms: &rooms::Rooms) -> io::Re
     client.set_read_timeout(Some(Duration::from_secs(10)))?;
     let mut reader = BufReader::new(client.try_clone()?);
     let request = read_request(&mut reader)?;
+    let allowed_origin = config.origins.is_empty()
+        || request
+            .origin
+            .as_ref()
+            .is_some_and(|o| config.origins.iter().any(|a| a.eq_ignore_ascii_case(o)));
+    if !request.upgrade
+        && config.downloads
+        && let Some(url) = query(&request.path, "download")
+    {
+        if !allowed_origin {
+            return respond(
+                &mut client,
+                "403 Forbidden",
+                "This page may not use the relay\n",
+            );
+        }
+        client.set_read_timeout(None)?;
+        return download(&mut client, &request, &url);
+    }
     let (Some(key), true) = (&request.key, request.upgrade) else {
         return respond(
             &mut client,
@@ -384,12 +577,7 @@ fn relay(mut client: TcpStream, config: &Config, rooms: &rooms::Rooms) -> io::Re
             "WebSocket version 13\n",
         );
     }
-    if !config.origins.is_empty()
-        && !request
-            .origin
-            .as_ref()
-            .is_some_and(|o| config.origins.iter().any(|a| a.eq_ignore_ascii_case(o)))
-    {
+    if !allowed_origin {
         return respond(
             &mut client,
             "403 Forbidden",
@@ -591,6 +779,114 @@ mod tests {
             "127.0.0.1:25565"
         );
         assert!(!is_public(IpAddr::V4(Ipv4Addr::new(100, 64, 0, 1))));
+    }
+
+    #[test]
+    fn srv_records_redirect_within_what_the_relay_reaches() {
+        let any = Config {
+            allow: vec![Allow::parse("*:25565").unwrap()],
+            ..Config::default()
+        };
+        let to = |host: &'static str, port| move |_: &str, _| Some((host.to_owned(), port));
+        // A public target on a Minecraft port is reached through `*`.
+        let (shown, addrs) =
+            resolve_with(&any, Some("play.example.net"), to("1.1.1.1.", 25600)).unwrap();
+        assert_eq!(shown, "play.example.net:25565 (1.1.1.1:25600)");
+        assert_eq!(addrs, vec!["1.1.1.1:25600".parse().unwrap()]);
+        // Not a privileged port, nor a private address.
+        assert!(resolve_with(&any, Some("play.example.net"), to("1.1.1.1", 25)).is_err());
+        assert!(resolve_with(&any, Some("play.example.net"), to("10.0.0.2", 25600)).is_err());
+        // A name allowed by name goes wherever its record says.
+        let named = Config {
+            allow: vec![Allow::parse("play.example.net:25565").unwrap()],
+            ..Config::default()
+        };
+        let (_, addrs) = resolve_with(&named, Some("Play.Example.net."), |host, port| {
+            assert_eq!((host, port), ("play.example.net", 25565));
+            Some(("127.0.0.1".to_owned(), 22))
+        })
+        .unwrap();
+        assert_eq!(addrs, vec!["127.0.0.1:22".parse().unwrap()]);
+    }
+
+    #[test]
+    fn repeated_query_values_are_all_read() {
+        assert_eq!(
+            query_all("/?download=x&header=A%3A1&header=B:2", "header"),
+            vec!["A:1".to_owned(), "B:2".to_owned()]
+        );
+        assert!(query_all("/", "header").is_empty());
+    }
+
+    /// A one-shot HTTP server on this machine answering with `body`, with or
+    /// without a Content-Length; the request it got.
+    fn http_once(body: &'static [u8], length: bool) -> (String, std::thread::JoinHandle<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/pack.zip", listener.local_addr().unwrap());
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut request = String::new();
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                if line == "\r\n" || line.is_empty() {
+                    break;
+                }
+                request.push_str(&line);
+            }
+            let length = if length {
+                format!("Content-Length: {}\r\n", body.len())
+            } else {
+                String::new()
+            };
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\n{length}Connection: close\r\n\r\n"
+            )
+            .unwrap();
+            stream.write_all(body).unwrap();
+            request
+        });
+        (url, handle)
+    }
+
+    #[test]
+    fn downloads_pass_on_with_the_pages_origin_and_the_games_headers() {
+        for length in [true, false] {
+            let (url, server) = http_once(b"PK pack bytes", length);
+            let mut out = Vec::new();
+            let headers = [("X-Minecraft-Username".to_owned(), "Alex".to_owned())];
+            pass_on(&mut out, &url, &headers, "https://play.example", false).unwrap();
+            let out = String::from_utf8(out).unwrap();
+            let (head, body) = out.split_once("\r\n\r\n").unwrap();
+            assert!(head.starts_with("HTTP/1.1 200 OK"), "{head}");
+            assert!(head.contains("Access-Control-Allow-Origin: https://play.example"));
+            let body = if length {
+                body.to_owned()
+            } else {
+                assert!(head.contains("Transfer-Encoding: chunked"));
+                assert_eq!(body, "d\r\nPK pack bytes\r\n0\r\n\r\n");
+                "PK pack bytes".to_owned()
+            };
+            assert_eq!(body, "PK pack bytes");
+            assert!(
+                server
+                    .join()
+                    .unwrap()
+                    .contains("X-Minecraft-Username: Alex")
+            );
+        }
+        // This machine is not a public address: a page can't reach it so.
+        let (url, _server) = http_once(b"", true);
+        let mut out = Vec::new();
+        pass_on(&mut out, &url, &[], "*", true).unwrap();
+        let out = String::from_utf8(out).unwrap();
+        assert!(out.starts_with("HTTP/1.1 502"), "{out}");
+        assert!(out.contains("doesn't download from"), "{out}");
+        let mut out = Vec::new();
+        pass_on(&mut out, "file:///etc/passwd", &[], "*", true).unwrap();
+        assert!(String::from_utf8(out).unwrap().starts_with("HTTP/1.1 400"));
     }
 
     #[test]

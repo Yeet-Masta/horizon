@@ -36,7 +36,10 @@ Options -Indexes
 
 # The WebSocket relay (web/README.md, Multiplayer) at wss://<this site>/relay: run
 # horizon-web-relay on this machine (it listens on 127.0.0.1:8081), enable mod_rewrite,
-# mod_proxy and mod_proxy_wstunnel, and uncomment. The page's ?target= goes along.
+# mod_proxy and mod_proxy_wstunnel, and uncomment. The page's ?target= goes along. The
+# last two lines pass on its downloads of servers' resource packs (?download=).
 #RewriteEngine On
 #RewriteCond %{HTTP:Upgrade} =websocket [NC]
 #RewriteRule ^relay/?$ ws://127.0.0.1:8081/ [P,L]
+#RewriteCond %{QUERY_STRING} (^|&)download=
+#RewriteRule ^relay/?$ http://127.0.0.1:8081/ [P,L]

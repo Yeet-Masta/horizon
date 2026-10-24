@@ -22,19 +22,29 @@ fn resolve_with(
     srv: impl FnOnce(&str) -> Option<(String, u16)>,
     addresses: impl FnOnce(&str, u16) -> Result<Vec<SocketAddr>>,
 ) -> Result<Vec<SocketAddr>> {
-    // Vanilla also asks for `_minecraft._tcp.127.0.0.1`, which never has a
-    // record: IP literals and localhost skip the query.
-    if port == 25565
-        && host.parse::<IpAddr>().is_err()
-        && host != "localhost"
-        && let Some((target, target_port)) =
-            srv(&format!("_minecraft._tcp.{}.", host.trim_end_matches('.')))
+    if let Some(name) = srv_name(host, port)
+        && let Some((target, target_port)) = srv(&name)
     {
         // No second SRV lookup at the target, and no fallback to the original
         // host when the target is unknown.
         return addresses(&target, target_port);
     }
     addresses(host, port)
+}
+
+/// The SRV record a server address may redirect by: for the default port
+/// only. Vanilla also asks for `_minecraft._tcp.127.0.0.1`, which never has
+/// a record: IP literals and localhost skip the query.
+fn srv_name(host: &str, port: u16) -> Option<String> {
+    (port == 25565 && host.parse::<IpAddr>().is_err() && host != "localhost")
+        .then(|| format!("_minecraft._tcp.{}.", host.trim_end_matches('.')))
+}
+
+/// Where a server address redirects by its SRV record, if it does: for
+/// what connects on the game's behalf and resolves the target itself (the
+/// web build's relay, horizon-web-relay).
+pub fn srv_target(host: &str, port: u16) -> Option<(String, u16)> {
+    srv_redirect(&srv_name(host, port)?)
 }
 
 fn srv_redirect(name: &str) -> Option<(String, u16)> {

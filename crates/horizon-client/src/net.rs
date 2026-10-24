@@ -323,6 +323,34 @@ pub fn web_route(address: &str) -> Result<(String, String, u16), String> {
     Ok((format!("{}{join}target={target}", relay.trim()), host, port))
 }
 
+/// The relay's download of `url` (horizon-web-relay's `?download=`), for a
+/// server resource pack whose server doesn't let a page fetch it: the
+/// relay's address over http(s), with the game's download headers.
+pub fn web_relay_download(relay: &str, url: &str, headers: &[(&str, String)]) -> String {
+    fn encode(text: &str) -> String {
+        text.bytes()
+            .map(|b| match b {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                    char::from(b).to_string()
+                }
+                b => format!("%{b:02X}"),
+            })
+            .collect()
+    }
+    let relay = relay.trim();
+    let base = match relay.split_once("://") {
+        Some(("wss", rest)) => format!("https://{rest}"),
+        Some(("ws", rest)) => format!("http://{rest}"),
+        _ => relay.to_owned(),
+    };
+    let join = if base.contains('?') { '&' } else { '?' };
+    let mut out = format!("{base}{join}download={}", encode(url));
+    for (name, value) in headers {
+        out.push_str(&format!("&header={}", encode(&format!("{name}:{value}"))));
+    }
+    out
+}
+
 /// The web build's relay: a `ws://` or `wss://` one typed on Join a Friend
 /// (`friendsRelay`), else `HORIZON_WEB_RELAY` (the page's Options).
 pub fn web_relay() -> Option<String> {
@@ -809,6 +837,23 @@ pub async fn ping(address: &str, timeout: Duration) -> Result<(serde_json::Value
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn relay_downloads_go_over_http_with_the_url_and_headers_encoded() {
+        assert_eq!(
+            web_relay_download(
+                "wss://relay.example/mc",
+                "https://packs.example/a b.zip?x=1",
+                &[("X-Minecraft-Username", "Alex".to_owned())]
+            ),
+            "https://relay.example/mc?download=https%3A%2F%2Fpacks.example%2Fa%20b.zip%3Fx%3D1\
+             &header=X-Minecraft-Username%3AAlex"
+        );
+        assert_eq!(
+            web_relay_download("ws://localhost:8081/?key=1", "http://p/x", &[]),
+            "http://localhost:8081/?key=1&download=http%3A%2F%2Fp%2Fx"
+        );
+    }
 
     #[test]
     fn pings_wait_behind_teleports_but_keepalives_do_not_wait_for_the_game() {

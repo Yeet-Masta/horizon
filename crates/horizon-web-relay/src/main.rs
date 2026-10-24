@@ -11,6 +11,11 @@
 //! `--no-rooms` turns them off, `--max-rooms` (256) and `--max-guests` (16)
 //! bound them.
 //!
+//! A relay that reaches servers also passes their resource packs on to pages
+//! whose own download the pack's server refuses (`?download=URL`, from public
+//! addresses only, at most 250 MiB): `--no-downloads` turns that off, and
+//! `--downloads` turns it on for a relay with rooms only.
+//!
 //! `--listen` (127.0.0.1:8081 by default) is where WebSockets arrive; serve
 //! them as `wss://` from behind a web server (web/apache.htaccess).
 //! `--origin https://example.net` lets only that page in; `--max` caps
@@ -21,7 +26,8 @@ use std::{net::TcpListener, process::exit};
 fn usage() -> ! {
     eprintln!(
         "usage: horizon-web-relay [--listen ADDR:PORT] [--target HOST:PORT | --allow HOST:PORT|*:PORT ...] \
-         [--origin URL ...] [--max N] [--no-rooms] [--max-rooms N] [--max-guests N]"
+         [--origin URL ...] [--max N] [--no-rooms] [--max-rooms N] [--max-guests N] \
+         [--downloads | --no-downloads]"
     );
     exit(2);
 }
@@ -29,6 +35,7 @@ fn usage() -> ! {
 fn main() {
     let mut config = Config::default();
     let mut listen = "127.0.0.1:8081".to_owned();
+    let mut downloads = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         let mut value = || args.next().unwrap_or_else(|| usage());
@@ -65,6 +72,8 @@ fn main() {
             "--no-rooms" => config.rooms = false,
             "--max-rooms" => config.max_rooms = value().parse().unwrap_or_else(|_| usage()),
             "--max-guests" => config.max_guests = value().parse().unwrap_or_else(|_| usage()),
+            "--downloads" => downloads = Some(true),
+            "--no-downloads" => downloads = Some(false),
             "-h" | "--help" => usage(),
             _ => {
                 eprintln!("horizon-web-relay: unknown option {arg}");
@@ -78,6 +87,7 @@ fn main() {
         );
         usage();
     }
+    config.downloads = downloads.unwrap_or(config.target.is_some() || !config.allow.is_empty());
     let listener = TcpListener::bind(&listen).unwrap_or_else(|e| {
         eprintln!("horizon-web-relay: can't listen on {listen}: {e}");
         exit(1);
@@ -92,10 +102,12 @@ fn main() {
             .collect::<Vec<_>>()
             .join(", "),
     };
+    let on = |on: bool| if on { "on" } else { "off" };
     println!(
-        "horizon-web-relay {} on ws://{listen}/, reaching {reaches}; rooms {}",
+        "horizon-web-relay {} on ws://{listen}/, reaching {reaches}; rooms {}, downloads {}",
         env!("CARGO_PKG_VERSION"),
-        if config.rooms { "on" } else { "off" },
+        on(config.rooms),
+        on(config.downloads),
     );
     serve(listener, config);
 }

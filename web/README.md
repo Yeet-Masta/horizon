@@ -84,6 +84,19 @@ behind the web server (`web/apache.htaccess` has the lines for Apache).
 `--origin https://example.net` admits only your page. Why a server refused the
 relay (or the relay refused the server) shows on the game's disconnect screen.
 
+An address without a port may redirect by its SRV record
+(`_minecraft._tcp.<host>`), as in the game: the relay connects where the
+record says. A name you `--target` or `--allow` goes wherever its record
+points; through `*` a record leads only to a public address on a port from
+1024 up (anyone can write one).
+
+A server's resource pack downloads in the page: straight from the pack's
+server when it lets pages read it (CORS), else through the relay
+(`?download=URL` over `http(s)://`, the relay's address; served by the same
+web server lines as the WebSocket). The relay downloads only from public
+addresses, at most 250 MiB, and does so when it reaches servers
+(`--no-downloads` turns it off, `--downloads` on for a relay with rooms only).
+
 ### Play with friends, browser to browser
 
 A world played in the browser can be shared with friends in theirs. Pause,

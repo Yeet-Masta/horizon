@@ -3,6 +3,10 @@
 //! `DownloadCacheCleaner`): `downloads/<pack id>/<SHA-1 of the file>`, one
 //! batch at a time on a thread of its own, every download logged in
 //! `downloads/log.json`, and the cache cut to its 20 newest files on start.
+//!
+//! The web build downloads through the page's fetch, in a task beside the
+//! page: straight from the pack's server when it lets pages read it (CORS),
+//! else through the WebSocket relay's download (horizon-web-relay).
 use super::{Batch, Request};
 use horizon_platform::{fs, time::SystemTime};
 use sha1::{Digest, Sha1};
@@ -33,46 +37,55 @@ pub fn headers(name: &str, uuid: u128) -> Vec<(&'static str, String)> {
     ]
 }
 
-#[cfg(not(target_family = "wasm"))]
 type Job = (Vec<Request>, Vec<(&'static str, String)>);
 
-/// `DownloadQueue`: batches download in order, on one thread. The web
-/// build's run as they are queued, since they fail at once ([`get`]).
+/// `DownloadQueue`: batches download in order, on one thread (on the web, in
+/// one task beside the page).
 pub struct Queue {
-    #[cfg(not(target_family = "wasm"))]
     jobs: Sender<Job>,
-    #[cfg(target_family = "wasm")]
-    jobs: (PathBuf, Sender<Batch>),
     done: Receiver<Batch>,
 }
 impl Queue {
     pub fn open(dir: PathBuf) -> io::Result<Self> {
         fs::create_dir_all(&dir)?;
         vacuum(&dir, MAX_KEPT);
+        let (jobs, todo) = channel::<Job>();
         let (finished, done) = channel();
-        #[cfg(target_family = "wasm")]
-        let jobs = (dir, finished);
         #[cfg(not(target_family = "wasm"))]
-        let jobs = {
-            let (jobs, todo) = channel::<Job>();
-            std::thread::Builder::new()
-                .name("download-queue".into())
-                .spawn(move || {
-                    for (requests, headers) in todo {
-                        if finished.send(run(&dir, &requests, &headers)).is_err() {
+        std::thread::Builder::new()
+            .name("download-queue".into())
+            .spawn(move || {
+                for (requests, headers) in todo {
+                    if finished.send(run(&dir, &requests, &headers)).is_err() {
+                        break;
+                    }
+                }
+            })?;
+        #[cfg(target_family = "wasm")]
+        horizon_platform::thread::spawn_task("download-queue", async move {
+            use std::sync::mpsc::TryRecvError;
+            loop {
+                match todo.try_recv() {
+                    Ok((requests, headers)) => {
+                        if finished
+                            .send(run_web(&dir, &requests, &headers).await)
+                            .is_err()
+                        {
                             break;
                         }
                     }
-                })?;
-            jobs
-        };
+                    Err(TryRecvError::Empty) => {
+                        let wait = horizon_platform::time::Duration::from_millis(100);
+                        horizon_platform::thread::sleep_task(wait).await;
+                    }
+                    Err(TryRecvError::Disconnected) => break,
+                }
+            }
+        })?;
         Ok(Self { jobs, done })
     }
     pub fn download(&self, requests: Vec<Request>, headers: Vec<(&'static str, String)>) {
-        #[cfg(not(target_family = "wasm"))]
         let _ = self.jobs.send((requests, headers));
-        #[cfg(target_family = "wasm")]
-        let _ = self.jobs.1.send(run(&self.jobs.0, &requests, &headers));
     }
     /// The batches finished since the last call.
     pub fn finished(&self) -> Vec<Batch> {
@@ -81,51 +94,74 @@ impl Queue {
 }
 
 /// `DownloadQueue.runDownload`: each pack into `<dir>/<id>/`, logged.
+#[cfg(not(target_family = "wasm"))]
 fn run(dir: &Path, requests: &[Request], headers: &[(&'static str, String)]) -> Batch {
     let mut batch = Batch::default();
     for request in requests {
         let id = horizon_protocol::crypto::uuid_string(request.id);
         let result = download_file(&dir.join(&id), request, headers, MAX_SIZE);
-        // DownloadQueue.LogEntry, its fields in the codec's order.
-        let mut entry = vec![
-            ("id", serde_json::Value::from(id)),
-            ("url", request.url.as_str().into()),
-            (
-                "time",
-                chrono::Utc::now()
-                    .to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true)
-                    .into(),
-            ),
-        ];
-        if let Some(sha1) = &request.sha1 {
-            entry.push(("hash", sha1.as_str().into()));
-        }
-        entry.push(match &result {
-            Ok(path) => match fs::metadata(path) {
-                Ok(meta) => {
-                    let name = path.strip_prefix(dir).unwrap_or(path);
-                    let name = name.to_string_lossy().replace('\\', "/");
-                    (
-                        "file",
-                        serde_json::json!({"name": name, "size": meta.len()}),
-                    )
-                }
-                Err(_) => ("error", "no_access".into()),
-            },
-            Err(e) => {
-                log::error!("Horizon: failed to download {}: {e}", request.url);
-                ("error", "download_failed".into())
-            }
-        });
-        if let Err(e) = append_log(&dir.join("log.json"), &entry) {
-            log::error!("Horizon: failed to log download of {}: {e}", request.url);
-        }
-        match result {
-            Ok(path) => batch.downloaded.push((request.id, path)),
-            Err(_) => batch.failed.push(request.id),
-        }
+        record(dir, id, request, result, &mut batch);
     }
     batch
+}
+/// [`run`] on the web, through the page's fetch.
+#[cfg(target_family = "wasm")]
+async fn run_web(dir: &Path, requests: &[Request], headers: &[(&'static str, String)]) -> Batch {
+    let mut batch = Batch::default();
+    for request in requests {
+        let id = horizon_protocol::crypto::uuid_string(request.id);
+        let result = download_file_web(&dir.join(&id), request, headers, MAX_SIZE).await;
+        record(dir, id, request, result, &mut batch);
+    }
+    batch
+}
+
+/// A download's line in `downloads/log.json`, and its place in the batch.
+fn record(
+    dir: &Path,
+    id: String,
+    request: &Request,
+    result: Result<PathBuf, String>,
+    batch: &mut Batch,
+) {
+    // DownloadQueue.LogEntry, its fields in the codec's order.
+    let mut entry = vec![
+        ("id", serde_json::Value::from(id)),
+        ("url", request.url.as_str().into()),
+        (
+            "time",
+            chrono::Utc::now()
+                .to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true)
+                .into(),
+        ),
+    ];
+    if let Some(sha1) = &request.sha1 {
+        entry.push(("hash", sha1.as_str().into()));
+    }
+    entry.push(match &result {
+        Ok(path) => match fs::metadata(path) {
+            Ok(meta) => {
+                let name = path.strip_prefix(dir).unwrap_or(path);
+                let name = name.to_string_lossy().replace('\\', "/");
+                (
+                    "file",
+                    serde_json::json!({"name": name, "size": meta.len()}),
+                )
+            }
+            Err(_) => ("error", "no_access".into()),
+        },
+        Err(e) => {
+            log::error!("Horizon: failed to download {}: {e}", request.url);
+            ("error", "download_failed".into())
+        }
+    });
+    if let Err(e) = append_log(&dir.join("log.json"), &entry) {
+        log::error!("Horizon: failed to log download of {}: {e}", request.url);
+    }
+    match result {
+        Ok(path) => batch.downloaded.push((request.id, path)),
+        Err(_) => batch.failed.push(request.id),
+    }
 }
 
 /// `JsonEventLog.write`: one JSON object a line, as Gson writes it (with
@@ -173,18 +209,48 @@ fn touch(path: &Path) {
 /// `HttpUtil.downloadFile`: into `<dir>/<SHA-1>`. With a hash the cached file
 /// is used when it matches, and a download that does not is an error;
 /// without one the file is named after the hash of what came.
+#[cfg(not(target_family = "wasm"))]
 pub fn download_file(
     dir: &Path,
     request: &Request,
     headers: &[(&'static str, String)],
     max_size: u64,
 ) -> Result<PathBuf, String> {
+    if let Some(cached) = cached(dir, request)? {
+        return Ok(cached);
+    }
+    let (size, mut input) = get(&request.url, headers)?;
+    store(dir, request, size, &mut input, max_size)
+}
+/// [`download_file`] on the web, through the page's fetch.
+#[cfg(target_family = "wasm")]
+async fn download_file_web(
+    dir: &Path,
+    request: &Request,
+    headers: &[(&'static str, String)],
+    max_size: u64,
+) -> Result<PathBuf, String> {
+    if let Some(cached) = cached(dir, request)? {
+        return Ok(cached);
+    }
+    let bytes = fetch(&request.url, headers, max_size).await?;
+    store(
+        dir,
+        request,
+        Some(bytes.len() as u64),
+        &mut bytes.as_slice(),
+        max_size,
+    )
+}
+/// The requested file when it is already there with its hash (`downloadFile`
+/// returns it); any other file of its name is removed.
+fn cached(dir: &Path, request: &Request) -> Result<Option<PathBuf>, String> {
     let target = request.sha1.as_ref().map(|sha1| dir.join(sha1));
     if let (Some(target), Some(sha1)) = (&target, &request.sha1) {
         if matches(target, sha1) {
             log::info!("Horizon: returning cached file since actual hash matches requested");
             touch(target);
-            return Ok(target.clone());
+            return Ok(Some(target.clone()));
         }
         if target.exists() {
             log::warn!(
@@ -202,7 +268,18 @@ pub fn download_file(
             })
             .map_err(|e| format!("Failed to remove existing file {}: {e}", target.display()))?;
     }
-    let (size, mut input) = get(&request.url, headers)?;
+    Ok(None)
+}
+/// The rest of `downloadFile`: what came (`size` bytes, when it said) into
+/// the folder, under its hash.
+fn store(
+    dir: &Path,
+    request: &Request,
+    size: Option<u64>,
+    input: &mut dyn Read,
+    max_size: u64,
+) -> Result<PathBuf, String> {
+    let target = request.sha1.as_ref().map(|sha1| dir.join(sha1));
     fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     if let Some(size) = size
         && size > max_size
@@ -213,7 +290,7 @@ pub fn download_file(
     }
     match (&target, &request.sha1) {
         (Some(target), Some(sha1)) => {
-            let actual = save_hashed(&mut input, target, max_size).map_err(|e| e.to_string())?;
+            let actual = save_hashed(input, target, max_size).map_err(|e| e.to_string())?;
             if &actual != sha1 {
                 return Err(format!(
                     "Hash of downloaded file ({actual}) did not match requested ({sha1})"
@@ -223,7 +300,7 @@ pub fn download_file(
         }
         _ => {
             let tmp = dir.join(format!("download{:016x}.tmp", rand_suffix()));
-            let result = save_hashed(&mut input, &tmp, max_size).and_then(|actual| {
+            let result = save_hashed(input, &tmp, max_size).and_then(|actual| {
                 let path = dir.join(&actual);
                 if matches(&path, &actual) {
                     touch(&path);
@@ -253,14 +330,103 @@ fn get(
         .and_then(|v| v.trim().parse::<u64>().ok());
     Ok((size, Box::new(response.into_reader())))
 }
-/// The web build has no HTTP client for a pack's server yet (a page's fetch
-/// would also need the server to allow it, CORS): every download fails.
+/// A GET of `url` through the page's fetch: straight from the pack's
+/// server when it lets pages read it (CORS), else through the WebSocket
+/// relay's download (horizon-web-relay), which lets them. A page can't set
+/// a User-Agent, and headers of its own would need the server's leave too,
+/// so only the relay's request carries the game's.
 #[cfg(target_family = "wasm")]
-fn get(
-    _url: &str,
-    _headers: &[(&'static str, String)],
-) -> Result<(Option<u64>, Box<dyn Read>), String> {
-    Err("Server resource packs can't be downloaded in the browser yet".into())
+async fn fetch(
+    url: &str,
+    headers: &[(&'static str, String)],
+    max_size: u64,
+) -> Result<Vec<u8>, String> {
+    let direct = match fetch_bytes(url, max_size).await {
+        Ok(bytes) => return Ok(bytes),
+        Err(Fetched::TooLarge(e)) => return Err(e),
+        Err(Fetched::Refused(e)) => e,
+    };
+    let Some(relay) = crate::net::web_relay() else {
+        return Err(format!(
+            "{direct} (the pack's server may not let pages download it: a WebSocket relay would)"
+        ));
+    };
+    log::info!("Horizon: {url}: {direct}; downloading it through the relay");
+    let through = crate::net::web_relay_download(&relay, url, headers);
+    fetch_bytes(&through, max_size).await.map_err(|e| match e {
+        Fetched::TooLarge(e) => e,
+        Fetched::Refused(e) => format!("{direct}; through the relay: {e}"),
+    })
+}
+
+/// Why a fetch brought nothing back.
+#[cfg(target_family = "wasm")]
+enum Fetched {
+    /// The page may not read it (CORS, an http URL on an https page), the
+    /// network failed, or the server answered with an error.
+    Refused(String),
+    /// Over the size limit.
+    TooLarge(String),
+}
+
+/// `url`'s body through the page's fetch, at most `max_size` bytes.
+#[cfg(target_family = "wasm")]
+async fn fetch_bytes(url: &str, max_size: u64) -> Result<Vec<u8>, Fetched> {
+    use wasm_bindgen::{JsCast, JsValue};
+    use wasm_bindgen_futures::JsFuture;
+    let get = |object: &JsValue, key: &str| {
+        js_sys::Reflect::get(object, &key.into()).unwrap_or(JsValue::UNDEFINED)
+    };
+    let call = |object: &JsValue, method: &str, args: &[JsValue]| -> Result<JsValue, JsValue> {
+        let function = get(object, method).dyn_into::<js_sys::Function>()?;
+        function.apply(object, &args.iter().collect())
+    };
+    let wait = |promise: JsValue| JsFuture::from(promise.unchecked_into::<js_sys::Promise>());
+    let message = |e: JsValue| {
+        get(&e, "message")
+            .as_string()
+            .unwrap_or_else(|| format!("{e:?}"))
+    };
+    let too_large = |size: u64| {
+        Fetched::TooLarge(format!(
+            "Filesize is bigger than maximum allowed (file is {size}, limit is {max_size})"
+        ))
+    };
+    let refused = |e: JsValue| Fetched::Refused(message(e));
+    let fetching = call(&js_sys::global(), "fetch", &[url.into()]).map_err(refused)?;
+    let response = wait(fetching).await.map_err(refused)?;
+    if get(&response, "ok").as_bool() != Some(true) {
+        let status = get(&response, "status").as_f64().unwrap_or(0.0);
+        // The relay says why in its answer.
+        let text = match call(&response, "text", &[]) {
+            Ok(text) => wait(text).await.ok().and_then(|t| t.as_string()),
+            Err(_) => None,
+        };
+        let text = text.map(|t| t.trim().to_owned()).filter(|t| !t.is_empty());
+        return Err(Fetched::Refused(match text {
+            Some(text) => format!("HTTP {status}: {text}"),
+            None => format!("HTTP {status}"),
+        }));
+    }
+    let length = call(
+        &get(&response, "headers"),
+        "get",
+        &["content-length".into()],
+    )
+    .ok()
+    .and_then(|v| v.as_string())
+    .and_then(|v| v.trim().parse::<u64>().ok());
+    if let Some(size) = length
+        && size > max_size
+    {
+        return Err(too_large(size));
+    }
+    let body = call(&response, "arrayBuffer", &[]).map_err(refused)?;
+    let body = js_sys::Uint8Array::new(&wait(body).await.map_err(refused)?);
+    if u64::from(body.length()) > max_size {
+        return Err(too_large(u64::from(body.length())));
+    }
+    Ok(body.to_vec())
 }
 fn rand_suffix() -> u64 {
     use std::hash::{BuildHasher, RandomState};

@@ -162,12 +162,14 @@ pub fn worker_count() -> usize {
 /// build's workers; on the page's thread the task gives the page back until
 /// a timer fires. The future is `Send`, as a task's may need to be.
 pub async fn sleep_task(duration: std::time::Duration) {
+    #[cfg(not(target_family = "wasm"))]
+    sleep(duration);
+    #[cfg(target_family = "wasm")]
     if may_block() {
         sleep(duration);
-        return;
+    } else {
+        web::Timer::new(duration).await;
     }
-    #[cfg(target_family = "wasm")]
-    web::Timer::new(duration).await;
 }
 
 #[cfg(target_family = "wasm")]
