@@ -4,8 +4,9 @@
 #   web/build.sh                 wasm64 (memory64) with threads, the default
 #   web/build.sh --wasm32        wasm32: for browsers without memory64 (Safari)
 #   web/build.sh --no-threads    one thread: no shared memory, so no COOP/COEP headers needed
-#   web/build.sh --release       the release profile (thin LTO; slow to build) instead of `fast`
+#   web/build.sh --fast          the quicker-to-build `fast` profile (no LTO) instead of release
 #
+# Every build uses WebAssembly SIMD (web/simd.toml), which every browser with WebGPU has.
 # Threads and wasm64 build std here, with nightly Rust (rustup adds rust-src). Needs the
 # wasm-bindgen CLI from the commit Cargo.lock pins (the error says the command); wasm-opt
 # (binaryen) is used when it is on the PATH. Serve the result with web/serve.py.
@@ -14,7 +15,7 @@ set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 root="$(dirname "$here")"
 target=wasm64-unknown-unknown
-profile=fast
+profile=release
 threads=1
 for arg in "$@"; do
   case "$arg" in
@@ -23,7 +24,8 @@ for arg in "$@"; do
     --no-threads) threads=0 ;;
     --threads) threads=1 ;;
     --release) profile=release ;;
-    -h|--help) sed -n '2,12p' "$0"; exit 0 ;;
+    --fast) profile=fast ;;
+    -h|--help) sed -n '2,14p' "$0"; exit 0 ;;
     *) echo "unknown option: $arg" >&2; exit 2 ;;
   esac
 done
@@ -43,7 +45,8 @@ if [ "$have" != "$pinned" ]; then
 fi
 
 # No sound, controllers or mod runtime in a browser (web/README.md).
-args=(-p horizon-client --bin horizon-client --no-default-features --target "$target" --profile "$profile")
+args=(-p horizon-client --bin horizon-client --no-default-features --target "$target" --profile "$profile"
+  --config web/simd.toml)
 if [ "$threads" = 1 ] || [ "$target" = wasm64-unknown-unknown ]; then
   # wasm64 is a tier 3 target, and threads need std built with atomics: std is built here,
   # with the nightly toolchain. web/threads.toml adds shared memory and atomics.
@@ -66,7 +69,7 @@ if ! wasm-bindgen --target web --no-typescript --out-dir "$dist/pkg" "$wasm"; th
   exit 1
 fi
 if command -v wasm-opt >/dev/null; then
-  flags=(-O2 --enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext --enable-mutable-globals --enable-reference-types --enable-multivalue)
+  flags=(-O2 --enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext --enable-mutable-globals --enable-reference-types --enable-multivalue --enable-simd)
   [ "$target" = wasm64-unknown-unknown ] && flags+=(--enable-memory64)
   [ "$threads" = 1 ] && flags+=(--enable-threads)
   wasm-opt "${flags[@]}" "$dist/pkg/horizon-client_bg.wasm" -o "$dist/pkg/horizon-client_bg.wasm"
@@ -82,5 +85,5 @@ cp website/public/fonts/Geist-Regular.woff2 website/public/fonts/Geist-Medium.wo
 commit="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
 threads_json=false
 [ "$threads" = 1 ] && threads_json=true
-printf '{"target":"%s","profile":"%s","threads":%s,"commit":"%s"}\n' "$target" "$profile" "$threads_json" "$commit" > "$dist/build.json"
+printf '{"target":"%s","profile":"%s","threads":%s,"simd":true,"commit":"%s"}\n' "$target" "$profile" "$threads_json" "$commit" > "$dist/build.json"
 echo "web/dist: $(du -sh "$dist/pkg/horizon-client_bg.wasm" | cut -f1) module ($target, $profile, $([ "$threads" = 1 ] && echo threads || echo one thread))"

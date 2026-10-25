@@ -14,7 +14,7 @@ cargo install wasm-bindgen-cli --git https://github.com/wasm-bindgen/wasm-bindge
 web/build.sh               # wasm64 with threads: nightly Rust and -Zbuild-std (rustup installs rust-src)
 web/build.sh --wasm32      # wasm32, for browsers without memory64 (Safari)
 web/build.sh --no-threads  # one thread: for servers that can't send the COOP/COEP headers
-web/build.sh --release     # thin LTO instead of the quicker `fast` profile
+web/build.sh --fast        # the quicker-to-build `fast` profile instead of release (thin LTO)
 ```
 
 On Windows, `web\build.bat` takes the same options.
@@ -25,7 +25,8 @@ be built from the same commit as the crates; `web/build.sh` says so when it
 isn't.
 
 The page and module land in `web/dist/`. When `wasm-opt` (binaryen) is on the
-`PATH` the module is optimized further.
+`PATH` the module is optimized further. Every build uses WebAssembly SIMD
+(`web/simd.toml`), which every browser with WebGPU has.
 
 ## Play
 

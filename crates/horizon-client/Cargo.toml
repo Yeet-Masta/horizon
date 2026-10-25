@@ -74,6 +74,11 @@ web-sys = { version = "0.3.106", features = [
     "AudioProcessingEvent", "BaseAudioContext", "ScriptProcessorNode",
 ] }
 
+# glam's WebAssembly SIMD is wasm32's (core::arch::wasm32): wasm64, which builds on nightly,
+# vectorizes through the portable SIMD module instead (web/simd.toml).
+[target.'cfg(target_arch = "wasm64")'.dependencies]
+glam = { version = "0.30", features = ["core-simd"] }
+
 [target.'cfg(unix)'.dependencies]
 # The server thread's CPU time per tick (`HORIZON_SPIKES`, spans.rs).
 rustix = { version = "1", default-features = false, features = ["std", "time"] }

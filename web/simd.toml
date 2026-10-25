@@ -1,0 +1,9 @@
+# The web build's SIMD (web/README.md): every browser with WebGPU runs WebAssembly's 128-bit
+# SIMD, so the compiler may vectorize the game's loops (noise, lighting, meshing) with it.
+# web/build.sh passes this with `--config web/simd.toml` for every build (it adds to
+# .cargo/config.toml's rustflags); std gets it too where the build makes std.
+[target.wasm64-unknown-unknown]
+rustflags = ["-Ctarget-feature=+simd128"]
+
+[target.wasm32-unknown-unknown]
+rustflags = ["-Ctarget-feature=+simd128"]

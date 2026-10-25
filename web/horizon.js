@@ -114,6 +114,9 @@ globalThis.horizonStatus = (text, error) => {
 
 // The smallest module with a 64-bit memory: memory64 (the wasm64 build) needs it.
 const MEMORY64 = new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0, 5, 3, 1, 4, 1]);
+// A module with a function returning a v128 (i8x16.popcnt of a splat): valid where SIMD is.
+const SIMD = new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0, 1, 5, 1, 96, 0, 1, 123, 3, 2, 1, 0, 10, 10, 1, 8, 0,
+  65, 0, 253, 15, 253, 98, 11]);
 const build = await fetch("build.json").then((r) => r.json()).catch(() => ({ target: "wasm64-unknown-unknown" }));
 const wasm64 = build.target.startsWith("wasm64");
 
@@ -150,6 +153,9 @@ async function checkBrowser() {
     const ok = WebAssembly.validate(MEMORY64);
     checks.push([ok, ok ? "64-bit WebAssembly (memory64)"
       : "This build is wasm64 and needs memory64 (Chrome 133+, Firefox 134+). Use the wasm32 build otherwise."]);
+  }
+  if (build.simd && !WebAssembly.validate(SIMD)) {
+    checks.push([false, "This build needs WebAssembly SIMD (Chrome 91+, Firefox 89+, Safari 16.4+)."]);
   }
   // Shared memory exists only on a cross-origin isolated page: the server sends COOP and COEP.
   if (build.threads) {

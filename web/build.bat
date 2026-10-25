@@ -5,8 +5,9 @@ rem
 rem   web\build.bat              wasm64 (memory64) with threads, the default
 rem   web\build.bat --wasm32     wasm32: for browsers without memory64 (Safari)
 rem   web\build.bat --no-threads one thread: no shared memory, so no COOP/COEP headers needed
-rem   web\build.bat --release    the release profile (thin LTO; slow to build) instead of `fast`
+rem   web\build.bat --fast       the quicker-to-build `fast` profile (no LTO) instead of release
 rem
+rem Every build uses WebAssembly SIMD (web\simd.toml), which every browser with WebGPU has.
 rem Threads and wasm64 build std here, with nightly Rust (rustup adds rust-src). Needs the
 rem wasm-bindgen CLI from the commit Cargo.lock pins (the error says the command); wasm-opt
 rem (binaryen) is used when it is on the PATH. Serve the result with: python web\serve.py
@@ -16,7 +17,7 @@ set "here=%~dp0"
 set "here=%here:~0,-1%"
 for %%r in ("%here%\..") do set "root=%%~fr"
 set "target=wasm64-unknown-unknown"
-set "profile=fast"
+set "profile=release"
 set "threads=1"
 
 :args
@@ -24,6 +25,7 @@ if "%~1"=="" goto args_done
 if /i "%~1"=="--wasm32" (set "target=wasm32-unknown-unknown" & shift & goto args)
 if /i "%~1"=="--wasm64" (set "target=wasm64-unknown-unknown" & shift & goto args)
 if /i "%~1"=="--release" (set "profile=release" & shift & goto args)
+if /i "%~1"=="--fast" (set "profile=fast" & shift & goto args)
 if /i "%~1"=="--no-threads" (set "threads=0" & shift & goto args)
 if /i "%~1"=="--threads" (set "threads=1" & shift & goto args)
 if /i "%~1"=="-h" goto usage
@@ -31,9 +33,9 @@ if /i "%~1"=="--help" goto usage
 echo unknown option: %~1 1>&2
 exit /b 2
 :usage
-echo web\build.bat [--wasm32] [--no-threads] [--release]
-echo   default: wasm64 with threads on nightly Rust; --wasm32 for Safari; --no-threads for servers
-echo   without COOP/COEP headers; --release for thin LTO
+echo web\build.bat [--wasm32] [--no-threads] [--fast]
+echo   default: wasm64 with threads on nightly Rust, release profile; --wasm32 for Safari;
+echo   --no-threads for servers without COOP/COEP headers; --fast to build quicker, without LTO
 exit /b 0
 :args_done
 
@@ -56,7 +58,7 @@ if not "%have%"=="%pinned%" (
 )
 
 rem No sound device, controllers or mod runtime in a browser (web\README.md).
-set "crate=-p horizon-client --bin horizon-client --no-default-features"
+set "crate=-p horizon-client --bin horizon-client --no-default-features --config web/simd.toml"
 rem wasm64 is a tier 3 target, and threads need std built with atomics: std is built here, with
 rem the nightly toolchain. web\threads.toml adds shared memory and atomics.
 set "nightly=%threads%"
@@ -106,12 +108,12 @@ set "commit=unknown"
 for /f %%c in ('git rev-parse --short HEAD 2^>nul') do set "commit=%%c"
 set "threads_json=false"
 if "%threads%"=="1" set "threads_json=true"
->"%dist%\build.json" echo {"target":"%target%","profile":"%profile%","threads":%threads_json%,"commit":"%commit%"}
+>"%dist%\build.json" echo {"target":"%target%","profile":"%profile%","threads":%threads_json%,"simd":true,"commit":"%commit%"}
 for %%s in ("%dist%\pkg\horizon-client_bg.wasm") do set /a "mb=%%~zs / 1048576"
 echo web\dist: %mb% MB module (%target%, %profile%, threads %threads_json%)
 echo Serve it with: python web\serve.py   (then open http://localhost:8080/)
 exit /b 0
 
 :optimize
-wasm-opt -O2 --enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext --enable-mutable-globals --enable-reference-types --enable-multivalue %memory64% %atomics% "%dist%\pkg\horizon-client_bg.wasm" -o "%dist%\pkg\horizon-client_bg.wasm"
+wasm-opt -O2 --enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext --enable-mutable-globals --enable-reference-types --enable-multivalue --enable-simd %memory64% %atomics% "%dist%\pkg\horizon-client_bg.wasm" -o "%dist%\pkg\horizon-client_bg.wasm"
 exit /b %errorlevel%
