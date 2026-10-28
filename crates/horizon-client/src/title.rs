@@ -1,6 +1,7 @@
 //! Title, world selection and world creation screens (TitleScreen,
 //! SelectWorldScreen, CreateWorldScreen layouts), drawn as HUD quads.
 use crate::{
+    game_rules_screen::{Exit, RulesScreen},
     hud::{HudAtlas, HudBatch, rgba},
     lang,
     save::Level,
@@ -14,10 +15,12 @@ use std::{
 };
 
 mod create_world;
+mod flat;
 #[cfg(test)]
 mod tests;
 pub mod world_management;
 pub use create_world::{DIFFICULTIES, WorldOptions};
+pub use flat::{FlatLayer, FlatSettings, State as FlatEditor};
 
 /// SelectWorldScreen's `HeaderAndFooterLayout(8 + 9 + 8 + 20 + 4, 60)`.
 const LIST_TOP: f32 = 49.0;
@@ -102,6 +105,16 @@ pub enum Mode {
         return_to: Box<Mode>,
     },
     Multiplayer(crate::multiplayer::Screen),
+    /// CreateFlatWorldScreen over Create New World: the fields that screen
+    /// keeps and the superflat editor on top of them.
+    CreateFlat {
+        name: String,
+        seed: String,
+        creative: bool,
+        focus: u8,
+        options: WorldOptions,
+        flat: flat::State,
+    },
 }
 #[derive(Clone, Debug, PartialEq)]
 pub enum Action {
@@ -129,6 +142,8 @@ pub struct Title {
     /// Direct Connection's address, synchronized with `options.txt`'s `lastServer`.
     pub last_server: String,
     pub saves: PathBuf,
+    /// The prepared resource root: the flat preset list and block registry.
+    resources: PathBuf,
     pub started: horizon_platform::time::Instant,
     search: String,
     search_focused: bool,
@@ -147,6 +162,8 @@ pub struct Title {
     splash: Option<String>,
     /// The saves listed for Home, re-read every couple of seconds.
     recent: std::cell::RefCell<Option<(horizon_platform::time::Instant, Vec<WorldEntry>)>>,
+    /// WorldCreationGameRulesScreen, over Create New World while it is open.
+    rules: RefCell<Option<RulesScreen>>,
 }
 pub(crate) struct Button {
     x: f32,
@@ -195,7 +212,7 @@ pub fn list_worlds(saves: &Path) -> Vec<WorldEntry> {
                 commands: matches!(data.get("allowCommands"), Some(horizon_world::nbt::Tag::Byte(v)) if *v != 0),
                 version: data.get("Version").and_then(|v| v.get("Name"))
                     .and_then(|v| match v { horizon_world::nbt::Tag::String(s) => Some(s.to_string_lossy()), _ => None })
-                    .unwrap_or_else(|| "Unknown".into()),
+                    .unwrap_or_else(|| lang::get_or("selectWorld.versionUnknown", "Unknown")),
             })
         })
         .collect();
@@ -234,6 +251,7 @@ impl Title {
             mode,
             last_server: String::new(),
             saves,
+            resources: resources.to_owned(),
             started: now,
             search: String::new(),
             search_focused: false,
@@ -257,6 +275,7 @@ impl Title {
                 (today.month(), today.day()),
             ),
             recent: std::cell::RefCell::new(None),
+            rules: RefCell::new(None),
         }
     }
     /// Vanilla bypasses the selector when there are no saves.
@@ -277,7 +296,7 @@ impl Title {
     }
     pub(crate) fn new_world() -> Mode {
         Mode::Create {
-            name: "New World".into(),
+            name: lang::get_or("selectWorld.newWorld", "New World"),
             seed: String::new(),
             creative: false,
             focus: 0,
@@ -319,6 +338,64 @@ impl Title {
             self.mode = Mode::Main;
         } else {
             self.return_to_list(None);
+        }
+    }
+    /// A press on the superflat screens: their list, share box or buttons.
+    fn flat_click(&mut self, x: f32, y: f32, size: (f32, f32), hit: Option<u8>) {
+        match hit {
+            Some(70) => {
+                if let Mode::CreateFlat { flat, .. } = &mut self.mode {
+                    flat.remove_selected();
+                }
+            }
+            Some(71) => {
+                if let Mode::CreateFlat { flat, .. } = &mut self.mode {
+                    flat.open_presets();
+                }
+            }
+            Some(72) => self.close_flat(true),
+            Some(73) => self.close_flat(false),
+            Some(74) => {
+                if let Mode::CreateFlat { flat, .. } = &mut self.mode {
+                    flat.apply_share();
+                }
+            }
+            Some(75) => {
+                if let Mode::CreateFlat { flat, .. } = &mut self.mode {
+                    flat.back_to_layers();
+                }
+            }
+            None => {
+                if let Mode::CreateFlat { flat, .. } = &mut self.mode {
+                    flat::click(flat, (x, y), size);
+                }
+            }
+            _ => {}
+        }
+    }
+    /// Return to Create New World, keeping (`apply`) or dropping the layers.
+    fn close_flat(&mut self, apply: bool) {
+        let mode = std::mem::replace(&mut self.mode, Mode::Main);
+        if let Mode::CreateFlat {
+            name,
+            seed,
+            creative,
+            focus,
+            mut options,
+            flat,
+        } = mode
+        {
+            if apply {
+                options.flat = true;
+                options.flat_settings = Some(flat.settings);
+            }
+            self.mode = Mode::Create {
+                name,
+                seed,
+                creative,
+                focus,
+                options,
+            };
         }
     }
     fn matches_search(&self, world: &WorldEntry) -> bool {
@@ -365,8 +442,15 @@ impl Title {
     }
     /// The pointer moved with the button held (`mouseDragged`).
     pub fn drag(&mut self, cursor: (f32, f32), size: (f32, f32)) {
+        if let Some(rules) = self.rules.get_mut() {
+            return rules.drag(cursor.1, size.1.ceil());
+        }
         if let Mode::Multiplayer(screen) = &mut self.mode {
             return screen.drag(cursor.1, size);
+        }
+        if let Mode::CreateFlat { flat, .. } = &mut self.mode {
+            flat::drag(flat, cursor, size);
+            return;
         }
         if let Mode::Select { worlds, .. } = &self.mode {
             let (top, bottom, _, content) = self.world_list(worlds, size);
@@ -377,15 +461,28 @@ impl Title {
     }
     /// The button was released (`onRelease`).
     pub fn release(&mut self) {
+        if let Some(rules) = self.rules.get_mut() {
+            rules.release();
+        }
         if let Mode::Multiplayer(screen) = &mut self.mode {
             screen.release();
+        }
+        if let Mode::CreateFlat { flat, .. } = &mut self.mode {
+            flat::release(flat);
         }
         self.scroll.get_mut().release();
     }
     /// Mouse wheel over the classic world and server lists.
     pub fn scroll_worlds(&mut self, delta: f32, cursor: (f32, f32), size: (f32, f32)) {
+        if let Some(rules) = self.rules.get_mut() {
+            return rules.wheel(delta, size.1.ceil());
+        }
         if let Mode::Multiplayer(screen) = &mut self.mode {
             screen.wheel(delta, cursor, size);
+            return;
+        }
+        if let Mode::CreateFlat { flat, .. } = &mut self.mode {
+            flat::wheel(flat, delta, cursor, size);
             return;
         }
         let Mode::Select { worlds, .. } = &self.mode else {
@@ -573,6 +670,10 @@ impl Title {
         folder
     }
     fn buttons(&self, w: f32, h: f32) -> Vec<Button> {
+        // The game rules draw and press their own.
+        if self.rules.borrow().is_some() {
+            return Vec::new();
+        }
         let (w, h) = (w.ceil(), h.ceil());
         let b = |x: f32, y: f32, w: f32, label: &str, enabled: bool, id: u8| Button {
             x,
@@ -588,23 +689,57 @@ impl Title {
                 let cx = (w / 2.0).floor();
                 let y = (h / 4.0).floor() + 48.0;
                 let mut buttons = vec![
-                    b(cx - 100.0, y, 200.0, "Singleplayer", true, 1),
-                    b(cx - 100.0, y + 24.0, 200.0, "Multiplayer", true, 4),
-                    b(cx - 100.0, y + 48.0, 200.0, "Minecraft Realms", false, 0),
-                    b(cx - 100.0, y + 96.0, 98.0, "Options...", true, 3),
-                    b(cx + 2.0, y + 96.0, 98.0, "Quit Game", true, 2),
-                ];
-                for (i, (label, enabled, id, icon, size)) in [
-                    // Horizon's Join a Friend (an invite code) behind
-                    // vanilla's Friends button.
-                    ("Friends", true, 5, "friends/friends", 15.0),
-                    ("Language", true, 6, "icon/language", 15.0),
-                    (
-                        "Accessibility Settings",
+                    b(
+                        cx - 100.0,
+                        y,
+                        200.0,
+                        &lang::get_or("menu.singleplayer", "Singleplayer"),
                         true,
+                        1,
+                    ),
+                    b(
+                        cx - 100.0,
+                        y + 24.0,
+                        200.0,
+                        &lang::get_or("menu.multiplayer", "Multiplayer"),
+                        true,
+                        4,
+                    ),
+                    b(
+                        cx - 100.0,
+                        y + 48.0,
+                        200.0,
+                        &lang::get_or("menu.online", "Minecraft Realms"),
+                        false,
+                        0,
+                    ),
+                    b(
+                        cx - 100.0,
+                        y + 96.0,
+                        98.0,
+                        &lang::get_or("menu.options", "Options..."),
+                        true,
+                        3,
+                    ),
+                    b(
+                        cx + 2.0,
+                        y + 96.0,
+                        98.0,
+                        &lang::get_or("menu.quit", "Quit Game"),
+                        true,
+                        2,
+                    ),
+                ];
+                // CommonButtons' icon buttons; Horizon's Join a Friend (an
+                // invite code) sits behind vanilla's Friends button.
+                for (i, (key, plain, id, icon)) in [
+                    ("gui.friends.open", "Friends", 5, "friends/friends"),
+                    ("options.language", "Language...", 6, "icon/language"),
+                    (
+                        "options.accessibility",
+                        "Accessibility Settings...",
                         7,
                         "icon/accessibility",
-                        15.0,
                     ),
                 ]
                 .into_iter()
@@ -614,11 +749,11 @@ impl Title {
                         cx - 34.0 + i as f32 * 24.0,
                         y + 72.0,
                         20.0,
-                        label,
-                        enabled,
+                        &lang::get_or(key, plain),
+                        true,
                         id,
                     );
-                    button.icon = Some((icon, size));
+                    button.icon = Some((icon, 15.0));
                     buttons.push(button);
                 }
                 buttons
@@ -628,7 +763,7 @@ impl Title {
                     (w / 2.0).floor() - 154.0,
                     h - 52.0,
                     150.0,
-                    "Play Selected World",
+                    &lang::get_or("selectWorld.select", "Play Selected World"),
                     selected.is_some(),
                     10,
                 ),
@@ -636,7 +771,7 @@ impl Title {
                     (w / 2.0).floor() + 4.0,
                     h - 52.0,
                     150.0,
-                    "Create New World",
+                    &lang::get_or("selectWorld.create", "Create New World"),
                     true,
                     11,
                 ),
@@ -664,11 +799,19 @@ impl Title {
                     selected.is_some(),
                     15,
                 ),
-                b((w / 2.0).floor() + 83.0, h - 28.0, 71.0, "Back", true, 12),
+                b(
+                    (w / 2.0).floor() + 83.0,
+                    h - 28.0,
+                    71.0,
+                    &lang::get_or("gui.back", "Back"),
+                    true,
+                    12,
+                ),
             ],
             Mode::Create {
                 creative, options, ..
             } => create_world::buttons(w, h, *creative, options),
+            Mode::CreateFlat { flat, .. } => flat::buttons(w, h, flat),
             Mode::Edit { world, name, .. } => {
                 let x = (w / 2.0).floor() - 100.0;
                 let top = edit_top(h);
@@ -780,6 +923,9 @@ impl Title {
         hide_splash: bool,
     ) {
         let (w, h) = (batch.width.ceil(), batch.height.ceil());
+        if let Some(rules) = self.rules.borrow_mut().as_mut() {
+            return rules.draw(batch, atlas, cursor);
+        }
         match &self.mode {
             Mode::Main => {
                 // LogoRenderer: the logo's top 44 of 64 rows, then the edition
@@ -827,13 +973,24 @@ impl Title {
                 }
                 let version = format!("Horizon {} (Rust)", horizon_core::VANILLA_VERSION);
                 batch.text(atlas, &version, 2.0, h - 10.0, u32::MAX, true);
+                // A nightly names its build in the top-left corner, the one spot no button reaches at any GUI
+                // scale, so screenshots and reports say which build they come from.
+                if let Some(nightly) = horizon_core::release::nightly_label() {
+                    batch.text(atlas, &nightly, 2.0, 2.0, u32::MAX, true);
+                }
                 let notice = "Not affiliated with Mojang or Microsoft";
                 let tw = HudBatch::text_width(atlas, notice);
                 batch.text(atlas, notice, w - tw - 2.0, h - 10.0, u32::MAX, true);
             }
             Mode::Select { worlds, selected } => {
                 crate::ui::menu_background(batch, atlas, 0.0, 0.0, w, h, false);
-                centered(atlas, batch, "Select World", 8.0, u32::MAX);
+                centered(
+                    atlas,
+                    batch,
+                    &lang::get_or("selectWorld.title", "Select World"),
+                    8.0,
+                    u32::MAX,
+                );
                 self.caret.borrow_mut().draw(
                     batch,
                     atlas,
@@ -983,6 +1140,7 @@ impl Title {
                 options,
                 ..
             } => self.draw_create(atlas, batch, cursor, name, seed, *focus, options),
+            Mode::CreateFlat { flat, .. } => flat::draw(self, atlas, batch, cursor, flat),
             Mode::Edit { name, focused, .. } => {
                 crate::ui::menu_background(batch, atlas, 0.0, 0.0, w, h, false);
                 centered(
@@ -1080,7 +1238,8 @@ impl Title {
             Mode::Multiplayer(screen) => screen.draw(
                 atlas,
                 batch,
-                (self.started.elapsed().as_millis() / 300).is_multiple_of(2),
+                &mut self.caret.borrow_mut(),
+                self.started,
                 cursor,
             ),
         }
@@ -1158,7 +1317,7 @@ impl Title {
                 + 30.0;
             // Toast.xPos: in from the right edge by the visible portion.
             let x = w - width * slide.portion;
-            toast_background(atlas, batch, x, width);
+            crate::toasts::background(atlas, batch, x, 0.0, width);
             batch.text(atlas, &title, x + 18.0, 7.0, rgba(255, 255, 0, 255), false);
             batch.text(atlas, &message, x + 18.0, 19.0, u32::MAX, false);
         }
@@ -1167,6 +1326,10 @@ impl Title {
     /// Navigation buttons can return `Action::None` while still sounding.
     pub fn click(&mut self, x: f32, y: f32, size: (f32, f32)) -> (Action, bool) {
         self.remember_direct_address();
+        // The game rules take the press in `press_rules`, which has the atlas.
+        if self.rules.get_mut().is_some() {
+            return (Action::None, false);
+        }
         let (w, h) = (size.0.ceil(), size.1.ceil());
         // MenuTabBar: a new tab clears the focus and clicks.
         if let Mode::Create { focus, options, .. } = &mut self.mode
@@ -1184,6 +1347,10 @@ impl Title {
             .into_iter()
             .find(|b| b.enabled && x >= b.x && x < b.x + b.w && y >= b.y && y < b.y + 20.0)
             .map(|b| b.id);
+        if matches!(self.mode, Mode::CreateFlat { .. }) {
+            self.flat_click(x, y, (w, h), hit);
+            return (Action::None, hit.is_some());
+        }
         let action = self.click_action(x, y, (w, h), hit);
         // World list selection is silent; launching its selected entry sounds.
         let sound = hit.is_some() || matches!(action, Action::Play { .. });
@@ -1347,6 +1514,32 @@ impl Title {
                 self.mode = *return_to.clone();
                 Action::None
             }
+            // CreateWorldScreen.openGameRulesScreen over a copy of the rules.
+            (Mode::Create { options, .. }, Some(29)) => {
+                *self.rules.get_mut() = Some(RulesScreen::for_creation(&options.rules));
+                Action::None
+            }
+            (
+                Mode::Create {
+                    name,
+                    seed,
+                    creative,
+                    focus,
+                    options,
+                },
+                Some(26),
+            ) => {
+                let flat = flat::State::new(&self.resources, options.flat_settings.clone());
+                self.mode = Mode::CreateFlat {
+                    name: name.clone(),
+                    seed: seed.clone(),
+                    creative: *creative,
+                    focus: *focus,
+                    options: options.clone(),
+                    flat,
+                };
+                Action::None
+            }
             (
                 Mode::Create {
                     creative, options, ..
@@ -1370,18 +1563,28 @@ impl Title {
     }
     /// The focused text field, its id and maximum length (copy and paste).
     pub fn focused_field(&mut self) -> Option<(crate::clipboard::FieldId, &mut String, usize)> {
+        if self.rules.get_mut().is_some() {
+            return None;
+        }
         match &mut self.mode {
             Mode::Multiplayer(screen) => screen.focused_text(),
             mode => caret_field(mode, self.search_focused, &mut self.search),
         }
     }
-    /// Whether the focused field edits at its cursor (every field but the
-    /// server screens', which still append).
+    /// Whether the focused field edits at its cursor.
     pub fn has_caret_field(&mut self) -> bool {
+        // The game rules' boxes edit themselves (`edit_field`).
+        if let Some(rules) = self.rules.get_mut() {
+            return rules.typing();
+        }
         caret_field(&mut self.mode, self.search_focused, &mut self.search).is_some()
     }
     /// Edit the focused field through its `EditBox`; false when there is none.
     fn edit_field(&mut self, f: impl FnOnce(&mut crate::ui::EditBox)) -> bool {
+        if let Some(rules) = self.rules.get_mut() {
+            rules.edit(f);
+            return rules.typing();
+        }
         let Some((id, value, max)) =
             caret_field(&mut self.mode, self.search_focused, &mut self.search)
         else {
@@ -1396,15 +1599,9 @@ impl Title {
     }
     /// EditBox.charTyped / insertText at the cursor.
     pub fn type_text(&mut self, text: &str) {
-        if let Mode::Multiplayer(screen) = &mut self.mode {
-            return screen.type_text(text);
-        }
         self.edit_field(|edit| edit.insert_text(text));
     }
     pub fn backspace(&mut self) {
-        if let Mode::Multiplayer(screen) = &mut self.mode {
-            return screen.backspace();
-        }
         self.field_key(winit::keyboard::KeyCode::Backspace, false, false);
     }
     /// EditBox.keyPressed: moving and deleting in the focused field.
@@ -1432,6 +1629,7 @@ impl Title {
             Mode::Create { focus, options, .. } => create_world::field_rect(w, h, options.tab)
                 .filter(|(id, _)| id == focus)
                 .map(|(_, rect)| rect),
+            Mode::Multiplayer(screen) => screen.focused_box((w, h)),
             _ => None,
         }
     }
@@ -1445,6 +1643,9 @@ impl Title {
         shift: bool,
     ) {
         let (w, h) = (size.0.ceil(), size.1.ceil());
+        if self.rules.get_mut().is_some() {
+            return;
+        }
         let Some(rect @ [fx, fy, fw, fh]) = self.focused_rect((w, h)) else {
             return;
         };
@@ -1457,6 +1658,9 @@ impl Title {
     }
     /// The pointer moved with the button held (`EditBox.onDrag`).
     pub fn drag_field(&mut self, atlas: &HudAtlas, x: f32) {
+        if self.rules.get_mut().is_some() {
+            return;
+        }
         if let Some(field) = caret_field(&mut self.mode, self.search_focused, &mut self.search) {
             self.caret.get_mut().drag(atlas, field, x);
         }
@@ -1493,6 +1697,9 @@ impl Title {
         }
     }
     pub fn tab(&mut self) {
+        if self.rules.get_mut().is_some() {
+            return;
+        }
         if let Mode::Edit { focused, .. } = &mut self.mode {
             *focused = !*focused;
         }
@@ -1542,7 +1749,37 @@ impl Title {
         }
         outcome
     }
+    /// A left press on the game rules (they need the atlas for text): whether
+    /// it lands on a button, for its sound.
+    pub fn press_rules(&mut self, atlas: &HudAtlas, cursor: (f32, f32), size: (f32, f32)) -> bool {
+        let size = (size.0.ceil(), size.1.ceil());
+        let Some(rules) = self.rules.get_mut() else {
+            return false;
+        };
+        let sound = rules.clicks_button(atlas, cursor, size);
+        let exit = rules.click(atlas, cursor, size);
+        if let Some(exit) = exit {
+            self.close_rules(exit);
+        }
+        sound
+    }
+    /// WorldCreationGameRulesScreen's exit callback: Done keeps the edited
+    /// rules (`setGameRules`), Cancel drops them.
+    fn close_rules(&mut self, exit: Exit) {
+        *self.rules.get_mut() = None;
+        if let (Exit::Apply(changes), Mode::Create { options, .. }) = (exit, &mut self.mode) {
+            for (name, value) in changes {
+                options.rules.set(name, value);
+            }
+        }
+    }
     pub fn escape(&mut self) {
+        if let Some(rules) = self.rules.get_mut() {
+            if let Some(exit) = rules.escape() {
+                self.close_rules(exit);
+            }
+            return;
+        }
         self.remember_direct_address();
         if let Mode::Multiplayer(screen) = &mut self.mode
             && !screen.escape(&self.saves)
@@ -1556,38 +1793,18 @@ impl Title {
                 self.return_to_list(Some(&folder));
             }
             Mode::Error { return_to, .. } => self.mode = *return_to.clone(),
+            Mode::CreateFlat { .. } => {
+                if matches!(&self.mode, Mode::CreateFlat { flat, .. } if flat.page == flat::Page::Presets)
+                {
+                    if let Mode::CreateFlat { flat, .. } = &mut self.mode {
+                        flat.back_to_layers();
+                    }
+                } else {
+                    self.close_flat(false);
+                }
+            }
             Mode::Create { .. } => self.cancel_create(),
             _ => self.mode = Mode::Main,
-        }
-    }
-}
-/// SystemToast's 32-pixel background keeps the notice icon and borders intact.
-fn toast_background(atlas: &HudAtlas, batch: &mut HudBatch, x: f32, width: f32) {
-    let Some(rect) = atlas.sprites.get("gui/sprites/toast/system").copied() else {
-        return;
-    };
-    let source_x = [0.0, 17.0, rect.w as f32 - 4.0, rect.w as f32];
-    let target_x = [x, x + 17.0, x + width - 4.0, x + width];
-    for col in 0..3 {
-        for (sy, sh, y, h) in [
-            (0.0, 28.0, 0.0, 28.0),
-            (rect.h as f32 - 4.0, 4.0, 28.0, 4.0),
-        ] {
-            let mut piece = rect;
-            let du = (rect.u1 - rect.u0) / rect.w as f32;
-            let dv = (rect.v1 - rect.v0) / rect.h as f32;
-            piece.u0 = rect.u0 + source_x[col] * du;
-            piece.u1 = rect.u0 + source_x[col + 1] * du;
-            piece.v0 = rect.v0 + sy * dv;
-            piece.v1 = rect.v0 + (sy + sh) * dv;
-            batch.rect_uv(
-                target_x[col],
-                y,
-                target_x[col + 1] - target_x[col],
-                h,
-                piece,
-                u32::MAX,
-            );
         }
     }
 }
@@ -1614,8 +1831,10 @@ const SEARCH: crate::clipboard::FieldId = ("world.search", 0);
 const EDIT_NAME: crate::clipboard::FieldId = ("world.edit-name", 0);
 const WORLD_NAME: crate::clipboard::FieldId = ("world.name", 0);
 const WORLD_SEED: crate::clipboard::FieldId = ("world.seed", 0);
-/// The focused field of the world screens: the list's search, the world
-/// name being edited, or Create New World's name or seed.
+const FLAT_SHARE: crate::clipboard::FieldId = ("world.flat-share", 0);
+/// The focused field of the world screens and the server screens: the list's
+/// search, a world name or seed, or Add Server, Direct Connection and Join a
+/// Friend.
 fn caret_field<'a>(
     mode: &'a mut Mode,
     search_focused: bool,
@@ -1635,6 +1854,10 @@ fn caret_field<'a>(
             1 => Some((WORLD_SEED, seed, 32)),
             _ => None,
         },
+        Mode::Multiplayer(screen) => screen.focused_text(),
+        Mode::CreateFlat { flat, .. } if flat.page == flat::Page::Presets && flat.share_focused => {
+            Some((FLAT_SHARE, &mut flat.share, 1230))
+        }
         _ => None,
     }
 }

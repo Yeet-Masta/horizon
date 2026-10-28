@@ -11,18 +11,27 @@ description = "Horizon native development client"
 # std::fs, std::time and std::thread, or the browser's on the web build (web/README.md).
 horizon-platform = { path = "../horizon-platform" }
 horizon-assets = { path = "../horizon-assets" }
+horizon-client-core = { path = "../horizon-client-core" }
+horizon-client-input = { path = "../horizon-client-input" }
+horizon-command = { path = "../horizon-command" }
+horizon-items = { path = "../horizon-items" }
 horizon-core = { path = "../horizon-core" }
 # The server thread ahead of the workers (MinecraftServer.spin's Thread.setPriority).
 horizon-threads = { path = "../horizon-threads" }
+horizon-hdr = { path = "../horizon-hdr" }
 horizon-world = { path = "../horizon-world" }
 horizon-protocol = { path = "../horizon-protocol" }
 # server.properties, eula.txt and the user lists, shared with horizon-server.
 horizon-server-files = { path = "../horizon-server-files" }
+# Shader packs: reading them and turning their GLSL into naga modules.
+horizon-shaders = { path = "../horizon-shaders" }
+# Horizon's own shader packs: the format, the stages and the check (docs/shaders.md).
+horizon-shader-api = { path = "../horizon-shader-api" }
 horizon-friends = { path = "../horizon-friends" }
 # Horizon mods: sandboxed WebAssembly components, off unless installed and turned on (docs/mods.md).
 # Their runtime is the `mods` feature.
-horizon-mods = { path = "../horizon-mods", default-features = false }
-wgpu = { version = "30.0.1", default-features = false, features = ["std", "parking_lot", "vulkan", "metal", "wgsl"] }
+horizon-mods = { path = "../horizon-mods", default-features = false, features = ["index"] }
+wgpu = { version = "30.0.1", default-features = false, features = ["std", "parking_lot", "vulkan", "metal", "wgsl", "naga-ir"] }
 winit = "0.30.13"
 pollster = "0.4"
 bytemuck = { version = "1.24", features = ["derive"] }
@@ -50,6 +59,7 @@ horizon-theme = { path = "../horizon-theme" }
 horizon-telemetry = { path = "../horizon-telemetry", default-features = false }
 horizon-bench = { path = "../horizon-bench" }
 zip = { version = "2", default-features = false, features = ["deflate"] }
+unicode-bidi = "0.3.18"
 # Controllers (evdev + libudev on Linux, IOKit on macOS, Windows.Gaming.Input); the `controllers` feature.
 gilrs = { version = "0.11", optional = true }
 # The DualSense's rumble, adaptive triggers and lights over HID (gilrs only reads it).
@@ -89,6 +99,11 @@ rustix = { version = "1", default-features = false, features = ["std", "time"] }
 # on the PATH.
 wgpu = { version = "30.0.1", default-features = false, features = ["dx12"] }
 
+[target.'cfg(not(any(target_os = "macos", target_family = "wasm")))'.dependencies]
+# OpenGL (WGL on Windows, EGL on Linux), the last fallback, for GPUs with no Vulkan or
+# DirectX 12 driver (`graphicsApi`, graphics.rs). The web build has WebGPU only.
+wgpu = { version = "30.0.1", default-features = false, features = ["gles"] }
+
 [target.'cfg(windows)'.build-dependencies]
 # The icon resource in the .exe (build.rs).
 winresource = "0.1"
@@ -99,7 +114,7 @@ default = ["audio", "controllers"]
 # Linux: the server build (`--no-default-features`, released as horizon-engine; docs/server.md).
 audio = ["dep:cpal"]
 # Controllers: gilrs, and the DualSense's own output. Without it only `horizon-ctl pad`'s virtual pad.
-controllers = ["dep:gilrs", "dep:horizon-dualsense"]
+controllers = ["dep:gilrs", "dep:horizon-dualsense", "horizon-client-input/controllers"]
 # Runs code mods (wasmtime and cranelift: a quarter of a clean build). On in every release build
 # (release.yml); the tests and probes don't need it. Content mods load without it.
 mods = ["horizon-mods/runtime"]
@@ -115,5 +130,6 @@ path = "examples/probe/main.rs"
 workspace = true
 
 [dev-dependencies]
+horizon-items = { path = "../horizon-items", features = ["test-support"] }
 # Every WGSL shader translated as wgpu's DirectX 12 backend does (gfx.rs tests).
 naga = { version = "30.0.1", features = ["wgsl-in", "hlsl-out", "msl-out", "spv-out"] }

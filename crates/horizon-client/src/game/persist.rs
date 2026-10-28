@@ -76,15 +76,14 @@ impl Game<'_> {
         let pos = ChunkPos::new(chunk.x, chunk.z);
         let time = self.world.game_time;
         let mut extras: ChunkExtras = chunk.saved.as_deref().cloned().unwrap_or_default();
+        // A chunk the scheduler hasn't registered yet (one loaded and
+        // unloaded again before the next tick) still holds its saved ticks:
+        // `register_chunk_ticks` empties that list once it takes them.
         if let Some(t) = self.block_ticks.blocks.chunk(pos) {
             extras.block_ticks = t.pack(time);
-        } else {
-            extras.block_ticks.clear();
         }
         if let Some(t) = self.block_ticks.fluids.chunk(pos) {
             extras.fluid_ticks = t.pack(time);
-        } else {
-            extras.fluid_ticks.clear();
         }
         extras.last_update = time;
         // TheEndGatewayBlockEntity saves its Age (the server copy's).
@@ -156,6 +155,8 @@ impl Game<'_> {
                     kind.as_str(),
                     "minecraft:experience_orb"
                         | "minecraft:arrow"
+                        | "minecraft:fireball"
+                        | "minecraft:small_fireball"
                         | "minecraft:falling_block"
                         | "minecraft:end_crystal"
                         | "minecraft:ender_dragon"
@@ -192,7 +193,12 @@ impl Game<'_> {
                             if let Some(a) = p.arrow.as_mut() {
                                 a.last_state = in_block.and_then(|t| self.state_from_nbt(&t));
                             }
-                            self.creatures.projectiles.push(p);
+                            self.add_projectile(p);
+                        }
+                    }
+                    "minecraft:fireball" | "minecraft:small_fireball" => {
+                        if let Some(p) = entity_nbt::fireball_from_nbt(&tag, player_uuid) {
+                            self.add_projectile(p);
                         }
                     }
                     "minecraft:falling_block" => {
@@ -243,6 +249,8 @@ impl Game<'_> {
                         .is_some_and(|(wood, chest)| self.boat_models.has(wood, chest)) =>
                     {
                         if let Some((position, velocity, yaw)) = entity_nbt::boat_from_nbt(&tag) {
+                            let mut tag = tag;
+                            let riders = self.take_mob_passengers(&mut tag);
                             self.next_entity += 1;
                             let id = self.next_entity;
                             let (wood, chest) =
@@ -263,12 +271,16 @@ impl Game<'_> {
                             b.velocity = velocity;
                             self.remember(id, uuid, tag);
                             self.boats.push(b);
+                            for rider in riders {
+                                self.load_mob(rider, Some(id));
+                            }
                         }
                     }
                     k if super::minecarts::CartKind::from_id(k).is_some() => {
                         let kind = super::minecarts::CartKind::from_id(k).unwrap();
                         let id = self.next_entity + 1;
-                        if let Some(c) = super::minecarts::Minecart::from_nbt(&tag, id, kind) {
+                        if let Some(mut c) = super::minecarts::Minecart::from_nbt(&tag, id, kind) {
+                            self.roll_cart_loot(&mut c, &tag);
                             self.next_entity = id;
                             self.remember(id, uuid, tag);
                             self.carts.push(c);
@@ -278,14 +290,22 @@ impl Game<'_> {
                     "minecraft:ender_dragon" => {
                         let seed = self.world.random.next_long();
                         if self.dragon.is_none()
-                            && let Some(d) = super::dragon::Dragon::from_nbt(&tag, seed)
+                            && let Some(mut d) = super::dragon::Dragon::from_nbt(&tag, seed)
                         {
+                            // EnderDragon's constructor takes its id and its
+                            // parts' from the entity counter.
+                            d.id = self.next_entity + 1;
+                            self.next_entity += 9;
                             self.dragon = Some(d);
                         }
                     }
                     "minecraft:end_crystal" => {
                         let time = self.world.random.next_int_bound(100_000).unwrap_or(0);
-                        if let Some(c) = super::dragon::Crystal::from_nbt(&tag, time) {
+                        if let Some(mut c) = super::dragon::Crystal::from_nbt(&tag, time) {
+                            // EndCrystal's constructor takes an id from the
+                            // entity counter.
+                            self.next_entity += 1;
+                            c.id = self.next_entity;
                             self.crystals.push(c);
                         }
                     }
@@ -301,6 +321,13 @@ impl Game<'_> {
                         if let Some(f) = entity_nbt::item_frame_from_nbt(&tag, self.next_entity) {
                             self.remember(f.id, uuid, tag);
                             self.item_frames.push(f);
+                        }
+                    }
+                    "minecraft:cushion" => {
+                        self.next_entity += 1;
+                        if let Some(c) = entity_nbt::cushion_from_nbt(&tag, self.next_entity) {
+                            self.remember(c.id, uuid, tag);
+                            self.cushions.push(c);
                         }
                     }
                     "minecraft:painting" => {
@@ -338,28 +365,14 @@ impl Game<'_> {
     pub(super) fn load_mob(&mut self, tag: Tag, mount: Option<u32>) -> Option<u32> {
         self.next_entity += 1;
         let uuid = entity_nbt::uuid(&tag);
-        // Structure entities placed with finalizeEntities.
+        // Structure mobs that generation left to finish: saves from before
+        // they were finalized at placement, or a placement that could not.
         let mut tag = tag;
         let mut finalize = false;
-        let mut riders = Vec::new();
-        let mut unknown = Vec::new();
         if let Tag::Compound(c) = &mut tag {
             finalize = c.remove(&"horizon:finalize".into()).is_some();
-            if let Some(Tag::List(list)) = c.remove(&"Passengers".into()) {
-                for p in list {
-                    let known =
-                        entity_nbt::kind(&p).is_some_and(|k| self.res.mob_types().contains_key(&k));
-                    if known {
-                        riders.push(p);
-                    } else {
-                        unknown.push(p);
-                    }
-                }
-            }
-            if !unknown.is_empty() {
-                c.insert("Passengers".into(), Tag::List(unknown));
-            }
         }
+        let riders = self.take_mob_passengers(&mut tag);
         let mut m = entity_nbt::mob_from_nbt(&tag, self.res.mob_types(), self.next_entity)?;
         m.extra.mount = mount;
         m.extra.passenger = mount.is_some();
@@ -401,8 +414,52 @@ impl Game<'_> {
         }
         Some(id)
     }
+    /// The mobs under an entity's `Passengers`, taken out of it; the
+    /// passengers Horizon doesn't simulate stay.
+    fn take_mob_passengers(&self, tag: &mut Tag) -> Vec<Tag> {
+        let mut riders = Vec::new();
+        if let Tag::Compound(c) = tag
+            && let Some(Tag::List(list)) = c.remove(&"Passengers".into())
+        {
+            let mut unknown = Vec::new();
+            for p in list {
+                let known =
+                    entity_nbt::kind(&p).is_some_and(|k| self.res.mob_types().contains_key(&k));
+                if known {
+                    riders.push(p);
+                } else {
+                    unknown.push(p);
+                }
+            }
+            if !unknown.is_empty() {
+                c.insert("Passengers".into(), Tag::List(unknown));
+            }
+        }
+        riders
+    }
+    /// The mobs riding entity `id` under `tag`'s `Passengers`, after the
+    /// passengers it kept from loading.
+    fn put_mob_passengers(&mut self, tag: &mut Tag, id: u32) {
+        let riders: Vec<usize> = (0..self.mobs.len())
+            .filter(|&j| self.mobs[j].extra.mount == Some(id) && self.mobs[j].alive())
+            .collect();
+        let riders: Vec<Tag> = riders.into_iter().map(|j| self.mob_tree_nbt(j)).collect();
+        if let Tag::Compound(c) = tag {
+            let mut list = match c.get(&"Passengers".into()) {
+                Some(Tag::List(l)) => l.clone(),
+                _ => Vec::new(),
+            };
+            list.extend(riders);
+            if list.is_empty() {
+                c.remove(&"Passengers".into());
+            } else {
+                c.insert("Passengers".into(), Tag::List(list));
+            }
+        }
+    }
     /// An entity of a type Horizon does not simulate, kept as its compound.
-    fn load_other(&mut self, tag: Tag, kind: &str) -> Option<u32> {
+    fn load_other(&mut self, mut tag: Tag, kind: &str) -> Option<u32> {
+        strip_finalize(&mut tag);
         let position = entity_nbt::position(&tag)?;
         let rotation = match tag.get("Rotation") {
             Some(Tag::List(l)) => {
@@ -476,22 +533,7 @@ impl Game<'_> {
         let uuid = self.uuid_for(id);
         let mut tag = entity_nbt::mob_to_nbt(&self.mobs[i], uuid, self.persist.raw.get(&id));
         self.write_leash(&mut tag, i);
-        let riders: Vec<usize> = (0..self.mobs.len())
-            .filter(|&j| self.mobs[j].extra.mount == Some(id) && self.mobs[j].alive())
-            .collect();
-        let riders: Vec<Tag> = riders.into_iter().map(|j| self.mob_tree_nbt(j)).collect();
-        if let Tag::Compound(c) = &mut tag {
-            let mut list = match c.get(&"Passengers".into()) {
-                Some(Tag::List(l)) => l.clone(),
-                _ => Vec::new(),
-            };
-            list.extend(riders);
-            if list.is_empty() {
-                c.remove(&"Passengers".into());
-            } else {
-                c.insert("Passengers".into(), Tag::List(list));
-            }
-        }
+        self.put_mob_passengers(&mut tag, id);
         tag
     }
     /// Forget an entity that left the world (its UUID and loaded compound).
@@ -499,9 +541,41 @@ impl Game<'_> {
         self.persist.uuids.remove(&id);
         self.persist.raw.remove(&id);
     }
+    /// The compound an entity without a Horizon entity ID was loaded with
+    /// (the crystals and the dragon), found again by type and position.
+    pub(super) fn persist_anon(&self, kind: &str, p: Vec3) -> (Option<[i32; 4]>, Option<&Tag>) {
+        self.persist
+            .anon
+            .get(&anon_key(kind, p))
+            .map_or((None, None), |(_, uuid, raw)| (*uuid, Some(raw)))
+    }
     /// The compound an entity was loaded with (and commands have edited).
     pub(super) fn persist_raw(&self, id: u32) -> Option<&Tag> {
         self.persist.raw.get(&id)
+    }
+    /// A loaded chest minecart with a loot table and no items: the table
+    /// rolled now, as generated containers are (Horizon does not unpack on
+    /// first open), and kept to save it again while unchanged.
+    fn roll_cart_loot(&self, cart: &mut super::minecarts::Minecart, tag: &Tag) {
+        let Some(table) = horizon_client::save::text(tag.get("LootTable")) else {
+            return;
+        };
+        if cart.items.is_empty() || cart.items.iter().any(Option::is_some) {
+            return;
+        }
+        let loot = horizon_client::structure_blocks::loot_data(&self.options.resources);
+        let p = cart.position;
+        let pos = (p.x.floor() as i32, p.y.floor() as i32, p.z.floor() as i32);
+        let biome = self.biome_name_at(p).unwrap_or_default();
+        let seed = horizon_client::structure_blocks::loot_seed(tag);
+        cart.loot = Some(horizon_client::structure_blocks::roll_container(
+            &mut cart.items,
+            loot.as_deref(),
+            table,
+            seed,
+            pos,
+            &biome,
+        ));
     }
     fn remember(&mut self, id: u32, uuid: Option<[i32; 4]>, tag: Tag) {
         self.restore_portal_cooldown(id, &tag);
@@ -569,10 +643,15 @@ impl Game<'_> {
         let mut out: HashMap<(i32, i32), Vec<Tag>> =
             keys.iter().map(|k| (*k, Vec::new())).collect();
         let player_uuid = self.level.player_uuid;
-        // A rider is saved inside its root vehicle, in the root's chunk.
+        // A rider is saved inside its root vehicle, in the root's chunk; a
+        // boat's passengers inside the boat.
         let mobs: Vec<usize> = (0..self.mobs.len())
             .filter(|&i| {
                 self.mob_root(i) == i
+                    && self.mobs[i]
+                        .extra
+                        .mount
+                        .is_none_or(|v| self.boats.iter().all(|b| b.id != v))
                     && keys.contains(&chunk_of(self.mobs[i].position))
                     && self.mobs[i].alive()
             })
@@ -619,13 +698,15 @@ impl Game<'_> {
             } else {
                 None
             };
-            let (uuid, raw) = anon(&self.persist, "minecraft:arrow", p.position);
+            let (uuid, raw) = anon(&self.persist, p.kind.id(), p.position);
             let in_block = p
                 .arrow
                 .as_ref()
                 .and_then(|a| a.last_state)
                 .map(|s| self.state_to_nbt(s));
-            if let Some(tag) = entity_nbt::arrow_to_nbt(p, uuid, owner, in_block, raw.as_ref()) {
+            let tag = entity_nbt::arrow_to_nbt(p, uuid, owner, in_block, raw.as_ref())
+                .or_else(|| entity_nbt::fireball_to_nbt(p, uuid, owner, raw.as_ref()));
+            if let Some(tag) = tag {
                 out.entry(chunk_of(p.position)).or_default().push(tag);
             }
         }
@@ -650,25 +731,29 @@ impl Game<'_> {
                     .push(with_raw(tag, raw.as_ref()));
             }
         }
-        for b in &self.boats {
-            if keys.contains(&chunk_of(b.position)) {
-                let uuid = self
-                    .persist
-                    .uuids
-                    .get(&b.id)
-                    .copied()
-                    .unwrap_or_else(random_uuid);
-                let tag = entity_nbt::boat_to_nbt(
-                    &b.entity_type(),
-                    b.position,
-                    b.velocity,
-                    b.yaw,
-                    uuid,
-                    self.persist.raw.get(&b.id),
-                    b.chest.then_some(&b.items[..]),
-                );
-                out.entry(chunk_of(b.position)).or_default().push(tag);
-            }
+        let boats: Vec<usize> = (0..self.boats.len())
+            .filter(|&i| keys.contains(&chunk_of(self.boats[i].position)))
+            .collect();
+        for i in boats {
+            let b = &self.boats[i];
+            let (id, at) = (b.id, b.position);
+            let uuid = self
+                .persist
+                .uuids
+                .get(&id)
+                .copied()
+                .unwrap_or_else(random_uuid);
+            let mut tag = entity_nbt::boat_to_nbt(
+                &b.entity_type(),
+                b.position,
+                b.velocity,
+                b.yaw,
+                uuid,
+                self.persist.raw.get(&id),
+                b.chest.then_some(&b.items[..]),
+            );
+            self.put_mob_passengers(&mut tag, id);
+            out.entry(chunk_of(at)).or_default().push(tag);
         }
         if let Some(d) = &self.dragon
             && keys.contains(&chunk_of(d.position))
@@ -739,6 +824,18 @@ impl Game<'_> {
                     .unwrap_or_else(random_uuid);
                 let tag = entity_nbt::item_frame_to_nbt(f, uuid, self.persist.raw.get(&f.id));
                 out.entry(chunk_of(at)).or_default().push(tag);
+            }
+        }
+        for c in &self.cushions {
+            if keys.contains(&chunk_of(c.position)) {
+                let uuid = self
+                    .persist
+                    .uuids
+                    .get(&c.id)
+                    .copied()
+                    .unwrap_or_else(random_uuid);
+                let tag = entity_nbt::cushion_to_nbt(c, uuid, self.persist.raw.get(&c.id));
+                out.entry(chunk_of(c.position)).or_default().push(tag);
             }
         }
         for p in &self.paintings {
@@ -833,9 +930,23 @@ impl Game<'_> {
                 }
                 keep
             });
-            // Riders leave with their root vehicle.
+            self.cushions.retain(|c| {
+                let keep = !gone(c.position);
+                if !keep {
+                    removed.push(c.id);
+                }
+                keep
+            });
+            // Riders leave with their root vehicle, a boat's with the boat.
             let leaving: HashSet<u32> = (0..self.mobs.len())
-                .filter(|&i| gone(self.mobs[self.mob_root(i)].position))
+                .filter(|&i| {
+                    let r = self.mob_root(i);
+                    match self.mobs[r].extra.mount {
+                        Some(v) if removed.contains(&v) => true,
+                        Some(v) if self.boats.iter().any(|b| b.id == v) => false,
+                        _ => gone(self.mobs[r].position),
+                    }
+                })
                 .map(|i| self.mobs[i].id)
                 .collect();
             self.mobs.retain(|m| {
@@ -892,6 +1003,7 @@ impl Game<'_> {
             .chain(self.boats.iter().map(|e| e.id))
             .chain(self.carts.iter().map(|e| e.id))
             .chain(self.armor_stands.iter().map(|e| e.id))
+            .chain(self.cushions.iter().map(|e| e.id))
             .chain(self.item_frames.iter().map(|e| e.id))
             .chain(self.paintings.iter().map(|e| e.id))
             .chain(self.others.iter().map(|e| e.id))
@@ -918,5 +1030,11 @@ impl Game<'_> {
         let chunks = self.entity_chunks(&keys, true);
         self.persist = EntityMemory::default();
         self.save.save_entities(chunks)
+    }
+}
+/// Only a mob is finalized; another entity drops the request.
+fn strip_finalize(tag: &mut Tag) {
+    if let Tag::Compound(c) = tag {
+        c.remove(&"horizon:finalize".into());
     }
 }

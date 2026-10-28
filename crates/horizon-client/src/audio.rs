@@ -171,6 +171,9 @@ pub struct Audio {
     /// How many times each positional sound played (the control socket's `status`),
     /// with or without an audio device.
     pub heard: std::collections::BTreeMap<String, u32>,
+    /// How many times each selection was stopped ("record *", "* minecraft:…", `*` for
+    /// any), with or without an audio device, as `heard`.
+    pub stopped: std::collections::BTreeMap<String, u32>,
 }
 fn decode(path: &Path) -> Option<(Vec<f32>, u32)> {
     use symphonia::core::{
@@ -640,6 +643,7 @@ impl Audio {
             source_override: None,
             capture: None,
             heard: Default::default(),
+            stopped: Default::default(),
         }
     }
     #[cfg(all(not(feature = "audio"), not(target_family = "wasm")))]
@@ -764,11 +768,6 @@ impl Audio {
         self.play(event, at, volume, pitch);
         self.capture = capture;
     }
-    /// `LivingEntity.handleDamageEvent`'s pitch, `(r - r) * 0.2 + 1`, drawn on the
-    /// client (the entity's own random there, never the server's world random).
-    pub fn hurt_pitch(&mut self) -> f32 {
-        (self.random.next_float() - self.random.next_float()) * 0.2 + 1.0
-    }
     /// `AbstractWidget.playButtonClickSound`: an unseeded, relative UI sound.
     pub fn play_button_click(&mut self) {
         self.play_instance(
@@ -874,6 +873,14 @@ impl Audio {
     /// and/or a source.
     pub fn stop_sounds(&mut self, event: Option<&str>, source: Option<usize>) {
         let event = event.map(crate::sound_events::normalize);
+        let selection = format!(
+            "{} {}",
+            source
+                .and_then(|s| crate::settings::SOUND_SOURCES.get(s))
+                .map_or("*", |s| s),
+            event.as_deref().unwrap_or("*")
+        );
+        *self.stopped.entry(selection).or_default() += 1;
         self.engine
             .stop_matching(event.as_deref(), source, &mut self.backend);
     }

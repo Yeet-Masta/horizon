@@ -11,8 +11,15 @@ fn main() {
     game::web::start();
 }
 
+/// The mod API level this game serves, kept in the program for the launcher
+/// to read without running it (`horizon_mods::api_level::MARK`). `main`
+/// reads it, so the linker keeps it.
+#[cfg(not(target_family = "wasm"))]
+static MOD_API_LEVEL: [u8; 27] = horizon_mods::api_level::MARK;
+
 #[cfg(not(target_family = "wasm"))]
 fn main() {
+    std::hint::black_box(&MOD_API_LEVEL);
     horizon_client::telemetry::mark_start();
     let args: Vec<String> = horizon_platform::env::args().skip(1).collect();
     let game_args = args.iter().take_while(|a| *a != "--dedicated");
@@ -25,6 +32,8 @@ fn main() {
     };
     if !help {
         logging::init(&home, thread);
+        // The log's first line names the build, so a bug report that carries the log says which one it was.
+        log::info!("Horizon {}", crash::version());
         crash::install(home.clone(), side);
     }
     if let Err(error) = game::run() {

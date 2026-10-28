@@ -5,7 +5,11 @@
 //! (`entity-models.json`); transforms, animation and textures follow each
 //! vanilla renderer. Faces are lit like the `entity` shader: the lightmap at
 //! the block plus `minecraft_mix_light` with the level's two diffuse lights.
-use crate::{hud::Rect, mesher::Vertex, world::World};
+use crate::{
+    hud::Rect,
+    mesher::{CULL_BACK, Vertex},
+    world::World,
+};
 use glam::{DVec3, Mat4, Quat, Vec3};
 use horizon_core::geometry::{
     Direction,
@@ -94,6 +98,16 @@ pub fn diffuse(normal: Vec3, lights: (Vec3, Vec3)) -> f32 {
 pub fn vertex_light(packed: u8) -> u32 {
     (u32::from(packed >> 4) * 16) | ((u32::from(packed & 15) * 16) << 8)
 }
+/// `ChestRenderer.xmasTextures`: `SpecialDates.isExtendedChristmas` (24 to 26
+/// December in the local time zone), read once when the renderer is created.
+fn extended_christmas() -> bool {
+    use chrono::Datelike;
+    static XMAS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *XMAS.get_or_init(|| {
+        let now = crate::logging::local_now();
+        now.month() == 12 && (24..=26).contains(&now.day())
+    })
+}
 fn pack_color(rgb: u32, alpha: u32, brightness: f32) -> u32 {
     let c = |shift: u32| (((rgb >> shift) & 255) as f32 * brightness) as u32;
     alpha << 24 | c(0) << 16 | c(8) << 8 | c(16)
@@ -150,6 +164,8 @@ pub fn draw_part(
                 layer: 0,
                 color,
                 light,
+
+                glint_uv: [0.0, 0.0],
             });
         }
     }
@@ -559,12 +575,11 @@ fn frac(x: f32) -> f32 {
 /// `StringSplitter.splitLines(...).get(0)` for plain text: the first line,
 /// wrapped at the last space that fits or mid-word when none does.
 fn first_line(line: &str, max_width: f32, advance: &dyn Fn(char) -> f32) -> String {
-    let chars: Vec<char> = line.chars().collect();
     let mut width = 0.0;
     let mut last_space = None;
-    for (i, &c) in chars.iter().enumerate() {
+    for (i, c) in line.char_indices() {
         if c == '\n' {
-            return chars[..i].iter().collect();
+            return line[..i].to_owned();
         }
         if c == ' ' {
             last_space = Some(i);
@@ -573,9 +588,11 @@ fn first_line(line: &str, max_width: f32, advance: &dyn Fn(char) -> f32) -> Stri
         if width > max_width {
             let end = match last_space {
                 Some(s) if s > 0 => s,
-                _ => i.max(1),
+                _ if i > 0 => i,
+                // The first char alone is too wide: take that one char.
+                _ => c.len_utf8(),
             };
-            return chars[..end].iter().collect();
+            return line[..end].to_owned();
         }
     }
     line.to_owned()
@@ -610,7 +627,9 @@ fn sign_text_calls(
         .iter()
         .enumerate()
         .map(|(i, line)| {
+            // The line that fits, in the order it is drawn (getVisualOrder).
             let shown = first_line(line, data.max_line_width(), &advance);
+            let shown = crate::bidi::visual_str(&shown).into_owned();
             TextCall {
                 matrix: m,
                 x: -((width(&shown) as i32) / 2) as f32,
@@ -648,6 +667,8 @@ fn draw_text(scene: &Scene, call: &TextCall, out: &mut Vec<Vertex>) {
                         layer: 0,
                         color: c,
                         light: call.light,
+
+                        glint_uv: [0.0, 0.0],
                     });
                 }
             }
@@ -731,6 +752,10 @@ pub struct Scene<'a> {
     pub sign: &'a dyn Fn([i32; 3]) -> Option<&'a crate::signs::SignData>,
     /// Banner layers at a position: pattern texture and RGB tint, bottom first.
     pub banner: &'a dyn Fn([i32; 3]) -> Vec<(String, u32)>,
+    /// The skin sprite a `player_head` shows at a position (`SkullBlockRenderer`
+    /// profile → skin): a downloaded `skins/<sha1>` slot or the profile's
+    /// `DefaultPlayerSkin` fallback; None keeps `SKIN_BY_TYPE` (`DefaultPlayerSkin.getDefaultTexture`, slim steve).
+    pub skull: &'a dyn Fn([i32; 3]) -> Option<String>,
     /// Font glyph cell (none for blank glyphs such as the space) and advance.
     pub glyph: &'a dyn Fn(char) -> (Option<Rect>, f32),
 }
@@ -929,6 +954,30 @@ impl BlockEntityRenderer {
         let kind = self.kind(state);
         let lights = diffuse_lights(scene.nether);
         self.render_one(scene, pos, kind, base, packed, lights, false, false, out);
+    }
+    /// `TheEndGatewayBlockEntity.shouldRenderFace` for each face of the gateway
+    /// at `pos`: the faces its portal is drawn on.
+    pub fn gateway_faces(
+        &self,
+        world: &World,
+        state: BlockStateId,
+        pos: [i32; 3],
+    ) -> Vec<Direction> {
+        Direction::ALL
+            .into_iter()
+            .filter(|&d| {
+                let [dx, dy, dz] = d.normal();
+                let neighbor = world.block(pos[0] + dx, pos[1] + dy, pos[2] + dz);
+                self.visibility.as_ref().is_none_or(|v| {
+                    v.lock()
+                        .map(|mut v| {
+                            v.should_render_face(state, neighbor, d, true)
+                                .unwrap_or(true)
+                        })
+                        .unwrap_or(true)
+                })
+            })
+            .collect()
     }
     /// Whether this block state has a block-entity renderer here.
     pub fn renders(&self, state: u32) -> bool {
@@ -1137,11 +1186,25 @@ impl BlockEntityRenderer {
                 }
             }
             Kind::Chest {
+                block,
                 texture,
                 part,
                 y_rot,
                 ..
             } => {
+                // ChestRenderer.getChestMaterial: normal and trapped chests use the christmas
+                // sprites on 24-26 December. Copper and ender chests keep theirs.
+                let texture = if matches!(block.as_str(), "chest" | "trapped_chest")
+                    && extended_christmas()
+                {
+                    match part {
+                        ChestPart::Single => "entity/chest/christmas",
+                        ChestPart::Left => "entity/chest/christmas_left",
+                        ChestPart::Right => "entity/chest/christmas_right",
+                    }
+                } else {
+                    *texture
+                };
                 let model = match part {
                     ChestPart::Single => "chest",
                     ChestPart::Left => "double_chest_left",
@@ -1282,6 +1345,14 @@ impl BlockEntityRenderer {
                     SkullType::Piglin => ("piglin_head", "entity/piglin/piglin"),
                     SkullType::Player => ("player_head", "entity/player/slim/steve"),
                 };
+                // SkullBlockRenderer.getRenderType: the profile's skin when it
+                // resolves, `SKIN_BY_TYPE` (steve) otherwise.
+                let skin = if *kind == SkullType::Player {
+                    (scene.skull)(pos)
+                } else {
+                    None
+                };
+                let texture = skin.as_deref().unwrap_or(texture);
                 let (Some(model), Some(paint)) =
                     (self.models.get(model), paint(texture, 0xFFFFFF, packed))
                 else {
@@ -1376,6 +1447,7 @@ impl BlockEntityRenderer {
                         m *= around(Mat4::from_rotation_y(turn * decay), pivot);
                     }
                 }
+                let first = out.len();
                 if let Some(paint) =
                     paint("entity/decorated_pot/decorated_pot_base", 0xFFFFFF, packed)
                 {
@@ -1392,6 +1464,11 @@ impl BlockEntityRenderer {
                     {
                         draw_part(part, side, m, &none, paint, out);
                     }
+                }
+                // `DecoratedPotRenderer` submits every part with `entitySolid`, which culls
+                // back faces: the flat `top` and `bottom` planes show one side each.
+                for vertex in &mut out[first..] {
+                    vertex.normal = CULL_BACK;
                 }
             }
             Kind::EndPortal => {
@@ -1423,22 +1500,8 @@ impl BlockEntityRenderer {
                         out,
                     );
                 }
-                // AbstractEndPortalRenderer.extractRenderState: TheEndGatewayBlockEntity.shouldRenderFace.
-                let faces: Vec<Direction> = Direction::ALL
-                    .into_iter()
-                    .filter(|&d| {
-                        let [dx, dy, dz] = d.normal();
-                        let neighbor = scene.world.block(pos[0] + dx, pos[1] + dy, pos[2] + dz);
-                        self.visibility.as_ref().is_none_or(|v| {
-                            v.lock()
-                                .map(|mut v| {
-                                    v.should_render_face(BlockStateId(*state), neighbor, d, true)
-                                        .unwrap_or(true)
-                                })
-                                .unwrap_or(true)
-                        })
-                    })
-                    .collect();
+                // AbstractEndPortalRenderer.extractRenderState.
+                let faces = self.gateway_faces(scene.world, BlockStateId(*state), pos);
                 portal_cube(base, &faces, END_GATEWAY_LAYER, out);
             }
             Kind::Conduit => {
@@ -1705,6 +1768,8 @@ impl BeamPart {
                     layer: 6,
                     color,
                     light: self.wrap,
+
+                    glint_uv: [0.0, 0.0],
                 });
             }
         }
@@ -1775,6 +1840,7 @@ fn portal_cube(m: Mat4, faces: &[Direction], layer: u32, out: &mut Vec<Vertex>) 
                 layer,
                 color: 0,
                 light: 0,
+                glint_uv: [0.0, 0.0],
             });
         }
     }
@@ -1892,6 +1958,7 @@ mod tests {
             lid: &|_| 0.0,
             sign: &|_| None,
             banner: &|_| Vec::new(),
+            skull: &|_| None,
             glyph: &|_| (None, 0.0),
         };
         // Compare the cached world path with the original model renderer,
@@ -2091,5 +2158,80 @@ mod tests {
         assert_eq!(out.len(), 4);
         assert_eq!(out[1].pos, [2.0, 0.0, 0.0]);
         assert_eq!(out[2].uv, [0.5, 0.5]);
+    }
+
+    #[test]
+    fn first_line_wraps_on_bytes_without_splitting_a_char() {
+        let advance = |c: char| if c == ' ' { 4.0 } else { 6.0 };
+        assert_eq!(first_line("ab cd ef", 13.0, &advance), "ab");
+        assert_eq!(first_line("abcdef", 13.0, &advance), "ab");
+        assert_eq!(first_line("\u{6771}", 3.0, &advance), "\u{6771}");
+        assert_eq!(first_line("ab\ncd", 100.0, &advance), "ab");
+    }
+    /// `DecoratedPotRenderer` submits every part with `RenderTypes.entitySolid`,
+    /// whose pipeline culls back faces. The pot's `top` and `bottom` are flat
+    /// boxes, so without that cull both sides of each plane are drawn and they
+    /// z-fight: the pot renders wrong.
+    #[test]
+    fn the_decorated_pot_culls_its_back_faces() {
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../.local/horizon-client")
+            .join(horizon_core::VANILLA_VERSION);
+        if !root.join("entity-models.json").exists() {
+            return;
+        }
+        let assets = crate::assets::Assets::load(&root).unwrap();
+        let registry = assets.registry;
+        let renderer = BlockEntityRenderer::load(&root, registry).unwrap();
+        let state = registry.default_state("minecraft:decorated_pot").unwrap();
+        let sprites: HashMap<String, Rect> = [
+            "entity/decorated_pot/decorated_pot_base",
+            "entity/decorated_pot/decorated_pot_side",
+        ]
+        .into_iter()
+        .map(|name| {
+            (
+                name.to_owned(),
+                Rect {
+                    u0: 0.25,
+                    v0: 0.125,
+                    u1: 0.375,
+                    v1: 0.25,
+                    w: 16,
+                    h: 16,
+                },
+            )
+        })
+        .collect();
+        let world = World::new(BlockStateId(0), 1);
+        let scene = Scene {
+            camera: DVec3::ZERO,
+            orientation: Quat::IDENTITY,
+            anim: &|_| BlockAnim::default(),
+            texts: None,
+            partial: 0.5,
+            game_time: 0,
+            max_y: 320,
+            world: &world,
+            sprites: &sprites,
+            nether: false,
+            lid: &|_| 0.0,
+            sign: &|_| None,
+            banner: &|_| Vec::new(),
+            skull: &|_| None,
+            glyph: &|_| (None, 0.0),
+        };
+        let mut verts = Vec::new();
+        renderer.render_block(&scene, [0; 3], state.0, Mat4::IDENTITY, 0xff, &mut verts);
+        // Vanilla submits 28 quads for a plain pot, and the cull keeps them all.
+        assert_eq!(
+            verts.len() / 4,
+            28,
+            "the pot submits all of vanilla's quads"
+        );
+        assert!(
+            verts.iter().all(|v| v.normal == CULL_BACK),
+            "entitySolid culls the pot's back faces"
+        );
     }
 }

@@ -30,7 +30,7 @@ fn ticks_to_seconds(ticks: i64) -> String {
 impl Game<'_> {
     // ---- /forceload ----------------------------------------------------------
 
-    fn column_arg(&self, ctx: &Context, name: &str) -> R<[i32; 2]> {
+    pub(super) fn column_arg(&self, ctx: &Context, name: &str) -> R<[i32; 2]> {
         let c = self
             .coords(ctx, name)
             .ok_or_else(|| err("argument.pos2d.incomplete", &[]))?;
@@ -119,6 +119,9 @@ impl Game<'_> {
                         };
                         tracker.track(&holder(chunk_text(x, z)), i32::from(changed));
                     }
+                }
+                if add {
+                    self.streaming.rank_forced(cx0, cz0, cx1, cz1);
                 }
                 let (lo, hi) = (chunk_text(cx0, cz0), chunk_text(cx1, cz1));
                 let verb = if add { "added" } else { "removed" };

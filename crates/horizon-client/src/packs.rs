@@ -4,9 +4,9 @@
 //! and an overlay resource root that layers the enabled packs over the
 //! vanilla resources (later packs win), so every loader sees one tree.
 mod cache;
-pub mod pattern;
 use crate::text::Style;
 use crate::{text::Text, zip::Zip};
+pub use horizon_client_core::pattern;
 use horizon_platform::fs;
 use horizon_platform::fs::PathExt as _;
 use pattern::Pattern;
@@ -519,7 +519,11 @@ fn build_overlay_uncached(
                     }
                 }
             } else if touched.contains(&child)
-                || (vanilla.join(&child).fs_is_dir() && !filters.is_empty())
+                // Windows cannot link a directory the way unix does (`link` above), so an
+                // untouched one has to be mirrored: skipping it hid textures/font and the
+                // title panorama from the overlay, and a font json that names those sheets
+                // then failed to load (#1688).
+                || (vanilla.join(&child).fs_is_dir() && (cfg!(not(unix)) || !filters.is_empty()))
             {
                 mirror(
                     &child,

@@ -49,18 +49,12 @@ impl Game<'_> {
         let mut tracker = Tracker::default();
         for &t in &targets {
             let h = holder(self.target_name(t));
-            // ServerRecipeBook.addRecipes/removeRecipes count recipe book
-            // displays (a transmute recipe has one per material count).
-            let mut n = 0;
-            // ServerPlayer.awardRecipes / resetRecipes: the displays changed.
-            let index = &self.res.stations().recipe_index;
-            n += if give {
-                let (count, unlocked) = self.level.recipe_book.add_recipes(index, &recipes);
-                self.recipe_unlocked(&unlocked);
-                count as i32
-            } else {
-                self.level.recipe_book.remove_recipes(index, &recipes) as i32
-            };
+            // ServerPlayer.awardRecipes / resetRecipes on the target's own
+            // ServerRecipeBook: a guest's is swapped in for the call, and the
+            // packets go to its client.
+            let n = self
+                .for_player(t, |g| g.change_recipes(give, &recipes))
+                .unwrap_or(0);
             tracker.track(&h, n);
         }
         let verb = if give { "give" } else { "take" };
@@ -84,12 +78,34 @@ impl Game<'_> {
         Ok(total)
     }
 
+    /// ServerRecipeBook.addRecipes/removeRecipes for the player in place: how
+    /// many recipe book displays changed (a transmute recipe has one per
+    /// material count).
+    fn change_recipes(&mut self, give: bool, recipes: &[String]) -> i32 {
+        let index = &self.res.stations().recipe_index;
+        if give {
+            let (count, unlocked) = self.level.recipe_book.add_recipes(index, recipes);
+            self.recipe_unlocked(&unlocked);
+            return count as i32;
+        }
+        let removed = self.level.recipe_book.remove_recipes(index, recipes);
+        let count = removed.len() as i32;
+        // A network player's client drops them from its book.
+        if self.lan_acting.is_some() && !removed.is_empty() {
+            self.guest_packets.push(C::RecipeBookRemove(
+                horizon_protocol::packets::recipes::RecipeBookRemove { ids: removed },
+            ));
+        }
+        count
+    }
+
     // ---- /damage ----------------------------------------------------------------
 
     fn damage_kind(ty: &str) -> DamageKind {
         match ty.trim_start_matches("minecraft:") {
             "player_attack" => DamageKind::PlayerAttack,
             "mace_smash" => DamageKind::MaceSmash,
+            "spear" => DamageKind::Spear,
             "mob_attack" | "mob_attack_no_aggro" => DamageKind::MobAttack,
             "arrow" => DamageKind::Arrow,
             "thrown" | "trident" | "mob_projectile" => DamageKind::Thrown,
@@ -100,9 +116,12 @@ impl Game<'_> {
             "in_fire" | "campfire" | "hot_floor" => DamageKind::InFire,
             "lava" => DamageKind::Lava,
             "drown" => DamageKind::Drown,
+            "dry_out" => DamageKind::DryOut,
             "magic" | "indirect_magic" | "dragon_breath" => DamageKind::Magic,
             "sting" => DamageKind::Sting,
-            "cactus" | "sweet_berry_bush" => DamageKind::Cactus,
+            "cactus" => DamageKind::Cactus,
+            "sweet_berry_bush" => DamageKind::SweetBerryBush,
+            "freeze" => DamageKind::Freeze,
             "in_wall" => DamageKind::InWall,
             "thorns" => DamageKind::Thorns,
             _ => DamageKind::Generic,
@@ -125,27 +144,37 @@ impl Game<'_> {
             Some(Arg::Entity(_)) => self.entities(ctx, "entity", false)?.first().copied(),
             _ => None,
         };
+        let cause = match ctx.get("cause") {
+            Some(Arg::Entity(_)) => self.entities(ctx, "cause", false)?.first().copied(),
+            _ => None,
+        };
         let from = match ctx.get("location") {
             Some(Arg::Coords(_)) => self.position_arg(ctx, "location"),
             _ => by.and_then(|t| self.target_position(t)),
         };
         let hurt = match target {
+            // The causing mob is the one the hit is credited to and thorns
+            // answer; the source position gives the knockback its direction.
             Target::Player => {
-                if self.creative || self.spectator() {
+                // `DamageSource(type, cause, by)`: the death message names the
+                // causing entity, else the direct one. A mob is noted by
+                // `hurt_player_from`, a player here.
+                if let Some(t @ (Target::Player | Target::Guest(_))) = cause.or(by) {
+                    let name = self.target_name(t);
+                    self.note_direct_entity(&ty, name);
+                }
+                if self.spectator() {
                     false
-                } else if let Some(player) = self.player.as_mut() {
-                    match self.motion.health.damage.id(&ty) {
-                        Some(id) => player
-                            .hurt(&self.motion.health, self.world.health_rules, id, amount)
-                            .unwrap_or(false),
-                        None => false,
-                    }
                 } else {
-                    false
+                    let attacker = match cause.or(by) {
+                        Some(Target::Mob(i)) => Some(Some(i)),
+                        _ => Some(None),
+                    };
+                    self.hurt_player_from(amount, from, &ty, attacker)
                 }
             }
             Target::Mob(id) => {
-                let attacker = by.and_then(|t| match t {
+                let attacker = cause.or(by).and_then(|t| match t {
                     Target::Player => Some(Who::Player),
                     Target::Mob(i) => Some(Who::Mob(i)),
                     _ => None,
@@ -286,9 +315,18 @@ impl Game<'_> {
             float("minVolume", 0.0),
         );
         let range = if volume > 1.0 { 16.0 * volume } else { 16.0 };
+        // PlaySoundCommand: one seed for every player.
+        let seed = self.world.random.next_long();
+        let here = self.dim.id();
         let mut tracker = Tracker::default();
         for t in targets {
-            if t != Target::Player {
+            if !matches!(t, Target::Player | Target::Guest(_)) {
+                continue;
+            }
+            // Only players in the source's level hear it.
+            if let Target::Guest(conn) = t
+                && self.command_guest(conn).is_none_or(|g| g.dimension != here)
+            {
                 continue;
             }
             let Some(p) = self.target_position(t) else {
@@ -312,8 +350,26 @@ impl Game<'_> {
             } else {
                 (pos, volume)
             };
-            self.audio.play_on(source, &sound, Some(at), v, pitch);
-            tracker.mark(&holder(Text::literal(self.acting_player_name())));
+            // The connection is sent the sound; the window's own player
+            // plays it.
+            let guest = match t {
+                Target::Guest(conn) => Some(conn),
+                _ => self.lan_acting,
+            };
+            match guest.and_then(|conn| Some((conn, self.lan.as_ref()?))) {
+                Some((conn, host)) => {
+                    let packet = host
+                        .hub
+                        .sound_packet(&sound, at, v, pitch, source as i32, seed);
+                    if t == Target::Player {
+                        self.guest_packets.push(packet);
+                    } else {
+                        host.hub.send_to(conn, &packet);
+                    }
+                }
+                None => self.audio.play_on(source, &sound, Some(at), v, pitch),
+            }
+            tracker.mark(&holder(self.target_name(t)));
         }
         let name = Text::literal(sound.clone());
         let (message, total) = tracker.message(
@@ -345,7 +401,26 @@ impl Game<'_> {
             Some(Arg::Resource(s)) => Some(s.clone()),
             _ => None,
         };
-        self.audio.stop_sounds(sound.as_deref(), source);
+        // StopSoundCommand: each target's connection gets the packet; the
+        // window's own player stops its sounds.
+        let packet = C::StopSound(play::StopSound {
+            source: source.map(|s| s as i32),
+            sound: sound.clone(),
+        });
+        for &t in &targets {
+            match t {
+                Target::Player if self.lan_acting.is_some() => {
+                    self.guest_packets.push(packet.clone());
+                }
+                Target::Player => self.audio.stop_sounds(sound.as_deref(), source),
+                Target::Guest(conn) => {
+                    if let Some(host) = self.lan.as_ref() {
+                        host.hub.send_to(conn, &packet);
+                    }
+                }
+                _ => {}
+            }
+        }
         let key = match (source, &sound) {
             (Some(_), Some(_)) => "commands.stopsound.success.source.sound",
             (Some(_), None) => "commands.stopsound.success.source.any",
@@ -571,8 +646,10 @@ impl Game<'_> {
         let reached = reached.len() as i32;
         if !local {
         } else if count <= 0 {
-            // No count: one particle with the delta as velocity.
-            self.particles.create(&options, pos, delta);
+            // handleParticleEvent, count 0: one particle, the speed times
+            // the delta as velocity (both sent as floats, multiplied as floats).
+            self.particles
+                .create(&options, pos, delta.map(|d| f64::from(speed * d as f32)));
         } else {
             for _ in 0..count {
                 let r = self.particles.random();
@@ -1047,15 +1124,15 @@ impl Game<'_> {
         };
         let name = self.target_name(target);
         if id == "ride.dismount" {
-            let vehicle = match target {
-                Target::Player => self.riding.map(Target::Mob),
-                _ => None,
-            };
-            let Some(v) = vehicle else {
+            let Some(v) = self.ride_vehicle(target) else {
                 return Err(err("commands.ride.not_riding", &[&name.plain()]));
             };
             let vehicle_name = self.target_name(v);
-            self.dismount_mount();
+            match target {
+                Target::Player => self.dismount_mount(),
+                Target::Mob(rider) => self.dismount_mob(rider),
+                _ => {}
+            }
             self.feedback(Text::translate(
                 "commands.ride.dismount.success",
                 &[name, vehicle_name],
@@ -1067,11 +1144,8 @@ impl Game<'_> {
             return Ok(0);
         };
         let vehicle_name = self.target_name(vehicle);
-        if target == Target::Player && self.riding.is_some() {
-            let current = self
-                .riding
-                .map(Target::Mob)
-                .map_or_else(Text::empty, |v| self.target_name(v));
+        if let Some(current) = self.ride_vehicle(target) {
+            let current = self.target_name(current);
             return Err(err(
                 "commands.ride.already_riding",
                 &[&name.plain(), &current.plain()],
@@ -1080,21 +1154,41 @@ impl Game<'_> {
         if vehicle == Target::Player {
             return Err(err("commands.ride.mount.failure.cant_ride_players", &[]));
         }
-        if target == vehicle {
-            return Err(err("commands.ride.mount.failure.loop", &[]));
+        // getSelfAndPassengers: the vehicle is the target or rides it.
+        let mut up = Some(vehicle);
+        while let Some(v) = up {
+            if v == target {
+                return Err(err("commands.ride.mount.failure.loop", &[]));
+            }
+            up = self.ride_vehicle(v);
         }
-        // The player can ride mobs that carry a rider.
+        // Players and mobs can ride mobs.
         let Target::Mob(mob_id) = vehicle else {
             return Err(err(
                 "commands.ride.mount.failure.generic",
                 &[&name.plain(), &vehicle_name.plain()],
             ));
         };
-        if target != Target::Player || !self.mobs.iter().any(|m| m.id == mob_id && m.alive()) {
+        let rider = match target {
+            Target::Mob(id) => Some(id),
+            _ => None,
+        };
+        if !(target == Target::Player || rider.is_some())
+            || !self.mobs.iter().any(|m| m.id == mob_id && m.alive())
+        {
             return Err(err(
                 "commands.ride.mount.failure.generic",
                 &[&name.plain(), &vehicle_name.plain()],
             ));
+        }
+        if let Some(rider) = rider {
+            // Entity.startRiding.
+            self.mount_mob(rider, mob_id);
+            self.feedback(Text::translate(
+                "commands.ride.mount.success",
+                &[name, vehicle_name],
+            ));
+            return Ok(1);
         }
         if let Some(m) = self.mobs.iter_mut().find(|m| m.id == mob_id) {
             m.extra.flag = false;
@@ -1109,6 +1203,47 @@ impl Game<'_> {
             &[name, vehicle_name],
         ));
         Ok(1)
+    }
+
+    /// Entity.getVehicle: the player's mount, or a mob's.
+    pub(super) fn ride_vehicle(&self, t: Target) -> Option<Target> {
+        let id = match t {
+            Target::Player => return self.riding.map(Target::Mob),
+            Target::Mob(id) => self.mobs.iter().find(|m| m.id == id)?.extra.mount?,
+            _ => return None,
+        };
+        Some(if self.boats.iter().any(|b| b.id == id) {
+            Target::Boat(id)
+        } else {
+            Target::Mob(id)
+        })
+    }
+    /// LivingEntity.stopRiding for a mob: off its vehicle
+    /// (Entity.removePassenger), then to where the vehicle lets it out
+    /// (LivingEntity.dismountVehicle).
+    pub(in crate::game) fn dismount_mob(&mut self, rider: u32) {
+        let Some(i) = self.mobs.iter().position(|m| m.id == rider) else {
+            return;
+        };
+        let Some(v) = self.mobs[i].extra.mount.take() else {
+            return;
+        };
+        let (width, yaw) = (f64::from(self.mobs[i].width()), self.mobs[i].yaw);
+        let at = if let Some(b) = self.boats.iter().position(|b| b.id == v) {
+            self.boat_dismount_target(b, width, yaw)
+        } else if let Some(m) = self.mobs.iter_mut().find(|m| m.id == v) {
+            m.extra.rider = None;
+            // Entity.getDismountLocationForPassenger: on top of the vehicle.
+            let p = m.position;
+            horizon_core::geometry::Vec3::new(p.x, p.y + f64::from(m.height()), p.z)
+        } else {
+            self.mobs[i].position
+        };
+        let m = &mut self.mobs[i];
+        m.extra.passenger = false;
+        m.extra.boarding_cooldown = super::super::boat_passengers::BOARDING_COOLDOWN;
+        m.position = at;
+        m.previous = at;
     }
 
     // ---- /spreadplayers -----------------------------------------------------------------------

@@ -80,6 +80,8 @@ IGNORED = {
     # chunk generation first), so counters and positions of live things move on.
     r'^chunk\.block_entities\.\(2, -60, 5\)\.(cooking_time_spent|lit_time_remaining|Items\[\]\.count)$':
         'the lit furnace keeps smelting',
+    r'^chunk\.block_entities\.\(14, -60, 5\)\.CookingTimes$':
+        'the lit campfire keeps cooking',
     r'^chunk\.block_entities\..*\.(ticks_since_song_started|Age|BrewTime|warning_level|ticks_in_hive|last_vibration_frequency|listener\..*|RecipesUsed\..*|'
     r'server_data\.state_updating_resumes_at)$':
         'block entity timers advance',
@@ -330,7 +332,7 @@ def entity_uuid_text(i):
 
 def vscreen_env():
     text = subprocess.run(['vscreen', 'env'], capture_output=True, text=True, check=True).stdout
-    env = dict(os.environ)
+    env = lab.game_env()
     env.pop('DISPLAY', None)
     for match in re.finditer(r'(\w+)=(\S+)', text.split('unset')[0]):
         env[match.group(1)] = match.group(2)
@@ -345,8 +347,9 @@ def horizon_resave(source, destination, bin_dir):
     socket = Path(tempfile.mkdtemp(prefix='hzrt')) / 'control.sock'  # sockets need short paths
     ctl = [str(bin_dir / 'horizon-ctl'), '--socket', str(socket)]
     extra = []
-    if sys.platform == 'darwin':
-        env = dict(os.environ, HORIZON_NO_AUDIO='1')
+    # Offscreen on macOS, and on a Linux without vscreen (never a window on a real monitor).
+    if sys.platform == 'darwin' or not shutil.which('vscreen'):
+        env = lab.game_env()
         extra = ['--offscreen']
     else:
         alsa = destination / 'null-asound.conf'

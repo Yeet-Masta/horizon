@@ -53,7 +53,7 @@ pub struct World {
     pub chunks: crate::chunk_map::ChunkMap,
     pub random: LegacyRandom,
     pub revision: u64,
-    pub health_rules: crate::health::HealthRules,
+    pub health_rules: HealthRules,
     pub air: BlockStateId,
     /// Sections whose geometry changed and need remeshing.
     pub dirty_sections: DirtySections,
@@ -92,12 +92,14 @@ pub struct World {
     /// (`ChunkHolder.sectionLightChanged`).
     pub light_log: Option<crate::fast_hash::FxHashMap<(i32, i32), u32>>,
     /// The villager POIs of each section (`PoiManager`'s sections).
-    pub pois: crate::poi_sections::PoiSections<crate::mobs::villager_brain::Poi>,
+    pub pois: crate::poi_sections::PoiSections<crate::poi_sections::Poi>,
+    /// Moving-piston states removed during the last tick; retained until the
+    /// final block mesh is visible.
+    pub moving_piston_fallback: Vec<([i32; 3], horizon_world::piston_shape::MovingPistonState)>,
     /// The moving-piston block entities of the level, by position, copied
     /// from the block ticks after each tick: collision and rendering read them.
     pub moving_pistons: Vec<([i32; 3], horizon_world::piston_shape::MovingPistonState)>,
 }
-/// ServerLevel weather state (advanceWeatherCycle).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Weather {
     pub clear_time: i32,
@@ -109,7 +111,9 @@ pub struct Weather {
     pub thunder_level: (f32, f32),
 }
 impl Weather {
-    pub fn tick(&mut self, random: &mut horizon_core::random::LegacyRandom) {
+    /// The timers of `advanceWeatherCycle`, which run only while
+    /// `advance_weather` is on.
+    pub fn tick_timers(&mut self, random: &mut horizon_core::random::LegacyRandom) {
         use horizon_core::random::RandomSource;
         let mut uniform =
             |min: i32, max: i32| min + random.next_int_bound(max - min + 1).unwrap_or(0);
@@ -141,6 +145,10 @@ impl Weather {
                 self.rain_time = uniform(12000, 180000);
             }
         }
+    }
+    /// The rain and thunder level fade at the end of `advanceWeatherCycle`,
+    /// which runs whatever `advance_weather` says, so `/weather` still shows.
+    pub fn tick_levels(&mut self) {
         self.thunder_level.0 = self.thunder_level.1;
         self.thunder_level.1 =
             (self.thunder_level.1 + if self.thundering { 0.01 } else { -0.01 }).clamp(0.0, 1.0);
@@ -162,7 +170,7 @@ impl World {
             chunks: Default::default(),
             random: LegacyRandom::new(seed),
             revision: 0,
-            health_rules: crate::health::HealthRules::default(),
+            health_rules: HealthRules::default(),
             air,
             fast_lava: false,
             dirty_sections: Default::default(),
@@ -181,6 +189,7 @@ impl World {
             weather: Weather::default(),
             block_log: None,
             light_log: None,
+            moving_piston_fallback: Vec::new(),
             moving_pistons: Vec::new(),
             pois: Default::default(),
         }
@@ -311,6 +320,40 @@ impl World {
             .get(&(x >> 4, z >> 4))
             .map_or(self.air, |chunk| chunk.block(x & 15, y, z & 15))
     }
+    /// Whether a block of the box `lo..=hi` may match, from the palettes of
+    /// the sections it reaches (a palette of the whole registry may hold
+    /// anything): `false` means [`Self::block`] matches in none of its cells,
+    /// so a scan over them can stop before reading one.
+    pub fn may_hold(
+        &self,
+        lo: [i32; 3],
+        hi: [i32; 3],
+        mut matches: impl FnMut(BlockStateId) -> bool,
+    ) -> bool {
+        let top = MIN_Y + SECTIONS as i32 * 16 - 1;
+        // Heights outside the sections read as state 0.
+        if (lo[1] < MIN_Y || hi[1] > top) && matches(BlockStateId(0)) {
+            return true;
+        }
+        let sections = (lo[1].max(MIN_Y) - MIN_Y) >> 4..=(hi[1].min(top) - MIN_Y) >> 4;
+        for cx in lo[0] >> 4..=hi[0] >> 4 {
+            for cz in lo[2] >> 4..=hi[2] >> 4 {
+                let Some(chunk) = self.chunks.get(&(cx, cz)) else {
+                    if matches(self.air) {
+                        return true;
+                    }
+                    continue;
+                };
+                for s in sections.clone() {
+                    let blocks = &chunk.sections[s as usize].blocks;
+                    if blocks.is_global() || blocks.maybe_has(|v| matches(BlockStateId(v))) {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
     /// The block entities to tick this tick, in order (`BlockEntities::tickers`).
     pub fn block_entity_tickers(&mut self) -> Vec<(crate::block_entities::Pos, u32)> {
         let (chunks, air) = (&self.chunks, self.air);
@@ -331,5 +374,60 @@ impl World {
     }
     pub fn loaded(&self, x: i32, z: i32) -> bool {
         self.chunks.contains_key(&(x >> 4, z >> 4))
+    }
+}
+
+/// The game rules and difficulty a player's health reads (`Player.isInvulnerableTo`,
+/// natural regeneration), kept with the world they belong to.
+#[derive(Clone, Copy, Debug)]
+pub struct HealthRules {
+    pub difficulty: horizon_world::food::Difficulty,
+    pub natural_regeneration: bool,
+    /// The `drowning_damage`, `fall_damage`, `fire_damage` and
+    /// `freeze_damage` rules `Player.isInvulnerableTo` reads.
+    pub drowning_damage: bool,
+    pub fall_damage: bool,
+    pub fire_damage: bool,
+    pub freeze_damage: bool,
+}
+impl Default for HealthRules {
+    fn default() -> Self {
+        Self {
+            difficulty: horizon_world::food::Difficulty::Normal,
+            natural_regeneration: true,
+            drowning_damage: true,
+            fall_damage: true,
+            fire_damage: true,
+            freeze_damage: true,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::World;
+    use crate::chunk::Chunk;
+    use horizon_world::registry::BlockStateId;
+    use std::sync::Arc;
+
+    /// A box misses a state only where no section it reaches lists it, and
+    /// unloaded columns or heights past the world count as their air.
+    #[test]
+    fn may_hold_reads_the_palettes_of_the_reached_sections() {
+        let mut world = World::new(BlockStateId(0), 0);
+        let mut chunk = Chunk::empty(0, 0);
+        chunk.set(3, 70, 3, 9);
+        world.chunks.insert((0, 0), Arc::new(chunk));
+        let nine = |s: BlockStateId| s.0 == 9;
+        // The section of y 64..80 holds 9, the one below does not.
+        assert!(world.may_hold([0, 64, 0], [1, 65, 1], nine));
+        assert!(world.may_hold([10, 79, 10], [12, 80, 12], nine));
+        assert!(!world.may_hold([0, 50, 0], [15, 63, 15], nine));
+        // A box over the unloaded column next door sees only air.
+        assert!(!world.may_hold([16, 70, 0], [17, 71, 1], nine));
+        assert!(world.may_hold([16, 70, 0], [17, 71, 1], |s| s.0 == 0));
+        // Past the top, and the palette of air below it.
+        assert!(!world.may_hold([0, 400, 0], [0, 401, 0], nine));
+        assert!(world.may_hold([0, 400, 0], [0, 401, 0], |s| s.0 == 0));
     }
 }

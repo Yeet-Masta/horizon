@@ -58,6 +58,8 @@ pub(in crate::game) struct CommandExtras {
     /// The `CommandResultCallback` results of the outermost source, when a
     /// harness records them.
     pub results: Option<Vec<(bool, i32)>>,
+    /// The running `/pregen` task.
+    pub pregen: Option<super::pregen::PregenTask>,
 }
 
 use horizon_core::version::{BUILD_TIME, DATA_VERSION, STABLE, VANILLA_VERSION, VERSION_ID};
@@ -213,8 +215,22 @@ impl Game<'_> {
 
     // ---- /waypoint ------------------------------------------------------
 
+    /// A guest's body is only `Player` during its turn; retained command state
+    /// must use its connection so the next server tick still finds that body.
+    pub(super) fn waypoint_target(&self, t: Target) -> Target {
+        match t {
+            Target::Player => self.lan_acting.map_or(t, Target::Guest),
+            _ => t,
+        }
+    }
+
     /// A living entity's `waypoint_transmit_range` (`isTransmittingWaypoint`).
     fn transmit_range(&mut self, t: Target) -> f64 {
+        if matches!(t, Target::Guest(_)) {
+            return self
+                .for_player(t, |g| g.transmit_range(Target::Player))
+                .unwrap_or(0.0);
+        }
         if t == Target::Player {
             return self
                 .player
@@ -243,7 +259,7 @@ impl Game<'_> {
     fn waypoint_transmitters(&mut self) -> Vec<Target> {
         if self.cmds.waypoints.is_none() {
             let tracked = if self.transmit_range(Target::Player) > 0.0 {
-                vec![Target::Player]
+                vec![self.waypoint_target(Target::Player)]
             } else {
                 Vec::new()
             };
@@ -256,6 +272,12 @@ impl Game<'_> {
             .collect();
         self.cmds.waypoints = Some(alive.clone());
         alive
+            .into_iter()
+            .map(|t| match t {
+                Target::Guest(conn) if self.lan_acting == Some(conn) => Target::Player,
+                _ => t,
+            })
+            .collect()
     }
     /// The waypoint part of a living entity's tick: dirty transmit ranges
     /// track or untrack it.
@@ -278,7 +300,7 @@ impl Game<'_> {
     fn waypoint_icon(&self, t: Target) -> WaypointIcon {
         self.cmds
             .waypoint_icons
-            .get(&t)
+            .get(&self.waypoint_target(t))
             .cloned()
             .unwrap_or_default()
     }
@@ -388,6 +410,7 @@ impl Game<'_> {
                 &[Text::colored(name, rgb)],
             )
         };
+        let t = self.waypoint_target(t);
         self.cmds.waypoint_icons.insert(t, icon);
         // WaypointCommand.mutateIcon: untrack, change, track again.
         self.waypoint_transmitters();
@@ -607,6 +630,7 @@ impl Game<'_> {
                 .hub
                 .guests
                 .iter()
+                .filter(|g| lan.hub.singleplayer_owner != Some(g.uuid))
                 .filter(|g| match &s.player_name {
                     Some(name) => g.name.eq_ignore_ascii_case(name),
                     None => s.kind == 'a' || s.kind == 'e',
@@ -618,7 +642,7 @@ impl Game<'_> {
         if host.is_empty() && guests.is_empty() {
             return Err(err("argument.entity.notfound.player", &[]));
         }
-        if self.lan.is_none() {
+        if self.lan.is_none() || (self.serving() && self.published_port().is_none()) {
             return Err(err("commands.kick.singleplayer.failed", &[]));
         }
         let reason_raw = match ctx.get("reason") {

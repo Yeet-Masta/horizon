@@ -32,3 +32,6 @@
 /crash-reports/
 /debug/
 /web/dist/
+
+# Release-only compiled original exporter bundle.
+/exporters/

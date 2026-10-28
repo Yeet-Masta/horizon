@@ -54,6 +54,27 @@ fn strider_liquid_shape() -> VoxelShape {
     VoxelShape::from_cube([1, 2, 1], &[true, false]).expect("a valid half-block column")
 }
 
+// Vanilla scopes this direction to Entity.move while a piston pushes it.
+thread_local! {
+    static PISTON_NOCLIP: std::cell::Cell<Option<horizon_core::geometry::Direction>> = const { std::cell::Cell::new(None) };
+}
+
+/// Suppress the moving part of pistons moving in this direction during a push.
+pub fn with_piston_noclip<T>(
+    direction: horizon_core::geometry::Direction,
+    f: impl FnOnce() -> T,
+) -> T {
+    struct Reset(Option<horizon_core::geometry::Direction>);
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            PISTON_NOCLIP.with(|value| value.set(self.0));
+        }
+    }
+    let previous = PISTON_NOCLIP.with(|value| value.replace(Some(direction)));
+    let _reset = Reset(previous);
+    f()
+}
+
 pub struct SceneCollisions<'w, 'r> {
     pub world: &'w World,
     pub binding: &'w BlockCollisionRegistry<'r>,
@@ -91,6 +112,13 @@ impl<W: BlockCollisionWorld> BlockCollisionWorld for EntityCollisions<'_, W> {
         p: BlockPos,
     ) -> std::result::Result<bool, Self::Error> {
         self.blocks.is_suffocating(chunk, block, p)
+    }
+    fn may_reach_out(
+        &mut self,
+        chunk: Self::Chunk,
+        section_y: i32,
+    ) -> std::result::Result<bool, Self::Error> {
+        self.blocks.may_reach_out(chunk, section_y)
     }
     fn context_shape(
         &mut self,
@@ -131,6 +159,42 @@ impl<W: EntityMovementWorld<Error = io::Error>> EntityMovementWorld for EntityCo
             return Ok(None);
         }
         border.collision_shape().map(Some).map_err(io::Error::other)
+    }
+}
+impl<'a, W> EntityCollisions<'a, W>
+where
+    W: BlockCollisionWorld<Error = io::Error> + EntityMovementWorld<Error = io::Error>,
+{
+    /// `EntityCollisions` for a body the world border also stops: the border
+    /// and the body's own x and z (`WorldBorder.isInsideCloseToBorder`).
+    pub fn with_border(blocks: W, border: &'a BorderGeometry, at: [f64; 2]) -> Self {
+        Self {
+            blocks,
+            entities: &[],
+            border: Some((border, at)),
+        }
+    }
+    /// `SceneCollisions::resolve` that also stops at the entity boxes and,
+    /// with a border, at the world border's walls.
+    pub fn resolve(
+        &mut self,
+        bounds: Aabb,
+        movement: Vec3,
+        max_step: f32,
+        on_ground: bool,
+    ) -> Result<Vec3> {
+        Ok(resolve_world_movement(
+            self,
+            MovementRequest {
+                entity: EntityIdentity(0),
+                context: CollisionContext::position(bounds.min_position().y),
+                bounds,
+                movement,
+                max_step,
+                on_ground,
+                candidate_budget: 1_000_000,
+            },
+        )?)
     }
 }
 impl SceneCollisions<'_, '_> {
@@ -238,6 +302,17 @@ impl<'w> BlockCollisionWorld for SceneCollisions<'w, '_> {
     fn collision_block(&mut self, chunk: Self::Chunk, p: BlockPos) -> io::Result<CollisionBlock> {
         self.binding.collision_block(chunk.block(p.x, p.y, p.z))
     }
+    /// From the section's palette, without reading its blocks; a palette
+    /// of the whole registry reads every cell.
+    fn may_reach_out(&mut self, chunk: Self::Chunk, section_y: i32) -> io::Result<bool> {
+        let blocks = usize::try_from(section_y - (crate::chunk::MIN_Y >> 4))
+            .ok()
+            .and_then(|s| chunk.sections.get(s))
+            .map(|section| &section.blocks);
+        Ok(blocks.is_none_or(|blocks| {
+            blocks.is_global() || blocks.maybe_has(|v| self.binding.reaches_out(BlockStateId(v)))
+        }))
+    }
     fn is_suffocating(
         &mut self,
         _: Self::Chunk,
@@ -282,7 +357,7 @@ impl DynamicSupportWorld for SceneCollisions<'_, '_> {
             return Ok(None);
         };
         pistons
-            .collision_shape(self, p, piston, None)
+            .collision_shape(self, p, piston, PISTON_NOCLIP.with(|value| value.get()))
             .map(Some)
             .map_err(io::Error::other)
     }
@@ -343,6 +418,42 @@ impl PowderSnowWorld for SceneCollisions<'_, '_> {
     }
     fn feet_are_leather_boots(&mut self, _: EntityIdentity) -> io::Result<bool> {
         Ok(self.subject.is_some_and(|s| s.leather_boots))
+    }
+}
+
+/// A collision world without blocks: no chunk is resident, so only the
+/// world border stops a body.
+pub struct EmptyCollisions;
+
+impl BlockCollisionWorld for EmptyCollisions {
+    type Error = io::Error;
+    type Chunk = ChunkPos;
+    fn collision_chunk(&mut self, _: ChunkPos) -> io::Result<Option<ChunkPos>> {
+        Ok(None)
+    }
+    fn collision_block(&mut self, _: ChunkPos, _: BlockPos) -> io::Result<CollisionBlock> {
+        Err(io::Error::other("no chunk is resident"))
+    }
+    fn is_suffocating(&mut self, _: ChunkPos, _: CollisionBlock, _: BlockPos) -> io::Result<bool> {
+        Ok(false)
+    }
+    fn context_shape(
+        &mut self,
+        _: CollisionBlock,
+        _: BlockPos,
+        _: &CollisionContext<'_>,
+    ) -> io::Result<VoxelShape> {
+        Ok(VoxelShape::empty())
+    }
+}
+
+impl EntityMovementWorld for EmptyCollisions {
+    type Error = io::Error;
+    fn entity_collisions(&mut self, _: EntityIdentity, _: Aabb) -> io::Result<Vec<VoxelShape>> {
+        Ok(Vec::new())
+    }
+    fn movement_border(&mut self, _: EntityIdentity, _: Aabb) -> io::Result<Option<VoxelShape>> {
+        Ok(None)
     }
 }
 
@@ -431,5 +542,72 @@ impl PowderSnowWorld for LookupCollisions<'_, '_> {
     }
     fn feet_are_leather_boots(&mut self, _: EntityIdentity) -> io::Result<bool> {
         Ok(false)
+    }
+}
+
+#[cfg(test)]
+mod piston_noclip_tests {
+    use super::*;
+    use horizon_core::geometry::Direction;
+
+    #[test]
+    fn piston_noclip_is_scoped_and_restored_after_unwind() {
+        assert_eq!(PISTON_NOCLIP.with(|value| value.get()), None);
+        with_piston_noclip(Direction::East, || {
+            assert_eq!(
+                PISTON_NOCLIP.with(|value| value.get()),
+                Some(Direction::East)
+            );
+            let _ =
+                std::panic::catch_unwind(|| with_piston_noclip(Direction::West, || panic!("test")));
+            assert_eq!(
+                PISTON_NOCLIP.with(|value| value.get()),
+                Some(Direction::East)
+            );
+        });
+        assert_eq!(PISTON_NOCLIP.with(|value| value.get()), None);
+    }
+}
+
+#[cfg(test)]
+mod border_movement_tests {
+    use super::*;
+
+    /// A border 10 wide around the origin: its wall's inner face is at x = 5.
+    fn border() -> BorderGeometry {
+        BorderGeometry::new([0.0, 0.0], 10.0, 29_999_984).expect("a border")
+    }
+
+    /// `WorldBorder.isInsideCloseToBorder` and `WorldBorder.getCollisionShape`:
+    /// a body inside close to the border collides with the border's walls.
+    #[test]
+    fn a_body_next_to_the_border_stops_at_its_wall() {
+        // A body 0.6 wide, 0.4 blocks short of the wall, moved east into it.
+        let bounds = Aabb::new(Vec3::new(4.0, 0.0, 0.0), Vec3::new(4.6, 1.8, 0.6));
+        let border = border();
+        let mut collisions = EntityCollisions::with_border(EmptyCollisions, &border, [4.3, 0.3]);
+        let moved = collisions
+            .resolve(bounds, Vec3::new(0.51, 0.0, 0.0), 0.0, false)
+            .expect("the movement resolves");
+        // The wall stops the body 0.4 blocks short of the whole move.
+        assert!(
+            (moved.x - 0.4).abs() < 1.0e-9,
+            "the body was not stopped by the border: {moved:?}"
+        );
+    }
+
+    /// Away from the border, the same body moves the whole way.
+    #[test]
+    fn a_body_away_from_the_border_moves_whole() {
+        let bounds = Aabb::new(Vec3::new(0.0, 0.0, 0.0), Vec3::new(0.6, 1.8, 0.6));
+        let border = border();
+        let mut collisions = EntityCollisions::with_border(EmptyCollisions, &border, [0.3, 0.3]);
+        let moved = collisions
+            .resolve(bounds, Vec3::new(0.51, 0.0, 0.0), 0.0, false)
+            .expect("the movement resolves");
+        assert!(
+            (moved.x - 0.51).abs() < 1.0e-9,
+            "the body did not move the whole way: {moved:?}"
+        );
     }
 }

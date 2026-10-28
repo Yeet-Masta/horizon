@@ -14,12 +14,7 @@ use crate::{
 use horizon_core::geometry::{Aabb, Direction, ShapeOp, Vec3, VoxelShape};
 use horizon_platform::fs::{self, File};
 use serde_json::Value;
-use std::{
-    collections::HashMap,
-    io::{self, BufReader},
-    path::Path,
-    sync::Arc,
-};
+use std::{collections::HashMap, io, path::Path, sync::Arc};
 #[path = "data/cache.rs"]
 mod cache;
 pub(super) use cache::set_dir as set_cache_dir;
@@ -571,6 +566,12 @@ props! {
     orientation = "orientation",
     crafting = "crafting",
     side_chain = "side_chain",
+    slot_0_occupied = "slot_0_occupied",
+    slot_1_occupied = "slot_1_occupied",
+    slot_2_occupied = "slot_2_occupied",
+    slot_3_occupied = "slot_3_occupied",
+    slot_4_occupied = "slot_4_occupied",
+    slot_5_occupied = "slot_5_occupied",
     copper_golem_pose = "copper_golem_pose",
     sculk_sensor_phase = "sculk_sensor_phase",
     shrieking = "shrieking",
@@ -582,8 +583,10 @@ fn fail(message: &str) -> io::Error {
     invalid(message)
 }
 
+/// From the file's bytes in memory: several times faster than through a
+/// reader on gameplay-facts.json (55 MB), which a first start parses.
 fn read_json(path: &Path) -> io::Result<Value> {
-    serde_json::from_reader(BufReader::new(File::open(path)?)).map_err(|e| invalid(e.to_string()))
+    serde_json::from_slice(&fs::read(path)?).map_err(|e| invalid(e.to_string()))
 }
 
 fn interned(cache: &mut HashMap<String, Arc<str>>, text: &str) -> Arc<str> {

@@ -3,9 +3,9 @@
 //! `ModelBlockRenderer`/`BlockModelLighter` (smooth light, ambient occlusion,
 //! cardinal shading, tint sources, block offsets; see `lighting`). Fluids
 //! follow `FluidRenderer` (see `fluid`).
-mod facing;
 mod fluid;
 mod lighting;
+mod sides;
 use crate::{
     assets::{Assets, RenderAssets},
     biome::Biomes,
@@ -13,7 +13,6 @@ use crate::{
     chunk::{Chunk, MIN_Y},
     models::catalog::BakedFace,
 };
-pub use facing::{FaceGroups, GROUPS as FACE_GROUPS};
 use horizon_core::{
     biome::BiomeZoom, geometry::Direction, position::BlockPos, random::position_seed,
 };
@@ -22,6 +21,7 @@ use horizon_world::{
     fluid::{FluidKind, FluidState},
     registry::BlockStateId,
 };
+pub use sides::Sides;
 use std::sync::Arc;
 
 /// An entity, item and effect vertex (the entity pipelines), with a face
@@ -36,9 +36,15 @@ pub struct Vertex {
     pub color: u32,
     /// Smooth light, 16x fixed point: sky in bits 0..8, block in bits 8..16.
     pub light: u32,
-    /// RGBA8_SNORM face normal; w = -127 for two-sided lighting, 0 to keep baked/unlit colour.
+    /// RGBA8_SNORM face normal; w = -127 for two-sided lighting, 0 to keep baked/unlit colour,
+    /// [`CULL_BACK`] to keep it and also drop back-facing pixels.
     pub normal: [i8; 4],
+    /// The `GLINT_TEXTURING` atlas UV for a foil item quad; zero elsewhere.
+    pub glint_uv: [f32; 2],
 }
+/// `Vertex::normal` of a baked-colour quad of an `entitySolid` model: the render type culls
+/// back faces, which the entity pipelines here do not, so `entity.wgsl` discards them.
+pub const CULL_BACK: [i8; 4] = [0, 0, 0, 1];
 /// A section vertex: vanilla's `DefaultVertexFormat.BLOCK` (position, colour,
 /// UV0, UV2) with the sprite's array layer beside the light, in 24 bytes
 /// rather than vanilla's 28: the UV is fixed point, which holds model UVs
@@ -55,7 +61,7 @@ pub struct TerrainVertex {
     /// UV within the sprite, `UV_STEPS` per unit (`TerrainVertex::new`,
     /// `terrain.wgsl`'s `terrain_uv`).
     pub(crate) uv: [u16; 2],
-    /// Sprite array layer, with `OPAQUE_LAYER` for opaque leaves.
+    /// Sprite array layer, with `OPAQUE_LAYER` for opaque leaves and quads over opaque texels.
     pub layer: u16,
     /// Smooth light, 16x fixed point: sky in the low byte, block in the high one.
     pub light: u16,
@@ -113,11 +119,21 @@ mod vertex_tests {
             assert!((a - b).abs() <= 0.5 / 32768.0, "{a} {b}");
         }
     }
+    #[test]
+    fn emission_keeps_the_colour_and_the_free_bits() {
+        let rgb = super::pack_rgb([0x12, 0x34, 0x56]);
+        assert_eq!(super::emitting(rgb, 0), rgb);
+        assert_eq!(super::emitting(rgb, 9), 0xF656_3412);
+        assert_eq!(super::emitting(rgb, 15), 0xF056_3412);
+        assert_eq!(super::emitting(rgb, 15) | super::EMISSION_BITS, rgb);
+    }
 }
 pub struct SectionMesh {
     pub solid: Vec<TerrainVertex>,
-    /// `solid`'s quads by the side they face (`facing`).
-    pub faces: FaceGroups,
+    /// The buckets `solid` is sorted in by the side its quads face: empty
+    /// until `sort_solid`, which the meshing workers call; `solid` is in
+    /// model order before.
+    pub sides: Sides,
     pub translucent: Vec<TerrainVertex>,
     /// VisGraph: bit `a * 6 + b` is set when faces `a` and `b` (Direction
     /// order) are connected through non-opaque blocks.
@@ -131,11 +147,18 @@ impl Default for SectionMesh {
     fn default() -> Self {
         Self {
             solid: Vec::new(),
-            faces: FaceGroups::default(),
+            sides: Sides::default(),
             translucent: Vec::new(),
             visibility: ALL_VISIBLE,
             block_entities: Vec::new(),
         }
+    }
+}
+impl SectionMesh {
+    /// Sorts the solid quads by the side they face, for the renderer to
+    /// leave out those facing away from the eye (`sides`).
+    pub fn sort_solid(&mut self) {
+        self.sides = sides::sort(&mut self.solid);
     }
 }
 pub const ALL_VISIBLE: u64 = (1 << 36) - 1;
@@ -557,6 +580,14 @@ impl Padded {
 }
 /// Set on a terrain vertex's sprite layer when its texture alpha must be ignored.
 pub const OPAQUE_LAYER: u16 = 1 << 15;
+/// The bits of `TerrainVertex::color`'s alpha byte that hold the light its face emits, for
+/// HDR output's highlights (`gfx/hdr.rs`): 15 minus the level, so the usual 0xFF means none.
+/// The byte's other four bits stay set.
+pub const EMISSION_BITS: u32 = 0x0F00_0000;
+/// `color` marked as emitting light `level` (0 to 15).
+pub fn emitting(color: u32, level: u8) -> u32 {
+    color & !EMISSION_BITS | u32::from(15 - level.min(15)) << 24
+}
 const UNSET: u32 = u32::MAX;
 const NO_BIOME: u16 = u16::MAX;
 /// The `ColorResolver`s `ClientLevel` caches block tints for.
@@ -692,12 +723,6 @@ pub struct Mesher<'a> {
 impl Mesher<'_> {
     /// `region[dz][dx]` are the chunks around the meshed column (centre 1,1).
     pub fn mesh(&mut self, region: &[[Option<&Chunk>; 3]; 3], sy: i32) -> SectionMesh {
-        let mut out = self.tesselate(region, sy);
-        out.faces = facing::group(&mut out.solid);
-        out
-    }
-    /// The section's quads in model order, before `facing::group`.
-    pub(crate) fn tesselate(&mut self, region: &[[Option<&Chunk>; 3]; 3], sy: i32) -> SectionMesh {
         let mut out = SectionMesh::default();
         let center = region[1][1].expect("centre chunk");
         let section = &center.sections[sy as usize];
@@ -715,6 +740,8 @@ impl Mesher<'_> {
             [center.x, center.z, base_y],
         );
         let info = &self.tables.info;
+        let catalog = &self.render.model_catalog;
+        let mut models = Vec::new();
         for y in 0..16 {
             for z in 0..16 {
                 for x in 0..16 {
@@ -744,13 +771,15 @@ impl Mesher<'_> {
                         continue;
                     }
                     let world = BlockPos::new(center.x * 16 + x, base_y + y, center.z * 16 + z);
-                    let Ok(models) = self.render.model_catalog.collect(BlockStateId(id), world)
-                    else {
+                    if catalog
+                        .models_at(BlockStateId(id), world, &mut models)
+                        .is_err()
+                    {
                         continue;
-                    };
+                    }
                     // ModelBlockRenderer: the first part decides smooth lighting
                     // for all; light-emitting blocks are always lit flat.
-                    let Some((_, first)) = models.first() else {
+                    let Some(first) = models.first() else {
                         continue;
                     };
                     let ao = self.smooth_lighting && state.emission == 0 && first.ambient_occlusion;
@@ -780,7 +809,7 @@ impl Mesher<'_> {
                                 )
                                 .unwrap_or(true);
                     }
-                    for (_, model) in &models {
+                    for model in &models {
                         for face in &model.faces {
                             if face.quad.cull.is_some_and(|d| !visible[d as usize]) {
                                 continue;
@@ -867,13 +896,14 @@ impl Mesher<'_> {
             target.push(TerrainVertex::new(
                 [p[0] + origin[0], p[1] + origin[1], p[2] + origin[2]],
                 q.uv[i],
-                // Opaque leaves (forceOpaque) draw in the solid layer: no alpha cutout.
-                if !self.cutout_leaves && state.leaves {
+                // Opaque leaves (forceOpaque) and quads over opaque texels draw in the
+                // solid layer: no alpha cutout (a dirt path's side skips its clear top row).
+                if face.opaque && !face.translucent || !self.cutout_leaves && state.leaves {
                     face.layer as u16 | OPAQUE_LAYER
                 } else {
                     face.layer as u16
                 },
-                pack_rgb(rgb),
+                emitting(pack_rgb(rgb), state.emission.max(q.light_emission)),
                 pack_coords(lighting::with_emission(coords[i], q.light_emission)),
             ));
         }

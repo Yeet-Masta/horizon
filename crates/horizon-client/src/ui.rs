@@ -282,9 +282,17 @@ pub fn centered_text(
     w: f32,
     color: u32,
 ) {
-    let width = atlas.font.width_text(text);
+    let text = text.resolved();
+    let width = atlas.font.width_text(&text);
     if width <= w {
-        batch.text_styled(atlas, text, x + ((w - width) / 2.0).floor(), y, color, true);
+        batch.text_styled(
+            atlas,
+            &text,
+            x + ((w - width) / 2.0).floor(),
+            y,
+            color,
+            true,
+        );
     } else {
         // Clip by characters (vanilla scrolls; we show the part that fits).
         let mut shown = Text::empty();
@@ -312,6 +320,7 @@ pub fn button(
     hover: bool,
 ) {
     crate::widgets::record(&label.plain(), [x, y, w, h], active);
+    crate::widgets::widget_cursor(hover, active);
     let sprite = if !active {
         "gui/sprites/widget/button_disabled"
     } else if hover {
@@ -652,6 +661,8 @@ pub struct EditBox {
     display: usize,
     pub max_length: usize,
     pub bordered: bool,
+    /// `MultiLineEditBox`: a book page keeps line breaks. A single-line box strips them.
+    pub multiline: bool,
     pub x: f32,
     pub y: f32,
     pub width: f32,
@@ -663,7 +674,7 @@ pub struct EditBox {
     pub text_color: u32,
 }
 /// The focused text field of a screen that keeps its values as `String`s
-/// (the world list's search, world names, seeds): the `EditBox` state that
+/// (the world list's search, world names, seeds, and the server screens): the `EditBox` state that
 /// outlives a frame, its cursor, selection and scroll.
 #[derive(Clone, Debug)]
 pub struct Caret {
@@ -824,6 +835,72 @@ fn byte_index(s: &str, chars: usize) -> usize {
 pub fn char_len(s: &str) -> usize {
     s.chars().count()
 }
+/// `EditBox.getWordPosition(dir, from)`: the character index `dir` words away
+/// from `from`. Forward, past the rest of the word and its spaces; backward,
+/// over any spaces to the start of the word.
+pub fn word_position(value: &str, dir: isize, from: usize) -> usize {
+    let chars: Vec<char> = value.chars().collect();
+    let mut pos = from.min(chars.len());
+    if dir < 0 {
+        while pos > 0 && chars[pos - 1] == ' ' {
+            pos -= 1;
+        }
+        while pos > 0 && chars[pos - 1] != ' ' {
+            pos -= 1;
+        }
+    } else {
+        while pos < chars.len() && chars[pos] != ' ' {
+            pos += 1;
+        }
+        while pos < chars.len() && chars[pos] == ' ' {
+            pos += 1;
+        }
+    }
+    pos
+}
+/// `MultilineTextField.getPreviousWord` / `getNextWord`'s `beginIndex` (a book page): any
+/// whitespace, line breaks included, separates words, and the search starts from the cursor
+/// clamped to the last character, as vanilla's does.
+pub fn multiline_word_position(value: &str, dir: isize, from: usize) -> usize {
+    let chars: Vec<char> = value.chars().collect();
+    if chars.is_empty() {
+        return 0;
+    }
+    let mut pos = from.min(chars.len() - 1);
+    if dir < 0 {
+        while pos > 0 && java_whitespace(chars[pos - 1]) {
+            pos -= 1;
+        }
+        while pos > 0 && !java_whitespace(chars[pos - 1]) {
+            pos -= 1;
+        }
+    } else {
+        while pos < chars.len() && !java_whitespace(chars[pos]) {
+            pos += 1;
+        }
+        while pos < chars.len() && java_whitespace(chars[pos]) {
+            pos += 1;
+        }
+    }
+    pos
+}
+/// `Character.isWhitespace`: Unicode spaces and line breaks but not the no-break spaces, plus
+/// the ASCII separators U+001C to U+001F.
+fn java_whitespace(c: char) -> bool {
+    (c.is_whitespace() && !matches!(c, '\u{85}' | '\u{a0}' | '\u{2007}' | '\u{202f}'))
+        || ('\u{1c}'..='\u{1f}').contains(&c)
+}
+/// `EditBox.deleteWords(dir)` for an append-only field, whose caret is at the
+/// end: removes the word in that direction. True when the value changed.
+pub fn delete_words(value: &mut String, dir: isize) -> bool {
+    let len = char_len(value);
+    let to = word_position(value, dir, len);
+    if to == len {
+        return false;
+    }
+    value.truncate(byte_index(value, to));
+    true
+}
 impl crate::clipboard::Editable for EditBox {
     fn select_all(&mut self) {
         self.move_cursor_to_end(false);
@@ -847,6 +924,7 @@ impl EditBox {
             display: 0,
             max_length: 32,
             bordered: true,
+            multiline: false,
             x,
             y,
             width,
@@ -877,6 +955,10 @@ impl EditBox {
     pub fn reset_blink(&mut self) {
         self.focused_at = Instant::now();
     }
+    /// The caret is showing (`EditBox`'s blink, on for 300 ms of every 600).
+    pub fn cursor_visible(&self) -> bool {
+        self.focused && (self.focused_at.elapsed().as_millis() / 300).is_multiple_of(2)
+    }
     pub fn set_value(&mut self, value: &str) {
         self.value = value.chars().take(self.max_length).collect();
         self.move_cursor_to_end(false);
@@ -894,7 +976,7 @@ impl EditBox {
     /// EditBox.insertText: replace the selection, respecting the maximum length.
     pub fn insert_text(&mut self, text: &str) {
         let (a, b) = self.selected();
-        let filtered = crate::clipboard::filter_text(text, false);
+        let filtered = crate::clipboard::filter_text(text, self.multiline);
         let room = self
             .max_length
             .saturating_sub(char_len(&self.value) - (b - a));
@@ -920,27 +1002,13 @@ impl EditBox {
     pub fn word_position(&self, dir: isize) -> usize {
         self.word_position_from(dir, self.cursor)
     }
-    /// EditBox.getWordPosition(dir, from).
+    /// EditBox.getWordPosition(dir, from), or MultilineTextField's word for a book page.
     fn word_position_from(&self, dir: isize, from: usize) -> usize {
-        let chars: Vec<char> = self.value.chars().collect();
-        let mut pos = from.min(chars.len());
-        if dir < 0 {
-            while pos > 0 && chars[pos - 1] == ' ' {
-                pos -= 1;
-            }
-            while pos > 0 && chars[pos - 1] != ' ' {
-                pos -= 1;
-            }
+        if self.multiline {
+            multiline_word_position(&self.value, dir, from)
         } else {
-            let len = chars.len();
-            while pos < len && chars[pos] != ' ' {
-                pos += 1;
-            }
-            while pos < len && chars[pos] == ' ' {
-                pos += 1;
-            }
+            word_position(&self.value, dir, from)
         }
-        pos
     }
     pub fn set_cursor(&mut self, pos: usize, select: bool) {
         self.cursor = pos.min(char_len(&self.value));
@@ -1453,5 +1521,48 @@ mod tests {
         e.insert_text("é§x");
         assert_eq!(e.value, "éx worl");
         assert_eq!(e.cursor, 2);
+    }
+    #[test]
+    fn word_position_steps_over_a_word_and_its_spaces() {
+        assert_eq!(word_position("hello world", -1, 11), 6);
+        assert_eq!(word_position("hello world", -1, 6), 0);
+        assert_eq!(word_position("hello   world", -1, 13), 8);
+        assert_eq!(word_position("hello   world", 1, 5), 8);
+        // From inside a word: back to its start, forward past it and its spaces.
+        assert_eq!(word_position("hello world", -1, 8), 6);
+        assert_eq!(word_position("hello world", 1, 2), 6);
+        // The ends, and a position past the end.
+        assert_eq!(word_position("hello", -1, 0), 0);
+        assert_eq!(word_position("hello", 1, 5), 5);
+        assert_eq!(word_position("hi", -1, 99), 0);
+        assert_eq!(word_position("hi", 1, 99), 2);
+    }
+    #[test]
+    fn multiline_words_split_at_any_whitespace() {
+        // Ctrl+Backspace at the end of `one\ntwo` deletes `two` only.
+        assert_eq!(multiline_word_position("one\ntwo", -1, 7), 4);
+        // From the end the search starts at the last character, as vanilla's does.
+        assert_eq!(multiline_word_position("one\n", -1, 4), 0);
+        assert_eq!(multiline_word_position("a b", -1, 3), 0);
+        assert_eq!(multiline_word_position("one\n\ntwo", 1, 0), 5);
+        assert_eq!(multiline_word_position("one\u{a0}two", 1, 0), 7);
+        assert_eq!(multiline_word_position("", -1, 0), 0);
+    }
+    #[test]
+    fn delete_words_removes_the_word_before_the_end() {
+        let mut v = "stone bricks".to_string();
+        assert!(delete_words(&mut v, -1));
+        assert_eq!(v, "stone ");
+        assert!(delete_words(&mut v, -1));
+        assert_eq!(v, "");
+        assert!(!delete_words(&mut v, -1));
+        // Characters, not bytes.
+        let mut v = "a é§x".to_string();
+        assert!(delete_words(&mut v, -1));
+        assert_eq!(v, "a ");
+        // Nothing after the end to delete.
+        let mut v = "stone".to_string();
+        assert!(!delete_words(&mut v, 1));
+        assert_eq!(v, "stone");
     }
 }

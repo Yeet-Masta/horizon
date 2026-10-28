@@ -1,7 +1,7 @@
 //! Biome colours from the pinned biome definitions and colormaps
 //! (`Biome.getGrassColor`/`getFoliageColor`/..., `BlockTintSources`).
 use crate::Result;
-use horizon_core::{noise::SimplexNoise, random::LegacyRandom};
+use horizon_core::{noise::SimplexNoise, position::BlockPos, random::LegacyRandom};
 use horizon_platform::fs;
 use serde_json::Value;
 use std::{collections::HashMap, path::Path};
@@ -21,16 +21,77 @@ pub struct SpawnEntry {
     /// A `ConstantInt` count (sampling draws nothing).
     pub constant: bool,
 }
+/// A `natural_mob_spawns` / `spawn_overrides` entry list.
+pub fn parse_entries(list: &Value) -> Vec<SpawnEntry> {
+    list.as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|e| {
+            let count = &e["count"];
+            let (min, max, constant) = match count {
+                Value::Number(n) => {
+                    let n = n.as_u64().unwrap_or(1) as u32;
+                    (n, n, true)
+                }
+                c if c["type"].as_str() == Some("minecraft:constant") => {
+                    let n = c["value"].as_u64().unwrap_or(1) as u32;
+                    (n, n, true)
+                }
+                c => (
+                    c["min_inclusive"].as_u64().unwrap_or(1) as u32,
+                    c["max_inclusive"].as_u64().unwrap_or(1) as u32,
+                    false,
+                ),
+            };
+            Some(SpawnEntry {
+                entity: e["type"].as_str()?.to_owned(),
+                weight: e["weight"].as_u64().unwrap_or(1) as u32,
+                min,
+                max,
+                constant,
+            })
+        })
+        .collect()
+}
+/// `MobSpawnSettings.MobSpawnCost`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SpawnCost {
+    pub energy_budget: f64,
+    pub charge: f64,
+}
+/// The `spawn_costs` of a `natural_mob_spawns` value.
+pub fn parse_costs(costs: &Value) -> HashMap<String, SpawnCost> {
+    costs
+        .as_object()
+        .into_iter()
+        .flatten()
+        .map(|(k, c)| {
+            (
+                k.clone(),
+                SpawnCost {
+                    energy_budget: c["energy_budget"].as_f64().unwrap_or(0.0),
+                    charge: c["charge"].as_f64().unwrap_or(0.0),
+                },
+            )
+        })
+        .collect()
+}
+
 #[derive(Clone, Debug)]
 pub struct BiomeInfo {
     /// `natural_mob_spawns` by category (creature, monster, ...).
     pub spawns: HashMap<String, Vec<SpawnEntry>>,
     /// `natural_mob_spawns` spawn costs by entity type.
-    pub spawn_costs: HashMap<String, crate::mobs::spawn_selection::SpawnCost>,
+    pub spawn_costs: HashMap<String, SpawnCost>,
     /// The `gameplay/creature_world_gen_spawn_probability` attribute.
     pub creature_probability: f32,
+    /// The `gameplay/increased_fire_burnout` attribute (jungles, swamps, peaks,
+    /// mushroom fields).
+    pub increased_fire_burnout: bool,
     pub name: String,
     pub temperature: f32,
+    /// `temperature_modifier: frozen` (the frozen oceans).
+    pub frozen: bool,
     pub downfall: f32,
     pub precipitation: bool,
     pub grass: u32,
@@ -42,6 +103,33 @@ pub struct BiomeInfo {
     /// The biome's own fog colour attribute; otherwise the dimension's applies.
     pub fog: Option<u32>,
     pub water_fog: u32,
+}
+impl BiomeInfo {
+    /// `Biome.getHeightAdjustedTemperature`: the frozen modifier, then cooler
+    /// with height above `sea_level + 17`.
+    pub fn temperature_at(&self, pos: BlockPos, sea_level: i32) -> f32 {
+        use horizon_world::worldgen::biome_temperature::{
+            BiomeTemperatureSettings, TemperatureModifier,
+        };
+        BiomeTemperatureSettings {
+            base_temperature: self.temperature,
+            modifier: if self.frozen {
+                TemperatureModifier::Frozen
+            } else {
+                TemperatureModifier::None
+            },
+            has_precipitation: self.precipitation,
+            downfall: self.downfall,
+        }
+        .height_adjusted(pos, sea_level)
+    }
+    /// `Biome.getPrecipitationAt` in the Overworld (sea level 63): None
+    /// without precipitation, else whether it falls as snow
+    /// (`getHeightAdjustedTemperature` below 0.15).
+    pub fn snows_at(&self, x: i32, y: i32, z: i32) -> Option<bool> {
+        self.precipitation
+            .then(|| self.temperature_at(BlockPos::new(x, y, z), 63) < 0.15)
+    }
 }
 pub struct Biomes {
     pub list: Vec<BiomeInfo>,
@@ -119,17 +207,21 @@ impl Biomes {
             };
             let categories = &natural["spawns_by_category"];
             for (category, entries) in categories.as_object().into_iter().flatten() {
-                let list = crate::mobs::spawn_selection::parse_entries(entries);
+                let list = parse_entries(entries);
                 spawns.insert(category.clone(), list);
             }
             list.push(BiomeInfo {
                 spawns,
-                spawn_costs: crate::mobs::spawn_selection::parse_costs(&natural["spawn_costs"]),
+                spawn_costs: parse_costs(&natural["spawn_costs"]),
                 creature_probability:
                     attributes["minecraft:gameplay/creature_world_gen_spawn_probability"]
                         .as_f64()
                         .unwrap_or(0.1) as f32,
+                increased_fire_burnout: attributes["minecraft:gameplay/increased_fire_burnout"]
+                    .as_bool()
+                    .unwrap_or(false),
                 temperature,
+                frozen: v["temperature_modifier"].as_str() == Some("frozen"),
                 downfall,
                 precipitation: v["has_precipitation"].as_bool().unwrap_or(true),
                 grass: color(&effects["grass_color"])

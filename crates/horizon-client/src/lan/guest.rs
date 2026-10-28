@@ -2,7 +2,12 @@
 //! player state (inventory, health, game mode) that the host's gameplay code
 //! operates on when it acts for them.
 use super::{Joined, PlayerSender, entity::Tracker};
-use crate::{items::ItemStack, motion::PlayerMotion};
+use crate::{
+    items::ItemStack,
+    motion::PlayerMotion,
+    pose::{Dimensions, Pose},
+};
+use horizon_core::geometry::{Aabb, Vec3};
 use horizon_protocol::{
     item::Stack,
     packets::{configuration::ClientInformation, play},
@@ -210,7 +215,7 @@ pub struct Guest {
     /// last sent about itself.
     pub sent_shared: i8,
     /// Where the player last died (Player.lastDeathLocation), sent with the respawn.
-    pub last_death: Option<[i32; 3]>,
+    pub last_death: Option<(String, [i32; 3])>,
     /// The last action sequence to acknowledge at the next tick (-1: none).
     pub ack_up_to: std::cell::Cell<i32>,
     pub sent_selected: usize,
@@ -223,6 +228,8 @@ pub struct Guest {
     /// Whether the guest was on the ground before the first of `moves`.
     pub moves_from_ground: bool,
     pub dead: bool,
+    /// `LivingEntity.deathTime`: ticks since the guest died.
+    pub death_time: u32,
     /// The join packets were sent (PlayerList.placeNewPlayer ran).
     pub placed: bool,
     /// The level the player is in (`ServerPlayer.level().dimension()`): the
@@ -235,6 +242,8 @@ pub struct Guest {
     pub drag: Option<(u8, Vec<usize>)>,
     /// The compound this player was loaded from, for fields Horizon does not model.
     pub saved: Option<horizon_world::nbt::Tag>,
+    /// `ServerPlayer.seenCredits`: the end poem has been shown.
+    pub seen_credits: bool,
     /// `ServerPlayer.recipeBook`.
     pub recipe_book: crate::recipe_book::Settings,
     /// `PlayerAdvancements`: the criteria obtained, whether they came from
@@ -349,12 +358,14 @@ impl Guest {
             moves: Vec::new(),
             moves_from_ground: false,
             dead: false,
+            death_time: 0,
             placed: false,
             dimension: "minecraft:overworld".into(),
             menu: None,
             next_window: 0,
             drag: None,
             saved: None,
+            seen_credits: false,
             recipe_book: Default::default(),
             advancements: Default::default(),
             advancements_loaded: false,
@@ -401,8 +412,52 @@ impl Guest {
         }
         f
     }
+    /// `Player.getDesiredPose`: sleeping, gliding, then the body's own pose
+    /// (swimming, crawling, crouching) once its server tick has run.
+    pub fn pose(&self) -> Pose {
+        if self.sleeping {
+            Pose::Sleeping
+        } else if self.fall_flying {
+            Pose::FallFlying
+        } else if let Some(m) = &self.motion {
+            m.pose
+        } else if self.sneaking && !self.flying {
+            Pose::Crouching
+        } else {
+            Pose::Standing
+        }
+    }
+    /// `Avatar.POSES` for the guest's pose, with its scale attribute.
+    pub fn dimensions(&self) -> Dimensions {
+        let pose = self.pose();
+        match &self.motion {
+            Some(m) if m.pose == pose => m.dimensions,
+            _ => pose.dimensions(1.0),
+        }
+    }
+    /// `Entity.getBoundingBox`.
+    pub fn bounds(&self) -> Aabb {
+        let [x, y, z] = self.position;
+        let d = self.dimensions();
+        let half = f64::from(d.width) / 2.0;
+        Aabb::new(
+            Vec3::new(x - half, y, z - half),
+            Vec3::new(x + half, y + f64::from(d.height), z + half),
+        )
+    }
     pub fn eye_height(&self) -> f64 {
-        if self.sneaking { 1.27 } else { 1.62 }
+        f64::from(self.dimensions().eye_height)
+    }
+    /// `Player.isWithinBlockInteractionRange(pos, buffer)` for the guest:
+    /// its block interaction range is 4.5, 5 in creative.
+    pub fn within_block_range(&self, pos: [i32; 3], buffer: f64) -> bool {
+        let eye = [
+            self.position[0],
+            self.position[1] + self.eye_height(),
+            self.position[2],
+        ];
+        let range = if self.creative() { 5.0 } else { 4.5 };
+        within_block_range(eye, range + buffer, pos)
     }
     /// The inventory menu's 46 slots (ServerPlayer.inventoryMenu): 0 crafting
     /// result, 1..=4 crafting grid, 5..=8 armor, 9..=35 main, 36..=44 hotbar,
@@ -431,19 +486,59 @@ impl Guest {
     }
 }
 
+/// `FireworkExplosion.STREAM_CODEC`'s fields (`Shape` by its BY_ID order).
+fn network_explosion(
+    e: &crate::particles::FireworkExplosion,
+) -> horizon_protocol::item::FireworkExplosion {
+    horizon_protocol::item::FireworkExplosion {
+        shape: e.shape as i32,
+        colors: e.colors.iter().map(|c| *c as i32).collect(),
+        fade: e.fade.iter().map(|c| *c as i32).collect(),
+        trail: e.trail,
+        twinkle: e.twinkle,
+    }
+}
+
+/// A rocket's `minecraft:fireworks` and a star's `minecraft:firework_explosion`.
+pub fn firework_components(
+    d: &crate::item_data::StackData,
+) -> Vec<(i32, horizon_protocol::item::Component)> {
+    use horizon_protocol::item::{Component, component};
+    let mut out = Vec::new();
+    if let Some((flight, explosions)) = &d.fireworks {
+        out.push((
+            component::FIREWORKS,
+            Component::Fireworks {
+                flight: i32::from(*flight),
+                explosions: explosions.iter().map(network_explosion).collect(),
+            },
+        ));
+    }
+    if let Some(e) = &d.firework_explosion {
+        out.push((
+            component::FIREWORK_EXPLOSION,
+            Component::FireworkExplosion(network_explosion(e)),
+        ));
+    }
+    out
+}
+
 /// The off hand slot is conventionally 40 in saves and 45 in the menu.
+/// `synced_id` names an entry of a synced registry (enchantments, trim
+/// materials and patterns) by its id on this connection.
 pub fn stack_to_network(
     item_id: impl Fn(&str) -> i32,
-    enchantment_id: impl Fn(&str) -> Option<i32>,
+    synced_id: impl Fn(&str, &str) -> Option<i32>,
     s: &Option<ItemStack>,
 ) -> Option<Stack> {
-    network_stack(&item_id, &enchantment_id, s)
+    network_stack(&item_id, &synced_id, s)
 }
 fn network_stack(
     item_id: &dyn Fn(&str) -> i32,
-    enchantment_id: &dyn Fn(&str) -> Option<i32>,
+    synced_id: &dyn Fn(&str, &str) -> Option<i32>,
     s: &Option<ItemStack>,
 ) -> Option<Stack> {
+    let enchantment_id = |name: &str| synced_id("minecraft:enchantment", name);
     let s = s.as_ref()?;
     let mut stack = Stack::new(item_id(&s.item), s.count as i32);
     if s.damage > 0 {
@@ -481,6 +576,25 @@ fn network_stack(
                 horizon_protocol::item::Component::Int(rgb),
             ));
         }
+        // ArmorTrim: both holders as references into the synced registries.
+        if let Some((material, pattern)) = &d.trim {
+            let id = |registry: &str, name: &str| {
+                if name.contains(':') {
+                    synced_id(registry, name)
+                } else {
+                    synced_id(registry, &format!("minecraft:{name}"))
+                }
+            };
+            if let (Some(material), Some(pattern)) = (
+                id("minecraft:trim_material", material),
+                id("minecraft:trim_pattern", pattern),
+            ) {
+                stack.added.push((
+                    horizon_protocol::item::component::TRIM,
+                    horizon_protocol::item::Component::Trim { material, pattern },
+                ));
+            }
+        }
         if let Some(id) = d.map_id {
             stack.added.push((
                 horizon_protocol::item::component::MAP_ID,
@@ -499,16 +613,60 @@ fn network_stack(
                 horizon_protocol::item::Component::Int(i32::from(mode)),
             ));
         }
+        stack.added.extend(firework_components(d));
+        // The compass's lodestone target.
+        if let Some(t) = d.other("minecraft:lodestone_tracker") {
+            let target = t.get("target").and_then(|g| {
+                let Some(horizon_world::nbt::Tag::IntArray(pos)) = g.get("pos") else {
+                    return None;
+                };
+                let dimension = crate::save::text(g.get("dimension"))?;
+                Some((dimension, [*pos.first()?, *pos.get(1)?, *pos.get(2)?]))
+            });
+            let tracked = crate::save::number(t.get("tracked")).is_none_or(|v| v != 0);
+            stack.added.push((
+                horizon_protocol::item::component::LODESTONE_TRACKER,
+                horizon_protocol::item::Component::LodestoneTracker { target, tracked },
+            ));
+        }
+        // PotionContents: the potion by its `minecraft:potion` id.
+        if let Some(id) = (d.potion.as_deref()).and_then(|potion| {
+            synced_id(
+                "minecraft:potion",
+                &horizon_world::datafix::dynamic::namespaced(potion),
+            )
+        }) {
+            stack.added.push((
+                horizon_protocol::item::component::POTION_CONTENTS,
+                horizon_protocol::item::Component::Potion {
+                    potion: Some(id),
+                    color: None,
+                    rest: Vec::new(),
+                },
+            ));
+        }
         // A loaded crossbow's ammunition.
         if !d.charged.is_empty() {
             let charged = d
                 .charged
                 .iter()
-                .filter_map(|c| network_stack(item_id, enchantment_id, &Some(c.clone())))
+                .filter_map(|c| network_stack(item_id, synced_id, &Some(c.clone())))
                 .collect();
             stack.added.push((
                 horizon_protocol::item::component::CHARGED_PROJECTILES,
                 horizon_protocol::item::Component::Stacks(charged),
+            ));
+        }
+        // What a bundle holds, for its tooltip (ClientBundleTooltip).
+        if !d.bundle_contents.is_empty() {
+            let contents = d
+                .bundle_contents
+                .iter()
+                .filter_map(|c| network_stack(item_id, synced_id, &Some(c.clone())))
+                .collect();
+            stack.added.push((
+                horizon_protocol::item::component::BUNDLE_CONTENTS,
+                horizon_protocol::item::Component::Stacks(contents),
             ));
         }
         // The books a lectern shows and a guest reads.
@@ -526,11 +684,14 @@ fn network_stack(
                         title: w.title.clone(),
                         author: w.author.clone(),
                         generation: i32::from(w.generation),
-                        pages: w
-                            .pages
-                            .iter()
-                            .map(|p| horizon_protocol::text::literal(p))
-                            .collect(),
+                        pages: if w.page_tags.len() == w.pages.len() {
+                            w.page_tags.clone()
+                        } else {
+                            w.pages
+                                .iter()
+                                .map(|p| horizon_protocol::text::literal(p))
+                                .collect()
+                        },
                         resolved: true,
                     },
                 ),
@@ -543,5 +704,71 @@ fn network_stack(
             horizon_protocol::item::Component::Text(horizon_protocol::text::literal(name)),
         ));
     }
+    // The component as loaded, so a translatable name stays one.
+    if let Some(name) = s.data().and_then(|d| d.other("minecraft:item_name")) {
+        stack.added.push((
+            horizon_protocol::item::component::ITEM_NAME,
+            horizon_protocol::item::Component::Text(name.clone()),
+        ));
+    }
     Some(stack)
+}
+
+/// `Player.isWithinBlockInteractionRange`: `eye` closer than `range` to the
+/// box of the block at `pos` (`AABB.distanceToSqr`).
+pub fn within_block_range(eye: [f64; 3], range: f64, pos: [i32; 3]) -> bool {
+    (0..3)
+        .map(|k| {
+            let lo = f64::from(pos[k]);
+            (lo - eye[k]).max(eye[k] - lo - 1.0).max(0.0).powi(2)
+        })
+        .sum::<f64>()
+        < range * range
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use horizon_protocol::item::{Component, component};
+
+    #[test]
+    fn potions_go_as_potion_registry_ids() {
+        let synced_id = |registry: &str, name: &str| match (registry, name) {
+            ("minecraft:potion", "minecraft:swiftness") => Some(14),
+            _ => None,
+        };
+        let potion = ItemStack::new("minecraft:splash_potion", 1).with_potion("swiftness");
+        let stack = stack_to_network(|_| 7, synced_id, &Some(potion)).unwrap();
+        assert_eq!(
+            stack.component(component::POTION_CONTENTS),
+            Some(&Component::Potion {
+                potion: Some(14),
+                color: None,
+                rest: Vec::new(),
+            })
+        );
+    }
+
+    #[test]
+    fn trims_go_as_synced_registry_references() {
+        let mut chestplate = ItemStack::new("minecraft:diamond_chestplate", 1);
+        chestplate.data_mut().trim = Some(("minecraft:gold".into(), "coast".into()));
+        let synced_id = |registry: &str, name: &str| match (registry, name) {
+            ("minecraft:trim_material", "minecraft:gold") => Some(4),
+            ("minecraft:trim_pattern", "minecraft:coast") => Some(1),
+            _ => None,
+        };
+        let stack = stack_to_network(|_| 7, synced_id, &Some(chestplate.clone())).unwrap();
+        assert_eq!(
+            stack.component(component::TRIM),
+            Some(&Component::Trim {
+                material: 4,
+                pattern: 1
+            })
+        );
+        // A name the connection's registry lacks sends no trim.
+        chestplate.data_mut().trim = Some(("minecraft:x".into(), "coast".into()));
+        let stack = stack_to_network(|_| 7, synced_id, &Some(chestplate)).unwrap();
+        assert_eq!(stack.component(component::TRIM), None);
+    }
 }

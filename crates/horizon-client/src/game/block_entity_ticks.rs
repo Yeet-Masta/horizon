@@ -9,12 +9,16 @@ use horizon_client::{
     Result,
     block_entities::{Pos, Ticking},
     containers::{BlockEntity, FurnaceKind, HOPPER_SLOTS},
+    furnace::FurnaceCooking,
 };
+use horizon_core::position::BlockPos;
 use horizon_world::registry::BlockStateId;
 
 impl Game<'_> {
     pub(super) fn tick_block_entities(&mut self) -> Result<()> {
         self.tick_mount_menu();
+        self.tick_craft_table();
+        self.tick_container_reach();
         self.load_entity_types();
         if !self.world.block_entities.has_states() {
             let states = self.ticking_states();
@@ -54,6 +58,8 @@ impl Game<'_> {
                 Some(BlockEntity::Beehive(_)) => self.tick_beehive(pos),
                 Some(BlockEntity::Furnace(_)) => self.tick_furnace(pos)?,
                 Some(BlockEntity::Brewing(_)) => self.tick_brewing_stand(pos)?,
+                Some(BlockEntity::DaylightDetector) => self.tick_daylight_detector(pos),
+                Some(BlockEntity::Campfire(_)) => self.tick_campfire(pos)?,
                 _ => {}
             }
         }
@@ -90,7 +96,11 @@ impl Game<'_> {
                     | "minecraft:vault"
                     | "minecraft:beehive"
                     | "minecraft:bee_nest"
-                    | "minecraft:brewing_stand" => Ticking::Yes,
+                    | "minecraft:brewing_stand"
+                    | "minecraft:daylight_detector"
+                    // Lit, cookTick; unlit, cooldownTick.
+                    | "minecraft:campfire"
+                    | "minecraft:soul_campfire" => Ticking::Yes,
                     "minecraft:jukebox" => {
                         let record = registry
                             .state(state)
@@ -110,6 +120,16 @@ impl Game<'_> {
     fn block_ticking_area(&self) -> impl Fn(i32, i32) -> bool + use<> {
         let levels = self.tickets.levels();
         move |x, z| levels.block_ticking_at(x, z)
+    }
+    /// `DaylightDetectorBlock.tickEntity` of the detector at `pos`.
+    fn tick_daylight_detector(&mut self, pos: Pos) {
+        // It updates every 20 game ticks (the behaviour checks this too).
+        if self.world.game_time % 20 != 0 {
+            return;
+        }
+        let at = BlockPos::new(pos.0, pos.1, pos.2);
+        self.with_level(|b, level, ticks| b.tick_daylight_detector(level, ticks, at));
+        let _ = self.process_level_events();
     }
     /// `AbstractFurnaceBlockEntity.serverTick` of the furnace at `pos`, and
     /// its block's `lit` following it.

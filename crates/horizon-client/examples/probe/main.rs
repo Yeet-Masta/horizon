@@ -27,7 +27,9 @@ mod chat_screen_fixture;
 mod cloud_fixture;
 mod command_parse_fixture;
 mod container_screen_probe;
+mod creative_mining_probe;
 mod creative_search_fixture;
+mod cushion_placement_probe;
 mod emitter_particles_probe;
 mod enchanting_fixture;
 mod entity_anim_fixture;
@@ -49,6 +51,7 @@ mod input_probe;
 mod interaction_input_fixture;
 mod lan_probe;
 mod light_parity;
+mod lore_tooltip_fixture;
 mod marker_particles_probe;
 mod menu_fixture;
 mod mipmap_probe;
@@ -82,9 +85,11 @@ mod sound_engine_fixture;
 mod sound_event_fixture;
 mod spawn_rules_fixture;
 mod sprint_probe;
+mod squid_client_probe;
 mod subtitle_fixture;
 mod tab_list_fixture;
 mod team_rules_fixture;
+mod text_display_fixture;
 mod toggle_keys_probe;
 mod tooltip_display_fixture;
 mod trading_fixture;
@@ -105,6 +110,9 @@ probes! {
     block_transform_fixture,
     breaking_fixture,
     camera_probe,
+    squid_client_probe,
+    creative_mining_probe,
+    cushion_placement_probe,
     cauldron_fixture,
     chat_screen_fixture,
     cloud_fixture,
@@ -132,6 +140,7 @@ probes! {
     interaction_input_fixture,
     lan_probe,
     light_parity,
+    lore_tooltip_fixture,
     marker_particles_probe,
     menu_fixture,
     mipmap_probe,
@@ -170,6 +179,7 @@ probes! {
     team_rules_fixture,
     toggle_keys_probe,
     tooltip_display_fixture,
+    text_display_fixture,
     trading_fixture,
     translucency_fixture,
     weather_fixture,

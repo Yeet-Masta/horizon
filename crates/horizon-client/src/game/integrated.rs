@@ -17,7 +17,9 @@
 //! takes up when the world is open ([`Launch::pipe`]).
 use super::{
     Game, Options, PackResources, Resources, UiResources,
+    execution_role::ExecutionRole,
     lan::{LanSettings, Owner},
+    world_loading::WorldRequest,
 };
 use horizon_client::{
     Result,
@@ -36,7 +38,6 @@ use horizon_protocol::connection::Pipe;
 use horizon_protocol::{crypto::offline_uuid, text::translatable};
 use std::{
     net::TcpListener,
-    path::Path,
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicI32, AtomicU16, AtomicU32, Ordering},
@@ -59,6 +60,8 @@ struct Flags {
     /// server follows while it runs (IntegratedServer.tickServer).
     render_distance: AtomicI32,
     simulation_distance: AtomicI32,
+    /// `MinecraftServer.isCurrentlySaving`: the server is autosaving.
+    saving: AtomicBool,
 }
 
 /// Work the window hands its server thread (`MinecraftServer.execute`).
@@ -77,6 +80,10 @@ pub(super) struct Integrated {
 impl Integrated {
     pub fn smoothed_tick_ms(&self) -> f32 {
         f32::from_bits(self.flags.smoothed_tick_ms.load(Ordering::Relaxed))
+    }
+    /// `MinecraftServer.isCurrentlySaving`.
+    pub fn is_saving(&self) -> bool {
+        self.flags.saving.load(Ordering::Relaxed)
     }
     /// `IntegratedServer.tickServer` skips the world while the game is paused.
     pub fn set_paused(&self, paused: bool) {
@@ -165,10 +172,16 @@ pub(super) struct Serving {
     flags: Arc<Flags>,
     tasks: Receiver<Task>,
     /// The window's profile.
-    owner: u128,
+    pub(super) owner: u128,
     /// Open to LAN or closed from inside a player's command, while the hub
     /// is out of its place: applied after the tick.
     pending: Option<Publish>,
+}
+impl Serving {
+    /// The window reads this as `MinecraftServer.isCurrentlySaving`.
+    pub(super) fn set_saving(&self, saving: bool) {
+        self.flags.saving.store(saving, Ordering::Relaxed);
+    }
 }
 enum Publish {
     /// The web build has no listener: friends' browsers come in through the
@@ -197,11 +210,6 @@ struct Launch {
     /// The server's end of the pipe the window already joined through (the
     /// web build's); without one the server makes the pair.
     pipe: Option<Pipe>,
-}
-
-/// Whether this world opens on a server thread: asked for.
-pub(super) fn wanted(options: &Options, _world: &Path) -> bool {
-    options.server_thread && options.dedicated.is_none()
 }
 
 impl Game<'_> {
@@ -254,9 +262,10 @@ impl Game<'_> {
         };
         let mut options = self.options.clone();
         // A server without a console: no local player, no window, no control socket.
+        // Compatibility for gameplay checks outside startup/world loading.
         options.dedicated = Some(Vec::new());
         options.server_thread = false;
-        options.integrated = true;
+        options.execution_role = ExecutionRole::IntegratedServer;
         options.control = None;
         options.benchmark = None;
         options.frames = None;
@@ -264,7 +273,6 @@ impl Game<'_> {
         options.report = None;
         options.server = None;
         options.world = None;
-        options.dev_mods.clear();
         self.join_world_rest()?;
         let (res, pack, settings) = (self.res.clone(), self.pack.clone(), self.settings.clone());
         let flags = Arc::new(Flags::default());
@@ -331,14 +339,17 @@ impl Game<'_> {
         tasks: Receiver<Task>,
         ready: &Sender<Ready>,
     ) -> Result<()> {
-        self.open_world(
+        self.load_world(WorldRequest::new(
             &launch.folder,
             launch.name.as_deref(),
             launch.seed,
             launch.creative,
             launch.create.as_ref(),
-        )?;
+        )?)?;
         let saved = Box::new(self.level.clone());
+        // IntegratedServer runs the server mods; the window the client mods.
+        self.mods.dev = self.options.dev_mods.clone();
+        self.start_mods();
         // Math.max(2, options.renderDistance): past vanilla's 32 when the
         // window's render distance is (Horizon's options go to 64).
         let view_distance = self.settings.render_distance.max(2);
@@ -410,9 +421,25 @@ impl Game<'_> {
         });
         let _ = ready.send(Ok((pipe, self.level.name.clone())));
         self.settle_spawn()?;
+        if let (Some(script), Some(output)) = (
+            horizon_platform::env::var_os("HORIZON_COMMAND_SCRIPT"),
+            horizon_platform::env::var_os("HORIZON_COMMAND_OUTPUT"),
+        ) {
+            // The script owns the clock: connection setup and terrain loading
+            // cannot add wall-clock-dependent world ticks to oracle output.
+            let result = self.run_command_harness(script.as_ref(), output.as_ref());
+            let stopped = self.stop_integrated();
+            return result.and(stopped);
+        }
         let mut next = Instant::now();
         while !flags.stop.load(Ordering::Relaxed) {
             self.run_tasks();
+            if self.agent.hold_server {
+                // Keep servicing control requests so the fixture can release the barrier.
+                // Unlike /tick freeze, no player's queued packets are applied here.
+                self.wait_for_next_server_tick(&mut next, true);
+                continue;
+            }
             let paused = flags.paused.load(Ordering::Relaxed);
             if paused {
                 // Only the connections run.
@@ -443,6 +470,8 @@ impl Game<'_> {
             s.flags.published.store(0, Ordering::Relaxed);
         }
         if let Some(mut host) = self.lan.take() {
+            // PlayerList.removeAll: the owner and every guest leave the game.
+            host.award_leave_game_to_all();
             for g in &host.hub.guests {
                 self.save_guest(&host, g);
             }
@@ -752,6 +781,48 @@ fn serve(
     tasks: Receiver<Task>,
     ready: &Sender<Ready>,
 ) -> Result<()> {
+    let mut server = server_game(res, pack, options, settings)?;
+    server.run_integrated(launch, flags, tasks, ready)
+}
+
+/// Component oracles supply their own synthetic levels and entity phases.
+/// They still execute on a server Game, never the client's world.
+pub(super) enum ComponentHarness {
+    Dispenser(String),
+    Sculk(String),
+}
+
+impl Game<'_> {
+    pub(super) fn run_component_harness(&self, fixture: ComponentHarness) -> Result<()> {
+        let (res, pack, settings) = (self.res.clone(), self.pack.clone(), self.settings.clone());
+        let mut options = self.options.clone();
+        options.execution_role = ExecutionRole::IntegratedServer;
+        options.dedicated = Some(Vec::new());
+        options.server_thread = false;
+        let result = horizon_platform::thread::Builder::new()
+            .name("Server thread".into())
+            .spawn(move || {
+                let run = || -> Result<()> {
+                    let mut server = server_game(&res, pack, options, settings)?;
+                    match fixture {
+                        ComponentHarness::Dispenser(spec) => server.dispense_fixture(&spec),
+                        ComponentHarness::Sculk(spec) => server.sculk_fixture(&spec),
+                    }
+                };
+                run().map_err(|e| e.to_string())
+            })?
+            .join()
+            .map_err(|_| "the component harness server panicked")?;
+        result.map_err(Into::into)
+    }
+}
+
+fn server_game(
+    res: &Arc<Resources>,
+    pack: PackResources,
+    options: Options,
+    settings: Settings,
+) -> Result<Game<'_>> {
     // It draws nothing: only the font, which books and chat measure with.
     let atlas = HudAtlas::fonts(&options.resources)?;
     let gui = UiResources {
@@ -762,8 +833,7 @@ fn serve(
         }),
     };
     let audio = Audio::silent(&options.resources);
-    let mut server = Game::new(res, pack, gui, options, settings, audio, None)?;
-    server.run_integrated(launch, flags, tasks, ready)
+    Game::new(res, pack, gui, options, settings, audio, None)
 }
 
 #[cfg(test)]

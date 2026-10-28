@@ -1,11 +1,12 @@
 //! Creative inventory (CreativeModeInventoryScreen): vanilla's tabs and their
 //! contents as built by the game's own display generators
 //! (`creative-inventory.json`), a 9x5 scrolling grid and the search tab.
-use crate::{Result, items::ItemStack};
+use crate::{Result, items::ItemStack, ui::EditBox};
 use horizon_platform::fs;
 use horizon_platform::fs::PathExt as _;
+use horizon_platform::sync::Mutex;
 use serde_json::Value;
-use std::{collections::HashMap, path::Path};
+use std::{collections::HashMap, path::Path, sync::Arc};
 
 #[derive(Clone, Debug)]
 pub struct Tab {
@@ -37,13 +38,22 @@ pub struct Creative {
     pub scroll: f32,
     /// The scrollbar is held (scrolling): dragging moves it.
     pub scrolling: bool,
-    pub search: String,
-    /// When the search box took the focus (`EditBox.setFocused`): its
-    /// cursor blinks from then.
-    pub search_focused: horizon_platform::time::Instant,
+    /// CreativeModeInventoryScreen's search box: an unbordered `EditBox` of 50.
+    pub search: EditBox,
     /// The search tab's stacks, in its display order.
     search_items: Vec<ItemStack>,
     search_index: Vec<SearchEntry>,
+    /// ItemPickerMenu.items: what the grid shows, filled when the tab or the
+    /// search changes (selectTab, refreshSearchResults), not on every frame.
+    shown: Mutex<Option<Shown>>,
+}
+/// The grid's stacks for one tab, search text and language.
+struct Shown {
+    tab: usize,
+    search: String,
+    /// A display name, so a language change refills the search results.
+    language: String,
+    items: Arc<[ItemStack]>,
 }
 /// Display names from the pinned en_us language file.
 #[derive(Default)]
@@ -73,9 +83,51 @@ impl Names {
             .cloned()
             .unwrap_or_else(|| path.replace('_', " "))
     }
+    /// An item's display name in the selected language: `item.*` then
+    /// `block.*`, then the pinned English map (`Names::item`).
+    pub fn display_item(&self, id: &str) -> String {
+        let (namespace, path) = id.split_once(':').unwrap_or(("minecraft", id));
+        if let Some(lang) = crate::lang::current() {
+            for prefix in ["item", "block"] {
+                if let Some(name) = lang.get(&format!("{prefix}.{namespace}.{path}")) {
+                    return name.to_owned();
+                }
+            }
+        }
+        self.item(id)
+    }
+    /// A translation key's text in the selected language, else the pinned
+    /// English map (`HoverName` and tooltip keys such as potion names).
+    pub fn display_get(&self, key: &str) -> Option<String> {
+        crate::lang::current()
+            .and_then(|lang| lang.get(key).map(str::to_owned))
+            .or_else(|| self.get(key).map(str::to_owned))
+    }
     pub fn get(&self, key: &str) -> Option<&str> {
         self.map.get(key).map(String::as_str)
     }
+}
+
+/// `CreativeModeTabs`' key for an exported tab id (`itemGroup.*`); the
+/// export's `title` is the English fallback.
+pub fn item_group_key(id: &str) -> Option<&'static str> {
+    Some(match id.trim_start_matches("minecraft:") {
+        "building_blocks" => "itemGroup.buildingBlocks",
+        "colored_blocks" => "itemGroup.coloredBlocks",
+        "natural_blocks" => "itemGroup.natural",
+        "functional_blocks" => "itemGroup.functional",
+        "redstone_blocks" => "itemGroup.redstone",
+        "hotbar" => "itemGroup.hotbar",
+        "search" => "itemGroup.search",
+        "tools_and_utilities" => "itemGroup.tools",
+        "combat" => "itemGroup.combat",
+        "food_and_drinks" => "itemGroup.foodAndDrink",
+        "ingredients" => "itemGroup.ingredients",
+        "spawn_eggs" => "itemGroup.spawnEggs",
+        "op_blocks" => "itemGroup.op",
+        "inventory" => "itemGroup.inventory",
+        _ => return None,
+    })
 }
 impl Creative {
     pub const WIDTH: f32 = 195.0;
@@ -244,10 +296,16 @@ impl Creative {
             selected: 0,
             scroll: 0.0,
             scrolling: false,
-            search: String::new(),
-            search_focused: horizon_platform::time::Instant::now(),
+            search: {
+                let mut search = EditBox::new(0.0, 0.0, 80.0, 9.0);
+                search.bordered = false;
+                search.max_length = 50;
+                search.text_color = u32::MAX;
+                search
+            },
             search_items,
             search_index,
+            shown: Mutex::new(None),
         }
     }
     /// Where a stack comes in the creative tabs (the search tab lists them
@@ -260,23 +318,53 @@ impl Creative {
             .position(|s| s.same_item_same_components(stack))
             .or_else(|| items.iter().position(|s| s.item == stack.item))
     }
+    /// The tabs without their stacks: what the screen draws of them each frame.
+    pub fn tab_headers(&self) -> Vec<Tab> {
+        self.tabs
+            .iter()
+            .map(|t| Tab {
+                id: t.id.clone(),
+                title: t.title.clone(),
+                icon: t.icon.clone(),
+                items: Vec::new(),
+                top: t.top,
+                column: t.column,
+                search: t.search,
+                inventory: t.inventory,
+            })
+            .collect()
+    }
     pub fn tab(&self) -> &Tab {
         &self.tabs[self.selected.min(self.tabs.len() - 1)]
     }
     /// selectTab: a different tab empties the search box; the scrollbar goes to the top.
     pub fn select(&mut self, tab: usize) {
         if tab != self.selected {
-            self.search.clear();
+            self.search.set_value("");
         }
         self.selected = tab;
         self.scroll = 0.0;
         if self.tab().search {
-            self.search_focused = horizon_platform::time::Instant::now();
+            self.search.focused = true;
+            self.search.reset_blink();
         }
     }
     /// The search tab's stacks.
     pub fn search_items(&self) -> &[ItemStack] {
         &self.search_items
+    }
+    /// Opening the screen: vanilla rebuilds CreativeModeInventoryScreen, whose
+    /// init() makes a fresh search box and a zeroed scrollbar; only the tab
+    /// persists (its static selectedTab). selectTab on the reopened screen
+    /// takes the oldTab != tab branch, so it empties and refocuses the box.
+    pub fn reopen(&mut self) {
+        self.search.set_value("");
+        self.release();
+        self.scroll = 0.0;
+        self.search.focused = self.tab().search;
+        if self.search.focused {
+            self.search.reset_blink();
+        }
     }
     /// Indices into `search_items` that CreativeModeInventoryScreen.refreshSearchResults
     /// shows for `term`: the whole tab when empty, the tag tree after `#`, else
@@ -305,7 +393,17 @@ impl Creative {
                 .collect();
         }
         // FullTextSearchTree: tooltip lines, and the item id after a colon.
+        // The export's lines are English (they come from the vanilla jars);
+        // the hover name in the selected language is matched too, so a
+        // localized search finds the item. It is the whole name (a tipped
+        // arrow's potion, the ominous banner), as the first line is.
         let text = java_lower(term);
+        let localized = |i: usize| {
+            java_lower(&crate::item_tooltip::name_line(
+                &self.search_items[i],
+                &|k| names.display_get(k),
+            ))
+        };
         all.filter(|&i| {
             let e = &self.search_index[i];
             let fallback;
@@ -316,27 +414,58 @@ impl Creative {
                 &e.lines
             };
             match text.split_once(':') {
-                None => any(lines.iter().map(String::as_str), &text),
+                None => {
+                    any(lines.iter().map(String::as_str), &text) || localized(i).contains(&text)
+                }
                 Some((ns, path)) => {
                     let (ns, path) = (java_trim(ns), java_trim(path));
                     e.namespace.contains(ns)
-                        && (e.path.contains(path) || any(lines.iter().map(String::as_str), path))
+                        && (e.path.contains(path)
+                            || any(lines.iter().map(String::as_str), path)
+                            || localized(i).contains(path))
                 }
             }
         })
         .collect()
     }
-    /// Items shown by the selected tab (the search tab filters by `search`).
-    pub fn items(&self, names: &Names) -> Vec<ItemStack> {
-        let tab = self.tab();
-        if tab.search {
-            return self
-                .search_results(&self.search, names)
+    /// Items shown by the selected tab (the search tab filters by `search`),
+    /// worked out again only when the tab, the search or the language changed.
+    pub fn items(&self, names: &Names) -> Arc<[ItemStack]> {
+        let tab = self.selected.min(self.tabs.len() - 1);
+        let search = if self.tab().search {
+            self.search.value.as_str()
+        } else {
+            ""
+        };
+        let language = names.display_get("itemGroup.search").unwrap_or_default();
+        let mut shown = self.shown.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(s) = shown.as_ref()
+            && s.tab == tab
+            && s.search == search
+            && s.language == language
+        {
+            return s.items.clone();
+        }
+        let items: Arc<[ItemStack]> = if self.tab().search {
+            self.search_results(search, names)
                 .into_iter()
                 .map(|i| self.search_items[i].clone())
-                .collect();
-        }
-        tab.items.clone()
+                .collect()
+        } else {
+            self.tab().items.as_slice().into()
+        };
+        *shown = Some(Shown {
+            tab,
+            search: search.to_owned(),
+            language,
+            items: items.clone(),
+        });
+        items
+    }
+    /// Drop the shown items, so the next `items` works them out again: a
+    /// reload can rename items without changing the Search label.
+    pub fn forget_items(&self) {
+        *self.shown.lock().unwrap_or_else(|e| e.into_inner()) = None;
     }
     pub fn rows(&self, names: &Names) -> usize {
         self.items(names).len().div_ceil(9)
@@ -457,6 +586,8 @@ pub enum DisplayClick {
     Nothing,
     /// SWAP: the hotbar slot gets a full stack of the item.
     Hotbar(usize, ItemStack),
+    /// SWAP with button 40 (Key F): the off-hand gets a full stack of the item.
+    Offhand(ItemStack),
     /// THROW: a copy of the item is dropped.
     Drop(ItemStack),
 }
@@ -478,8 +609,11 @@ pub fn click_display(
     match input {
         Input::Swap => {
             return match shown {
-                Some(s) => DisplayClick::Hotbar(button as usize, copy(s, max(s))),
-                None => DisplayClick::Nothing,
+                Some(s) if button == 40 => DisplayClick::Offhand(copy(s, max(s))),
+                Some(s) if (0..9).contains(&button) => {
+                    DisplayClick::Hotbar(button as usize, copy(s, max(s)))
+                }
+                Some(_) | None => DisplayClick::Nothing,
             };
         }
         Input::Clone => {
@@ -602,10 +736,14 @@ mod tests {
             display(Some(stack("ender_pearl", 9)), 1, Pickup).0,
             Some(stack("ender_pearl", 8))
         );
-        // Number keys fill a hotbar slot, Q drops copies, pick block clones.
+        // Number keys fill a hotbar slot, F fills off-hand, Q drops copies, pick block clones.
         assert_eq!(
             display(None, 3, Swap).1,
             DisplayClick::Hotbar(3, stack("stone", 64))
+        );
+        assert_eq!(
+            display(None, 40, Swap).1,
+            DisplayClick::Offhand(stack("stone", 64))
         );
         assert_eq!(
             display(None, 0, Throw).1,
@@ -700,13 +838,13 @@ mod tests {
             (1, false, true),
             (2, true, false),
         ] {
-            c.search = "anvil".into();
+            c.search.set_value("anvil");
             c.scroll = 0.5;
             c.select(selected);
             assert_eq!(c.selected, selected);
             assert_eq!(c.tab().inventory, inventory);
             assert_eq!(c.tab().search, search);
-            assert!(c.search.is_empty());
+            assert!(c.search.value.is_empty());
             assert_eq!(c.scroll, 0.0);
         }
     }
@@ -726,12 +864,12 @@ mod tests {
         assert_eq!(c.tabs[0].items[0].item.as_ref(), "minecraft:anvil");
         let mut c = c;
         c.select(1);
-        c.search = "anvil".into();
+        c.search.set_value("anvil");
         c.scroll = 0.5;
         c.select(1);
-        assert_eq!((c.search.as_str(), c.scroll), ("anvil", 0.0));
+        assert_eq!((c.search.value.as_str(), c.scroll), ("anvil", 0.0));
         c.select(0);
-        assert_eq!(c.search, "");
+        assert_eq!(c.search.value, "");
     }
 
     #[test]
@@ -759,6 +897,24 @@ mod tests {
         assert_eq!(q("#hoe"), [2]);
         assert_eq!(q("#minecraft:enchantable/"), [2]);
         assert_eq!(q("#craft"), Vec::<usize>::new());
+    }
+
+    #[test]
+    fn search_matches_the_display_name_in_the_selected_language() {
+        let c = creative(0);
+        let names = Names {
+            map: HashMap::from([
+                ("item.minecraft.anvil".to_owned(), "铁砧".to_owned()),
+                ("item.minecraft.wooden_hoe".to_owned(), "木锄".to_owned()),
+            ]),
+        };
+        let q = |s: &str| c.search_results(s, &names);
+        assert_eq!(q("铁砧"), [0]);
+        assert_eq!(q("木锄"), [2]);
+        // The English tooltip lines the export indexed still match.
+        assert_eq!(q("anvil"), [0]);
+        // A colon's path searches the display name too.
+        assert_eq!(q("minecraft:铁砧"), [0]);
     }
 
     #[test]
@@ -797,6 +953,20 @@ mod tests {
     }
 
     #[test]
+    fn creative_tab_titles_have_vanilla_keys() {
+        assert_eq!(
+            item_group_key("minecraft:building_blocks"),
+            Some("itemGroup.buildingBlocks")
+        );
+        assert_eq!(
+            item_group_key("minecraft:food_and_drinks"),
+            Some("itemGroup.foodAndDrink")
+        );
+        assert_eq!(item_group_key("minecraft:hotbar"), Some("itemGroup.hotbar"));
+        assert_eq!(item_group_key("minecraft:nonsense"), None);
+    }
+
+    #[test]
     fn wheel_moves_one_row_per_notch() {
         let mut c = creative(90);
         let names = Names {
@@ -812,5 +982,26 @@ mod tests {
         assert_eq!(c.scroller_offset(), 0.0);
         c.scroll = 1.0;
         assert_eq!(c.scroller_offset(), 95.0);
+    }
+
+    #[test]
+    fn search_edits_at_its_cursor() {
+        use winit::keyboard::KeyCode;
+        let mut c = creative(0);
+        c.select(1);
+        c.search.insert_text("hello world");
+        for _ in 0..5 {
+            assert!(c.search.key(KeyCode::ArrowLeft, false, false));
+        }
+        c.search.insert_text("X");
+        assert_eq!(c.search.value, "hello Xworld");
+        c.search.key(KeyCode::Home, false, true);
+        c.search.insert_text("Y");
+        assert_eq!(c.search.value, "Yworld");
+        // Ctrl+Left jumps a word; one step right and Backspace deletes before the cursor.
+        c.search.key(KeyCode::ArrowLeft, true, false);
+        c.search.key(KeyCode::ArrowRight, false, false);
+        c.search.key(KeyCode::Backspace, false, false);
+        assert_eq!(c.search.value, "world");
     }
 }

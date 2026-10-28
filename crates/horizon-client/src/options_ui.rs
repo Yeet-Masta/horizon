@@ -4,6 +4,8 @@
 //! OptionsList screens and drawn with the shared widgets.
 use horizon_platform::time::Instant;
 
+pub use crate::settings::Opt;
+
 use crate::{
     gamepad::{self, GlyphStyle},
     hud::{HudAtlas, HudBatch, rgba},
@@ -14,93 +16,6 @@ use crate::{
     ui,
 };
 
-/// One option instance.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Opt {
-    Fov,
-    RenderDistance,
-    SimulationDistance,
-    Sensitivity,
-    WheelSensitivity,
-    InvertY,
-    DiscreteScroll,
-    Volume(usize),
-    GuiScale,
-    ViewBobbing,
-    Gamma,
-    MaxFps,
-    Vsync,
-    Fullscreen,
-    SmoothLighting,
-    Clouds,
-    CloudRange,
-    Particles,
-    EntityDistance,
-    EntityShadows,
-    BiomeBlend,
-    Preset,
-    Mipmaps,
-    WeatherRadius,
-    ChunkFade,
-    Vignette,
-    Autosave,
-    CutoutLeaves,
-    ImprovedTransparency,
-    AttackIndicator,
-    InactivityFps,
-    ChunkBuilder,
-    MenuBlur,
-    ToggleCrouch,
-    ToggleSprint,
-    AutoJump,
-    ChatVisibility,
-    ChatColors,
-    ChatLinks,
-    ChatOpacity,
-    TextBackgroundOpacity,
-    ChatScale,
-    ChatWidth,
-    ChatHeightFocused,
-    ChatHeightUnfocused,
-    ChatLineSpacing,
-    AutoSuggestions,
-    ReducedDebugInfo,
-    HighContrast,
-    ShowSubtitles,
-    NotificationDisplayTime,
-    Narrator,
-    TextBackground,
-    ChatDelay,
-    DistortionEffects,
-    FovEffects,
-    DarknessPulsing,
-    DamageTilt,
-    GlintSpeed,
-    GlintStrength,
-    HideLightningFlashes,
-    MonochromeLogo,
-    PanoramaSpeed,
-    HideSplashTexts,
-    NarratorHotkey,
-    RotateWithMinecarts,
-    HighContrastBlockOutlines,
-    ForceUnicode,
-    JapaneseGlyphs,
-    /// Horizon's controller settings (`horizon-controller.txt`).
-    PadEnabled,
-    PadVibration,
-    PadAdaptiveTriggers,
-    PadLightbar,
-    PadLookSensitivity,
-    PadInvertX,
-    PadInvertY,
-    PadToggleSneak,
-    PadMoveDeadzone,
-    PadLookDeadzone,
-    PadGlyphs,
-    PadMenuNav,
-    PadKeyboard,
-}
 fn tr(key: &str) -> Text {
     Text::translate(key, &[])
 }
@@ -158,6 +73,17 @@ pub(crate) const ACCESSIBILITY_OPTIONS: &[Opt] = &[
     Opt::RotateWithMinecarts,
     Opt::HighContrastBlockOutlines,
 ];
+
+/// `MouseSettingsScreen.options` in Java Edition 26.3, in vanilla order.
+pub(crate) const MOUSE_OPTIONS: &[Opt] = &[
+    Opt::Sensitivity,
+    Opt::WheelSensitivity,
+    Opt::DiscreteScroll,
+    Opt::InvertX,
+    Opt::InvertY,
+    Opt::AllowCursorChanges,
+];
+
 impl Opt {
     /// Keep controls visible while their underlying systems are still missing.
     pub(crate) fn available(self) -> bool {
@@ -166,12 +92,18 @@ impl Opt {
             Opt::Narrator
                 | Opt::NarratorHotkey
                 | Opt::ChatDelay
+                // Stored, but there are no blocked players, signed chat or
+                // chat drafts yet.
+                | Opt::HideMatchedNames
+                | Opt::OnlySecureChat
+                | Opt::SaveChatDrafts
                 | Opt::DistortionEffects
-                | Opt::GlintSpeed
-                | Opt::GlintStrength
                 | Opt::MonochromeLogo
                 | Opt::RotateWithMinecarts
-                | Opt::HighContrastBlockOutlines
+                // Saved, but nothing in rendering reads them yet.
+                | Opt::ChunkFade
+                | Opt::ImprovedTransparency
+                | Opt::ChunkBuilder
         )
     }
     fn file_key(self) -> Option<&'static str> {
@@ -179,6 +111,9 @@ impl Opt {
             Opt::Narrator => "narrator",
             Opt::TextBackground => "backgroundForChatOnly",
             Opt::ChatDelay => "chatDelay",
+            Opt::HideMatchedNames => "hideMatchedNames",
+            Opt::OnlySecureChat => "onlyShowSecureChat",
+            Opt::SaveChatDrafts => "saveChatDrafts",
             Opt::DistortionEffects => "screenEffectScale",
             Opt::FovEffects => "fovEffectScale",
             Opt::DarknessPulsing => "darknessEffectScale",
@@ -192,6 +127,7 @@ impl Opt {
             Opt::NarratorHotkey => "narratorHotkey",
             Opt::RotateWithMinecarts => "rotateWithMinecart",
             Opt::HighContrastBlockOutlines => "highContrastBlockOutline",
+            Opt::MusicFrequency => "musicFrequency",
             _ => return None,
         })
     }
@@ -203,8 +139,10 @@ impl Opt {
             Opt::SimulationDistance => "options.simulationDistance",
             Opt::Sensitivity => "options.sensitivity",
             Opt::WheelSensitivity => "options.mouseWheelSensitivity",
+            Opt::InvertX => "options.invertMouseX",
             Opt::InvertY => "options.invertMouseY",
             Opt::DiscreteScroll => "options.discrete_mouse_scroll",
+            Opt::AllowCursorChanges => "options.allowCursorChanges",
             Opt::Volume(_) => "soundCategory.master",
             Opt::GuiScale => "options.guiScale",
             Opt::ViewBobbing => "options.viewBobbing",
@@ -237,6 +175,7 @@ impl Opt {
             Opt::ChatVisibility => "options.chat.visibility",
             Opt::ChatColors => "options.chat.color",
             Opt::ChatLinks => "options.chat.links",
+            Opt::ChatLinksPrompt => "options.chat.links.prompt",
             Opt::ChatOpacity => "options.chat.opacity",
             Opt::TextBackgroundOpacity => "options.accessibility.text_background_opacity",
             Opt::ChatScale => "options.chat.scale",
@@ -245,9 +184,13 @@ impl Opt {
             Opt::ChatHeightUnfocused => "options.chat.height.unfocused",
             Opt::ChatLineSpacing => "options.chat.line_spacing",
             Opt::AutoSuggestions => "options.autoSuggestCommands",
+            Opt::HideMatchedNames => "options.hideMatchedNames",
+            Opt::OnlySecureChat => "options.onlyShowSecureChat",
+            Opt::SaveChatDrafts => "options.chat.drafts",
             Opt::ReducedDebugInfo => "options.reducedDebugInfo",
             Opt::HighContrast => "options.accessibility.high_contrast",
             Opt::ShowSubtitles => "options.showSubtitles",
+            Opt::MusicFrequency => "options.music_frequency",
             Opt::NotificationDisplayTime => "options.notifications.display_time",
             Opt::Narrator => "options.narrator",
             Opt::TextBackground => "options.accessibility.text_background",
@@ -267,20 +210,21 @@ impl Opt {
             Opt::HighContrastBlockOutlines => "options.accessibility.high_contrast_block_outline",
             Opt::ForceUnicode => "options.forceUnicodeFont",
             Opt::JapaneseGlyphs => "options.japaneseGlyphVariants",
-            // Horizon's own options: English captions (no vanilla keys).
-            Opt::PadEnabled => "Controller",
-            Opt::PadVibration => "Vibration",
-            Opt::PadAdaptiveTriggers => "Adaptive Triggers",
-            Opt::PadLightbar => "Lightbar",
-            Opt::PadLookSensitivity => "Look Sensitivity",
-            Opt::PadInvertX => "Invert Look X",
-            Opt::PadInvertY => "Invert Look Y",
-            Opt::PadToggleSneak => "Sneak Button",
-            Opt::PadMoveDeadzone => "Move Deadzone",
-            Opt::PadLookDeadzone => "Look Deadzone",
-            Opt::PadGlyphs => "Button Glyphs",
-            Opt::PadMenuNav => "Menu Navigation",
-            Opt::PadKeyboard => "On-Screen Keyboard",
+            // Horizon's own options: vanilla has no keys for them, so they read
+            // the namespace the client bundles (assets/horizon/lang).
+            Opt::PadEnabled => "horizon.options.controller",
+            Opt::PadVibration => "horizon.options.vibration",
+            Opt::PadAdaptiveTriggers => "horizon.options.adaptive_triggers",
+            Opt::PadLightbar => "horizon.options.lightbar",
+            Opt::PadLookSensitivity => "horizon.options.look_sensitivity",
+            Opt::PadInvertX => "horizon.options.invert_x",
+            Opt::PadInvertY => "horizon.options.invert_y",
+            Opt::PadToggleSneak => "horizon.options.sneak_button",
+            Opt::PadMoveDeadzone => "horizon.options.move_deadzone",
+            Opt::PadLookDeadzone => "horizon.options.look_deadzone",
+            Opt::PadGlyphs => "horizon.options.button_glyphs",
+            Opt::PadMenuNav => "horizon.options.menu_navigation",
+            Opt::PadKeyboard => "horizon.options.on_screen_keyboard",
         }
     }
     pub(crate) fn kind(self, s: &Settings) -> Kind {
@@ -516,11 +460,16 @@ impl Opt {
             Opt::HideLightningFlashes => on_off(s.file.bool("hideLightningFlashes")),
             Opt::MonochromeLogo => on_off(s.file.bool("darkMojangStudiosBackground")),
             Opt::HideSplashTexts => on_off(s.file.bool("hideSplashTexts")),
+            Opt::HideMatchedNames | Opt::OnlySecureChat | Opt::SaveChatDrafts => {
+                on_off(s.file.bool(self.file_key().unwrap()))
+            }
             Opt::NarratorHotkey => on_off(s.file.bool("narratorHotkey")),
             Opt::RotateWithMinecarts => on_off(s.file.bool("rotateWithMinecart")),
             Opt::HighContrastBlockOutlines => on_off(s.file.bool("highContrastBlockOutline")),
+            Opt::InvertX => on_off(s.invert_x),
             Opt::InvertY => on_off(s.invert_y),
             Opt::DiscreteScroll => on_off(s.discrete_scroll),
+            Opt::AllowCursorChanges => on_off(s.allow_cursor_changes),
             Opt::ViewBobbing => on_off(s.view_bobbing),
             Opt::Vsync => on_off(s.vsync),
             Opt::Fullscreen => on_off(s.fullscreen),
@@ -573,10 +522,16 @@ impl Opt {
             ][usize::from(s.chat_visibility.min(2))]),
             Opt::ChatColors => on_off(s.chat_colors),
             Opt::ChatLinks => on_off(s.chat_links),
+            Opt::ChatLinksPrompt => on_off(s.chat_links_prompt),
             Opt::AutoSuggestions => on_off(s.auto_suggestions),
             Opt::ReducedDebugInfo => on_off(s.reduced_debug_info),
             Opt::HighContrast => on_off(s.high_contrast),
             Opt::ShowSubtitles => on_off(s.show_subtitles),
+            Opt::MusicFrequency => tr([
+                "options.music_frequency.default",
+                "options.music_frequency.frequent",
+                "options.music_frequency.constant",
+            ][s.file.int("musicFrequency").clamp(0, 2) as usize]),
             Opt::ForceUnicode => on_off(s.force_unicode),
             Opt::JapaneseGlyphs => on_off(s.japanese_glyphs),
             Opt::PadEnabled => on_off(s.controller.enabled),
@@ -624,10 +579,12 @@ impl Opt {
                 self.file_key().unwrap(),
                 crate::options_file::V::Double(f64::from(v).powi(2)),
             ),
-            Opt::DamageTilt | Opt::PanoramaSpeed => s.file.set(
-                self.file_key().unwrap(),
-                crate::options_file::V::Double(f64::from(v)),
-            ),
+            Opt::DamageTilt | Opt::PanoramaSpeed | Opt::GlintSpeed | Opt::GlintStrength => {
+                s.file.set(
+                    self.file_key().unwrap(),
+                    crate::options_file::V::Double(f64::from(v)),
+                )
+            }
             Opt::Fov => s.fov = step(30.0, 110.0),
             Opt::RenderDistance => s.render_distance = step(2.0, 64.0) as i32,
             Opt::SimulationDistance => s.simulation_distance = step(5.0, 32.0) as i32,
@@ -679,6 +636,7 @@ impl Opt {
                 | Opt::CutoutLeaves
                 | Opt::ImprovedTransparency
                 | Opt::MenuBlur
+                | Opt::ChunkBuilder
         )
     }
     /// Advance a cycle button (CycleButton.cycleValue).
@@ -705,13 +663,21 @@ impl Opt {
                     value + 1
                 };
             }
-            Opt::TextBackground | Opt::HideLightningFlashes | Opt::HideSplashTexts => {
+            Opt::TextBackground
+            | Opt::HideLightningFlashes
+            | Opt::HideSplashTexts
+            | Opt::HighContrastBlockOutlines
+            | Opt::HideMatchedNames
+            | Opt::OnlySecureChat
+            | Opt::SaveChatDrafts => {
                 let key = self.file_key().unwrap();
                 s.file
                     .set(key, crate::options_file::V::Bool(!s.file.bool(key)));
             }
+            Opt::InvertX => s.invert_x = !s.invert_x,
             Opt::InvertY => s.invert_y = !s.invert_y,
             Opt::DiscreteScroll => s.discrete_scroll = !s.discrete_scroll,
+            Opt::AllowCursorChanges => s.allow_cursor_changes = !s.allow_cursor_changes,
             Opt::ViewBobbing => s.view_bobbing = !s.view_bobbing,
             Opt::Vsync => s.vsync = !s.vsync,
             Opt::Fullscreen => s.fullscreen = !s.fullscreen,
@@ -742,10 +708,16 @@ impl Opt {
             Opt::ChatVisibility => s.chat_visibility = next(s.chat_visibility, 3),
             Opt::ChatColors => s.chat_colors = !s.chat_colors,
             Opt::ChatLinks => s.chat_links = !s.chat_links,
+            Opt::ChatLinksPrompt => s.chat_links_prompt = !s.chat_links_prompt,
             Opt::AutoSuggestions => s.auto_suggestions = !s.auto_suggestions,
             Opt::ReducedDebugInfo => s.reduced_debug_info = !s.reduced_debug_info,
             Opt::HighContrast => s.high_contrast = !s.high_contrast,
             Opt::ShowSubtitles => s.show_subtitles = !s.show_subtitles,
+            Opt::MusicFrequency => {
+                let n = next(s.file.int("musicFrequency").clamp(0, 2) as u8, 3);
+                s.file
+                    .set("musicFrequency", crate::options_file::V::Int(i32::from(n)));
+            }
             Opt::ForceUnicode => s.force_unicode = !s.force_unicode,
             Opt::JapaneseGlyphs => s.japanese_glyphs = !s.japanese_glyphs,
             Opt::PadEnabled => s.controller.enabled = !s.controller.enabled,
@@ -862,6 +834,8 @@ pub enum Page {
     Font,
     Packs,
     Mods,
+    /// Horizon's shader packs, either kind (`shader_pack_list`).
+    ShaderPacks,
     /// Horizon's graphics settings (`graphics_ui`).
     Graphics,
     GraphicsAdvanced,
@@ -892,6 +866,12 @@ enum Act {
     ResetPadKey(&'static str),
     ResetPadKeys,
     ToggleMod(usize),
+    /// Pick `s.shader_packs[i]`, or turn it off when it is the pick.
+    PickShaderPack(usize),
+    OpenShaderPackFolder,
+    /// The installed mod's own settings page (capability `ui`), shown as a
+    /// screen: `Event::ModSettings` has the game open it.
+    ModSettings(usize),
     OpenModFolder,
     /// Credits & Attribution's Credits button (WinScreen without the poem).
     Credits,
@@ -943,6 +923,14 @@ pub enum Event {
     Packs(Vec<String>),
     OpenPackFolder,
     OpenModFolder,
+    /// The Shader Packs page opened: list `shaderpacks/` into `shader_packs`.
+    ListShaderPacks,
+    /// A shader pack was picked or turned off: save and apply it.
+    ShaderPack,
+    OpenShaderPackFolder,
+    /// Open the mod's own settings page (capability `ui`): the installed
+    /// mod's index in `mods.installed`.
+    ModSettings(usize),
     /// Roll the credits (`CreditsAndAttributionScreen.openCreditsScreen`).
     Credits,
     /// Copy how an agent connects (the AI Agent page).
@@ -1085,6 +1073,9 @@ fn horizon_page_tooltip(page: Page) -> Option<&'static str> {
             "Optional additions, all off by default: the game stays vanilla until you turn one on."
         }
         Page::Agent => "Let your own AI agent play: horizon-ctl and MCP clients on this computer.",
+        Page::ShaderPacks => {
+            "Shader packs from the shaderpacks folder: Horizon's own and those in the shaders/ format. One runs at a time."
+        }
         Page::Mods => {
             "Mods made for Horizon, from the horizon-mods folder. Each runs in a sandbox and stays off until you turn it on."
         }
@@ -1176,6 +1167,7 @@ impl OptionsUi {
             Page::Font => "options.font.title",
             Page::Packs => "resourcePack.title",
             Page::Mods => "Mods",
+            Page::ShaderPacks => "Shader Packs",
             Page::Graphics | Page::GraphicsAdvanced => "options.videoTitle",
             Page::Controller => "Controller Settings",
             Page::PadBinds => "Controller Binds",
@@ -1291,21 +1283,31 @@ impl OptionsUi {
                         open("Graphics...", Page::Graphics),
                         Some(open("Advanced Graphics...", Page::GraphicsAdvanced)),
                     ),
-                    Row::Buttons(open("Controller Settings...", Page::Controller), None),
+                    Row::Buttons(
+                        open("Shader Packs...", Page::ShaderPacks),
+                        Some(open("Controller Settings...", Page::Controller)),
+                    ),
                     Row::Buttons(
                         open("Extras...", Page::Extras),
                         Some(open("Mods...", Page::Mods)),
                     ),
                     // No AI hides the AI Agent page and everything AI.
-                    if s.extras.no_ai {
-                        Row::Buttons(self.extra_button(s, crate::extras::Item::NoAi), None)
-                    } else {
-                        Row::Buttons(
-                            open("AI Agent...", Page::Agent),
-                            Some(self.extra_button(s, crate::extras::Item::NoAi)),
-                        )
-                    },
+                    Row::Buttons(
+                        self.extra_button(s, crate::extras::Item::DiscordPresence),
+                        Some(if s.extras.no_ai {
+                            self.extra_button(s, crate::extras::Item::NoAi)
+                        } else {
+                            open("AI Agent...", Page::Agent)
+                        }),
+                    ),
                 ]
+                .into_iter()
+                .chain(
+                    (!s.extras.no_ai).then(|| {
+                        Row::Buttons(self.extra_button(s, crate::extras::Item::NoAi), None)
+                    }),
+                )
+                .collect()
             }
             Page::Agent => {
                 let mut rows = vec![Row::Buttons(
@@ -1381,6 +1383,9 @@ impl OptionsUi {
                 let others: Vec<Opt> = (1..SOUND_SOURCES.len()).map(Opt::Volume).collect();
                 rows.extend(pairs(&others));
                 rows.extend(pairs(&[Opt::ShowSubtitles]));
+                // SoundOptionsScreen: Music Frequency starts the next row (with
+                // Music Toast, not in Horizon yet).
+                rows.extend(pairs(&[Opt::MusicFrequency]));
                 rows
             }
             Page::Controls => {
@@ -1446,16 +1451,12 @@ impl OptionsUi {
                 ]));
                 rows
             }
-            Page::Mouse => pairs(&[
-                Opt::Sensitivity,
-                Opt::WheelSensitivity,
-                Opt::DiscreteScroll,
-                Opt::InvertY,
-            ]),
+            Page::Mouse => pairs(MOUSE_OPTIONS),
             Page::Chat => pairs(&[
                 Opt::ChatVisibility,
                 Opt::ChatColors,
                 Opt::ChatLinks,
+                Opt::ChatLinksPrompt,
                 Opt::ChatOpacity,
                 Opt::TextBackgroundOpacity,
                 Opt::ChatScale,
@@ -1464,7 +1465,10 @@ impl OptionsUi {
                 Opt::ChatHeightFocused,
                 Opt::ChatHeightUnfocused,
                 Opt::AutoSuggestions,
+                Opt::HideMatchedNames,
                 Opt::ReducedDebugInfo,
+                Opt::OnlySecureChat,
+                Opt::SaveChatDrafts,
             ]),
             Page::Accessibility => {
                 let mut rows = vec![Row::Buttons(
@@ -1499,15 +1503,46 @@ impl OptionsUi {
                         } else if installed.dev {
                             label = label.append(" (Dev)");
                         }
-                        let widget = button(0.0, 0.0, 310.0, label, Act::ToggleMod(i));
-                        Row::Buttons(
-                            if installed.dev || installed.id.is_empty() {
-                                inactive(widget)
-                            } else {
-                                widget
-                            },
-                            None,
-                        )
+                        let dead = installed.dev || installed.id.is_empty();
+                        // A running mod with a settings page (capability
+                        // `ui`) gets its own button beside the toggle.
+                        if installed.has_settings {
+                            let toggle = button(0.0, 0.0, 150.0, label, Act::ToggleMod(i));
+                            let settings = button(
+                                0.0,
+                                0.0,
+                                150.0,
+                                Text::literal("Settings"),
+                                Act::ModSettings(i),
+                            );
+                            Row::Buttons(
+                                if dead { inactive(toggle) } else { toggle },
+                                Some(settings),
+                            )
+                        } else {
+                            let widget = button(0.0, 0.0, 310.0, label, Act::ToggleMod(i));
+                            Row::Buttons(if dead { inactive(widget) } else { widget }, None)
+                        }
+                    })
+                    .collect()
+            }
+            Page::ShaderPacks => {
+                if s.shader_packs.is_empty() {
+                    return vec![Row::Header(
+                        "No shader packs: put them in the shaderpacks folder",
+                    )];
+                }
+                s.shader_packs
+                    .iter()
+                    .enumerate()
+                    .map(|(i, pack)| {
+                        let kind = match pack.kind {
+                            crate::shader_pack_list::Kind::Horizon => " (Horizon)",
+                            crate::shader_pack_list::Kind::Classic => "",
+                        };
+                        let label = Text::literal(format!("{}{kind}: ", pack.title))
+                            .append(on_off(s.horizon.shader_pack == pack.file));
+                        Row::Buttons(button(0.0, 0.0, 310.0, label, Act::PickShaderPack(i)), None)
                     })
                     .collect()
             }
@@ -1996,13 +2031,18 @@ impl OptionsUi {
                 }
                 content = y + self.scroll - top + 2.0;
                 out[list_start..].iter_mut().for_each(|w| w.list = true);
-                if page == Page::Mods {
+                let folder = match page {
+                    Page::Mods => Some(("Open Mod Folder", Act::OpenModFolder)),
+                    Page::ShaderPacks => Some(("Open Pack Folder", Act::OpenShaderPackFolder)),
+                    _ => None,
+                };
+                if let Some((label, act)) = folder {
                     out.push(button(
                         cx - 154.0,
                         h - 27.0,
                         150.0,
-                        Text::literal("Open Mod Folder"),
-                        Act::OpenModFolder,
+                        Text::literal(label),
+                        act,
                     ));
                     out.push(button(cx + 4.0, h - 27.0, 150.0, tr("gui.done"), Act::Done));
                 } else {
@@ -2454,12 +2494,32 @@ impl OptionsUi {
                 } => {
                     events.push(Event::ButtonClick);
                     match act {
-                        Act::Push(p) => self.push(p),
+                        Act::Push(p) => {
+                            if p == Page::ShaderPacks {
+                                events.push(Event::ListShaderPacks);
+                            }
+                            self.push(p)
+                        }
                         Act::Done => events.extend(self.back(s)),
                         Act::Cycle(opt) => {
                             opt.cycle(s, right, framebuffer);
                             if opt == Opt::Preset {
                                 apply_preset(s);
+                            }
+                            if opt == Opt::HighContrast {
+                                // Options.highContrast: the built-in pack follows the option.
+                                let on = s.resource_packs.iter().any(|id| id == "high_contrast");
+                                if on != s.high_contrast {
+                                    s.resource_packs.retain(|id| id != "high_contrast");
+                                    if s.high_contrast {
+                                        s.resource_packs.push("high_contrast".into());
+                                    }
+                                    // PackSelectionScreen reads the repository each time it
+                                    // opens: the next one starts from this selection.
+                                    self.pack_selection = s.resource_packs.clone();
+                                    self.pack_screen = None;
+                                    events.push(Event::Packs(s.resource_packs.clone()));
+                                }
                             }
                             events.push(Event::Changed);
                         }
@@ -2494,7 +2554,22 @@ impl OptionsUi {
                             s.mods.toggle(i);
                             events.push(Event::Changed);
                         }
+                        Act::ModSettings(i) => {
+                            events.push(Event::ButtonClick);
+                            events.push(Event::ModSettings(i));
+                        }
                         Act::OpenModFolder => events.push(Event::OpenModFolder),
+                        Act::PickShaderPack(i) => {
+                            if let Some(pack) = s.shader_packs.get(i) {
+                                s.horizon.shader_pack = if s.horizon.shader_pack == pack.file {
+                                    String::new()
+                                } else {
+                                    pack.file.clone()
+                                };
+                                events.push(Event::ShaderPack);
+                            }
+                        }
+                        Act::OpenShaderPackFolder => events.push(Event::OpenShaderPackFolder),
                         Act::Credits => events.push(Event::Credits),
                         Act::CopyAgentDetails => events.push(Event::CopyAgentDetails),
                         Act::None => {}
@@ -2614,6 +2689,7 @@ impl OptionsUi {
                 {
                     let ids = p.commit();
                     s.resource_packs = ids.clone();
+                    self.pack_selection = ids.clone();
                     events.push(Event::Packs(ids));
                 }
             }
@@ -2813,6 +2889,45 @@ mod tests {
     }
 
     #[test]
+    fn mouse_settings_match_java_26_3_option_order() {
+        let mut ui = OptionsUi::default();
+        ui.show(Page::Mouse);
+        let mut options = Vec::new();
+        for row in ui.list_rows(&Settings::default()) {
+            if let Row::Pair(a, b) = row {
+                options.push(a);
+                if let Some(b) = b {
+                    options.push(b);
+                }
+            }
+        }
+        assert_eq!(
+            options,
+            vec![
+                Opt::Sensitivity,
+                Opt::WheelSensitivity,
+                Opt::DiscreteScroll,
+                Opt::InvertX,
+                Opt::InvertY,
+                Opt::AllowCursorChanges,
+            ]
+        );
+    }
+
+    #[test]
+    fn mouse_settings_round_trip_with_java_defaults() {
+        let mut settings = Settings::default();
+        assert!(!settings.invert_x);
+        assert!(settings.allow_cursor_changes);
+        Opt::InvertX.cycle(&mut settings, false, [854, 480]);
+        Opt::AllowCursorChanges.cycle(&mut settings, false, [854, 480]);
+        let loaded = Settings::parse(&settings.serialize());
+        assert!(loaded.invert_x);
+        assert!(!loaded.allow_cursor_changes);
+        assert!(!loaded.file.bool("allowCursorChanges"));
+    }
+
+    #[test]
     fn accessibility_has_all_options_and_disabled_placeholders() {
         let mut s = Settings::default();
         let mut ui = OptionsUi::default();
@@ -2984,6 +3099,7 @@ mod tests {
                 description: "May show HUD panels.".into(),
                 problem: id.is_empty().then(|| "Invalid package".into()),
                 dev,
+                has_settings: false,
             });
         }
         let (widgets, ..) = ui.layout(&s, size.0, size.1);
@@ -3271,26 +3387,29 @@ mod tests {
             crate::extras::rows().iter().filter(|r| r.is_ok()).count()
         );
         assert_eq!(
-            click(&mut ui, &mut s, Act::Extra(crate::extras::Item::Zoom)),
+            click(&mut ui, &mut s, Act::Extra(crate::extras::Item::Sort)),
             vec![Event::ButtonClick, Event::Changed]
         );
-        assert!(s.extras.zoom);
+        assert!(s.extras.sort);
         assert_eq!(
-            click(&mut ui, &mut s, Act::Extra(crate::extras::Item::ZoomKey)),
+            click(&mut ui, &mut s, Act::Extra(crate::extras::Item::SortKey)),
             vec![Event::ButtonClick]
         );
-        assert_eq!(ui.selected_key, Some(crate::extras::ZOOM_KEY));
+        assert_eq!(ui.selected_key, Some(crate::extras::SORT_KEY));
         assert_eq!(
             ui.key(&mut s, &atlas, winit::keyboard::KeyCode::KeyC, None),
             vec![Event::Changed]
         );
-        assert_eq!(s.extras.zoom_key, "key.keyboard.c");
+        assert_eq!(s.extras.sort_key, "key.keyboard.c");
         assert_eq!(
             crate::extras::Extras::parse(&s.extras.serialize()),
             s.extras
         );
-        ui.scroll(&s, size, -1000.0);
-        let (_, top, bottom, content) = ui.layout(&s, size.0, size.1);
+        // In a window too short for the page, the wheel scrolls to its end.
+        let short = (480.0, 180.0);
+        ui.scroll(&s, short, -1000.0);
+        let (_, top, bottom, content) = ui.layout(&s, short.0, short.1);
+        assert!(content > bottom - top);
         assert_eq!(ui.scroll, content - (bottom - top));
         assert_eq!(
             ui.key(&mut s, &atlas, winit::keyboard::KeyCode::Escape, None),
@@ -3377,9 +3496,6 @@ mod tests {
                 Opt::GuiScale.cycle(&mut s, false, framebuffer);
                 assert_eq!(s.gui_scale, expected);
             }
-            s.gui_scale = u32::MAX;
-            s.clamp_gui_scale(framebuffer);
-            assert_eq!(s.gui_scale, max);
             s.gui_scale = u32::MAX;
             Opt::GuiScale.cycle(&mut s, false, framebuffer);
             assert_eq!(s.gui_scale, 0);
@@ -3845,7 +3961,7 @@ mod tests {
 
     #[test]
     fn extras_and_vanilla_bindings_accept_mouse_buttons() {
-        use crate::extras::{Extras, SORT_KEY, ZOOM_KEY};
+        use crate::extras::{Extras, SORT_KEY};
         use winit::event::MouseButton;
         for button in [
             MouseButton::Left,
@@ -3854,7 +3970,7 @@ mod tests {
             MouseButton::Back,
             MouseButton::Forward,
         ] {
-            for name in [SORT_KEY, ZOOM_KEY, "key.jump"] {
+            for name in [SORT_KEY, "key.jump"] {
                 let mut ui = OptionsUi::default();
                 let mut s = Settings::default();
                 ui.selected_key = Some(name);
@@ -3863,7 +3979,6 @@ mod tests {
                 let value = keybinds::mouse_name(button);
                 match name {
                     SORT_KEY => assert_eq!(s.extras.sort_key, value),
-                    ZOOM_KEY => assert_eq!(s.extras.zoom_key, value),
                     _ => assert_eq!(s.keys.get(name), value),
                 }
                 assert_eq!(Extras::parse(&s.extras.serialize()), s.extras);
@@ -4042,6 +4157,7 @@ mod tests {
             [
                 Page::Graphics,
                 Page::GraphicsAdvanced,
+                Page::ShaderPacks,
                 Page::Controller,
                 Page::Extras,
                 Page::Mods,

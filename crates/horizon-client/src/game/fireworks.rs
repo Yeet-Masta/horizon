@@ -17,17 +17,25 @@ use horizon_core::{
     random::RandomSource,
 };
 
+pub(super) const FIREWORK_EXPLODE_EVENT: i8 = 17;
+
 pub(super) struct Rocket {
     /// The entity id a server tracks it by (0 until it is tracked).
     pub id: u32,
     pub(super) position: Vec3,
-    previous: Vec3,
+    pub(super) previous: Vec3,
     pub(super) velocity: Vec3,
     life: i32,
     lifetime: i32,
-    explosions: Vec<FireworkExplosion>,
+    pub(super) explosions: Vec<FireworkExplosion>,
     /// Boosting the player (attachedToEntity).
     pub(super) attached: bool,
+    /// On a server, the player it boosts when not this game's own: a guest's
+    /// connection.
+    pub(super) guest: Option<u32>,
+    /// `DATA_ATTACHED_TO_TARGET`: the server entity the rocket follows;
+    /// boosting happens when it is the local player.
+    pub(super) attached_to: Option<u32>,
     /// `DATA_SHOT_AT_ANGLE` (dispensers): constant velocity, exploding on
     /// the first block it hits.
     pub(super) angled: bool,
@@ -48,22 +56,81 @@ impl Rocket {
             lifetime: i32::MAX,
             explosions,
             attached: false,
+            guest: None,
+            attached_to: None,
             angled: false,
             item,
         }
     }
-    /// One tick of a server's client: the previous position, then `step`.
-    pub(super) fn remote_step(&mut self, step: impl FnOnce(Vec3) -> Vec3) {
+    /// One tick of a server's client: the rocket flies on by itself between
+    /// the server's updates (a rocket that follows an entity is placed by the
+    /// caller).
+    pub(super) fn remote_step(&mut self, scene: &mut SceneCollisions) {
         self.previous = self.position;
+        if self.attached_to.is_none() {
+            self.free_flight(scene);
+        }
         self.life += 1;
-        self.position = step(self.position);
+    }
+    /// `FireworkRocketEntity.tick` for a rocket attached to no entity: speed
+    /// up (an angled one keeps its motion) and rise, then move. True when a
+    /// block stopped it.
+    fn free_flight(&mut self, scene: &mut SceneCollisions) -> bool {
+        let h = 0.125;
+        let bounds = Aabb::new(
+            Vec3::new(self.position.x - h, self.position.y, self.position.z - h),
+            Vec3::new(
+                self.position.x + h,
+                self.position.y + 2.0 * h,
+                self.position.z + h,
+            ),
+        );
+        let wanted = if self.angled {
+            self.velocity
+        } else {
+            Vec3::new(
+                self.velocity.x * 1.15,
+                self.velocity.y + 0.04,
+                self.velocity.z * 1.15,
+            )
+        };
+        let Ok(moved) = scene.resolve(bounds, wanted, 0.0, false) else {
+            return false;
+        };
+        let blocked = (moved.x - wanted.x).abs() > 1e-7
+            || (moved.y - wanted.y).abs() > 1e-7
+            || (moved.z - wanted.z).abs() > 1e-7;
+        let horizontal = (moved.x - wanted.x).abs() > 1e-7 || (moved.z - wanted.z).abs() > 1e-7;
+        self.position = Vec3::new(
+            self.position.x + moved.x,
+            self.position.y + moved.y,
+            self.position.z + moved.z,
+        );
+        self.velocity = if horizontal {
+            Vec3::new(self.velocity.x, wanted.y, self.velocity.z)
+        } else {
+            wanted
+        };
+        blocked
     }
     /// Position and motion (the dispenser parity fixture).
     pub(super) fn motion(&self) -> (Vec3, Vec3) {
         (self.position, self.velocity)
     }
 }
-fn fireworks_of(stack: &ItemStack) -> (u8, Vec<FireworkExplosion>) {
+/// `damageAmount * (float)Math.sqrt((5.0 - this.distanceTo(target)) / 5.0)`
+/// from the rocket at `from` to a target at `to`; `Entity.distanceTo` sums
+/// the squared offsets in floats.
+fn blast_damage(damage: f32, from: Vec3, to: Vec3) -> f32 {
+    let (x, y, z) = (
+        (from.x - to.x) as f32,
+        (from.y - to.y) as f32,
+        (from.z - to.z) as f32,
+    );
+    let distance = f64::from(x * x + y * y + z * z).sqrt() as f32;
+    damage * ((5.0 - f64::from(distance)) / 5.0).sqrt() as f32
+}
+pub(super) fn fireworks_of(stack: &ItemStack) -> (u8, Vec<FireworkExplosion>) {
     // The item's default component: flight 1, no explosions.
     stack
         .data()
@@ -89,6 +156,8 @@ impl Game<'_> {
             lifetime,
             explosions,
             attached,
+            guest: None,
+            attached_to: None,
             angled: false,
             item: stack.clone(),
         }
@@ -127,7 +196,8 @@ impl Game<'_> {
             return false;
         }
         let at = self.player.as_ref().map_or(Vec3::ZERO, |p| p.position);
-        let rocket = self.new_rocket(at, stack, true);
+        let mut rocket = self.new_rocket(at, stack, true);
+        rocket.guest = self.lan_acting;
         self.rockets.push(rocket);
         if !self.creative {
             self.consume_held();
@@ -140,7 +210,18 @@ impl Game<'_> {
         while i < self.rockets.len() {
             let mut r = self.rockets.remove(i);
             r.previous = r.position;
-            if r.attached {
+            if r.attached
+                && let Some(conn) = r.guest
+            {
+                // A guest's rocket follows them; their own client boosts them.
+                let guest = self
+                    .lan
+                    .as_ref()
+                    .and_then(|host| host.hub.guests.iter().find(|g| g.conn == conn));
+                if let Some(g) = guest {
+                    r.position = Vec3::new(g.position[0], g.position[1], g.position[2]);
+                }
+            } else if r.attached {
                 if let Some(p) = self.player.as_mut() {
                     if p.fall_flying {
                         let look = view_vector(self.yaw, self.pitch);
@@ -155,46 +236,14 @@ impl Game<'_> {
                     r.velocity = p.velocity;
                 }
             } else {
-                // Not shot at an angle: accelerate (unless blocked sideways) and rise.
                 let mut scene = SceneCollisions {
                     world: &self.world,
                     binding: self.collision,
                     subject: None,
                 };
-                let h = 0.125;
-                let bounds = Aabb::new(
-                    Vec3::new(r.position.x - h, r.position.y, r.position.z - h),
-                    Vec3::new(r.position.x + h, r.position.y + 2.0 * h, r.position.z + h),
-                );
-                let wanted = if r.angled {
-                    r.velocity
-                } else {
-                    Vec3::new(
-                        r.velocity.x * 1.15,
-                        r.velocity.y + 0.04,
-                        r.velocity.z * 1.15,
-                    )
-                };
-                if let Ok(moved) = scene.resolve(bounds, wanted, 0.0, false) {
-                    let blocked = (moved.x - wanted.x).abs() > 1e-7
-                        || (moved.y - wanted.y).abs() > 1e-7
-                        || (moved.z - wanted.z).abs() > 1e-7;
-                    if r.angled && blocked {
-                        // hitTargetOrDeflectSelf: explode on the block.
-                        r.life = r.lifetime;
-                    }
-                    let horizontal =
-                        (moved.x - wanted.x).abs() > 1e-7 || (moved.z - wanted.z).abs() > 1e-7;
-                    r.position = Vec3::new(
-                        r.position.x + moved.x,
-                        r.position.y + moved.y,
-                        r.position.z + moved.z,
-                    );
-                    r.velocity = if horizontal {
-                        Vec3::new(r.velocity.x, wanted.y, r.velocity.z)
-                    } else {
-                        wanted
-                    };
+                if r.free_flight(&mut scene) && r.angled {
+                    // hitTargetOrDeflectSelf: explode on the block.
+                    r.life = r.lifetime;
                 }
             }
             let at = [r.position.x, r.position.y, r.position.z];
@@ -227,12 +276,34 @@ impl Game<'_> {
     /// `FireworkRocketEntity.explode` and `dealExplosionDamage`.
     fn explode_rocket(&mut self, r: &Rocket) {
         let at = [r.position.x, r.position.y, r.position.z];
+        // FireworkRocketEntity.explode broadcasts before discard. Send now:
+        // tick_lan removes missing tracked entities before flushing effects.
+        if r.id != 0
+            && let Some(host) = &self.lan
+        {
+            host.hub
+                .entity_event(r.id as i32, FIREWORK_EXPLODE_EVENT, at);
+        }
         if !r.explosions.is_empty() {
             let damage = 5.0 + r.explosions.len() as f32 * 2.0;
-            if r.attached {
-                self.hurt_player_by("minecraft:fireworks", damage);
-            }
             let from = r.position;
+            // `attachedToEntity` takes the full damage, a guest as well; every
+            // other player in range and in sight takes the blast.
+            let boosted = r.guest.filter(|_| r.attached);
+            if r.attached && boosted.is_none() {
+                self.rocket_hurt_player(damage);
+            } else {
+                self.rocket_blast_player(from, damage);
+            }
+            if let Some(conn) = boosted
+                && let Some(mut host) = self.lan.take()
+            {
+                self.as_guest(&mut host, conn, |g| g.rocket_hurt_player(damage));
+                self.lan = Some(host);
+            }
+            // Every other player in the level (LAN guests, the players of a
+            // server thread), each swapped in as the player.
+            self.each_guest_hit_except(boosted, |g| g.rocket_blast_player(from, damage));
             let hits: Vec<(u32, f32)> = {
                 let world = self.mob_world_base(&[]);
                 self.mobs
@@ -252,7 +323,7 @@ impl Game<'_> {
                                 );
                                 world.clear_between(from, to, false)
                             });
-                        sees.then(|| (m.id, damage * ((5.0 - d2.sqrt()) / 5.0).sqrt() as f32))
+                        sees.then(|| (m.id, blast_damage(damage, from, m.position)))
                     })
                     .collect()
             };
@@ -274,11 +345,63 @@ impl Game<'_> {
         self.particles
             .fireworks(at, v, r.explosions.clone(), camera);
     }
+    /// FireworkRocketEntity.handleEntityEvent: use the synchronized item data.
+    pub(super) fn remote_firework_explosion(&mut self, id: i32) {
+        let camera = self.eye_position();
+        if let Some(r) = self.rockets.iter().find(|r| r.id == id as u32) {
+            let at = [r.position.x, r.position.y, r.position.z];
+            let v = [r.velocity.x, r.velocity.y, r.velocity.z];
+            self.particles
+                .fireworks(at, v, r.explosions.clone(), camera.unwrap_or(at));
+        }
+    }
+    /// `dealExplosionDamage` on a player that is not the rocket's
+    /// `attachedToEntity`: within 5 blocks, when the rocket sees its feet or
+    /// its middle (`ClipContext.Block.COLLIDER`, no fluids).
+    fn rocket_blast_player(&mut self, from: Vec3, damage: f32) {
+        let Some(p) = self.player.as_ref() else {
+            return;
+        };
+        let feet = p.position;
+        let d2 = (feet.x - from.x).powi(2) + (feet.y - from.y).powi(2) + (feet.z - from.z).powi(2);
+        if d2 > 25.0 {
+            return;
+        }
+        let height = f64::from(p.dimensions.height);
+        let sees = {
+            let world = self.mob_world_base(&[]);
+            (0..2).any(|step| {
+                let to = Vec3::new(feet.x, feet.y + height * 0.5 * f64::from(step), feet.z);
+                world.clear_between(from, to, false)
+            })
+        };
+        if sees {
+            self.rocket_hurt_player(blast_damage(damage, from, feet));
+        }
+    }
+    /// `hurtServer` with `damageSources().fireworks`: armor absorbs it and
+    /// wears (`hurtArmor`); creative and spectator players are immune.
+    fn rocket_hurt_player(&mut self, amount: f32) {
+        if self.creative || self.spectator() {
+            return;
+        }
+        if let Some(p) = self.player.as_mut()
+            && !p.health.dead_or_dying()
+            && let Some(id) = self.motion.health.damage.id("minecraft:fireworks")
+        {
+            let _ = p.hurt(&self.motion.health, self.world.health_rules, id, amount);
+        }
+    }
     /// `FireworkEntityRenderer.submit`: the item (GROUND) facing the camera,
     /// lit at the rocket's light probe.
     pub(super) fn rocket_geometry(&self, camera: glam::DVec3, alpha: f64, out: &mut Vec<Vertex>) {
         let orientation = glam::Mat4::from_quat(self.camera_orientation());
-        for r in self.rockets.iter().filter(|r| !r.attached) {
+        // shouldRender: not while attached to an entity (`isAttachedToEntity`).
+        for r in self
+            .rockets
+            .iter()
+            .filter(|r| !r.attached && r.attached_to.is_none())
+        {
             // FireworkRocketEntity.shouldRenderAtSqrDistance: within 64 blocks;
             // EntityRenderer.shouldRender: its 0.25 box in the view.
             if !self.standing_entity_in_view(

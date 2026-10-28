@@ -1,6 +1,50 @@
 [workspace]
-exclude = ["launcher", "crates/horizon-telemetry-server", "third_party/wgpu", "third_party/wgpu-core", "third_party/wgpu-hal", "third_party/wgpu-types"]
-members = ["crates/horizon-core", "crates/horizon-platform", "crates/horizon-dualsense", "crates/horizon-threads", "crates/horizon-world", "crates/horizon-client", "crates/horizon-server-files", "crates/horizon-server", "crates/horizon-bots", "crates/horizon-assets", "crates/horizon-protocol", "crates/horizon-theme", "crates/horizon-prepare", "crates/horizon-telemetry", "crates/horizon-bench", "crates/horizon-friends", "crates/horizon-relay", "crates/horizon-web-relay", "crates/horizon-mod-sdk", "crates/horizon-mods", "crates/horizon-mods/tests/guest", "crates/cargo-horizon-mod", "crates/horizon-port-pack", "crates/horizon-release-sign", "crates/horizon-mod-sdk/examples/coords-hud", "xtask"]
+exclude = ["launcher", "crates/horizon-telemetry-server", "crates/horizon-mod-registry", "third_party/wgpu", "third_party/wgpu-core", "third_party/wgpu-hal", "third_party/wgpu-types"]
+members = [
+    "crates/horizon-core",
+    "crates/horizon-platform",
+    "crates/horizon-dualsense",
+    "crates/horizon-threads",
+    "crates/horizon-hdr",
+    "crates/horizon-world",
+    "crates/horizon-client",
+    "crates/horizon-client-core",
+    "crates/horizon-client-input",
+    "crates/horizon-command",
+    "crates/horizon-items",
+    "crates/horizon-server-files",
+    "crates/horizon-server",
+    "crates/horizon-bots",
+    "crates/horizon-assets",
+    "crates/horizon-protocol",
+    "crates/horizon-theme",
+    "crates/horizon-prepare",
+    "crates/horizon-telemetry",
+    "crates/horizon-bench",
+    "crates/horizon-friends",
+    "crates/horizon-relay",
+    "crates/horizon-web-relay",
+    "crates/horizon-mod-sdk",
+    "crates/horizon-mods",
+    "crates/horizon-mods/tests/guest",
+    "crates/horizon-mods/tests/ui_guest",
+    "crates/cargo-horizon-mod",
+    "crates/horizon-port-pack",
+    "crates/horizon-shaders",
+    "crates/horizon-shader-api",
+    "crates/horizon-release-sign",
+    "crates/horizon-mod-sdk/examples/coords-hud",
+    "crates/horizon-mod-sdk/examples/predator-missile",
+    "crates/horizon-mod-sdk/examples/welcome",
+    "crates/horizon-mod-sdk/examples/beacons",
+    "mods/official/fps-overlay",
+    "mods/official/keystrokes",
+    "mods/official/far-view",
+    "mods/official/minimap",
+    "mods/official/zoom",
+    "xtask",
+    "mods/official/recipes",
+]
 resolver = "2"
 
 [workspace.package]
@@ -26,15 +70,15 @@ large_enum_variant = "allow"
 # read as `target_family = "wasm"`: wgpu 30 counts wasm64 as a native target, so
 # the web build on wasm64-unknown-unknown (web/README.md) had no WebGPU backend.
 #
-# The wasm-bindgen family from its main branch: threads on memory64 (#5378), which
+# The wasm-bindgen family at a commit of its main branch: threads on memory64 (#5378), which
 # the web build's workers need (web/README.md), aren't in a release yet. The CLI
-# must be built from the commit Cargo.lock pins (web/build.sh installs it). Back to
+# must be built from that commit (web/build.sh says how). Back to
 # crates.io once a release has them.
 [patch.crates-io]
-wasm-bindgen = { git = "https://github.com/wasm-bindgen/wasm-bindgen", branch = "main" }
-wasm-bindgen-futures = { git = "https://github.com/wasm-bindgen/wasm-bindgen", branch = "main" }
-js-sys = { git = "https://github.com/wasm-bindgen/wasm-bindgen", branch = "main" }
-web-sys = { git = "https://github.com/wasm-bindgen/wasm-bindgen", branch = "main" }
+wasm-bindgen = { git = "https://github.com/wasm-bindgen/wasm-bindgen", rev = "39ae823bbc14c9d0a4a2869361483b5453a9b133" }
+wasm-bindgen-futures = { git = "https://github.com/wasm-bindgen/wasm-bindgen", rev = "39ae823bbc14c9d0a4a2869361483b5453a9b133" }
+js-sys = { git = "https://github.com/wasm-bindgen/wasm-bindgen", rev = "39ae823bbc14c9d0a4a2869361483b5453a9b133" }
+web-sys = { git = "https://github.com/wasm-bindgen/wasm-bindgen", rev = "39ae823bbc14c9d0a4a2869361483b5453a9b133" }
 wgpu = { path = "third_party/wgpu" }
 wgpu-core = { path = "third_party/wgpu-core" }
 wgpu-hal = { path = "third_party/wgpu-hal" }

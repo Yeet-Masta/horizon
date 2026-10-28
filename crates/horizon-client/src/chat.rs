@@ -16,8 +16,101 @@ use crate::{
 #[path = "chat_tests.rs"]
 mod tests;
 
+/// `CommandHistory.PERSISTED_COMMANDS_FILE_NAME` and its size cap.
+const COMMAND_HISTORY_FILE: &str = "command_history.txt";
+const MAX_PERSISTED_COMMAND_HISTORY: usize = 50;
 /// GuiMessageTag.systemSinglePlayer's indicator colour.
 pub const SYSTEM_INDICATOR: u32 = 0xD0D0D0;
+
+/// `ChatVisiblity`: the Chat option's three values.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChatVisibility {
+    Full,
+    System,
+    Hidden,
+}
+impl ChatVisibility {
+    /// Options.chatVisibility's saved value (0 full, 1 system, 2 hidden).
+    pub fn from_option(value: u8) -> Self {
+        match value {
+            0 => Self::Full,
+            1 => Self::System,
+            _ => Self::Hidden,
+        }
+    }
+}
+
+/// `ChatAbilities`: what the Chat option allows, as `Minecraft.computeChatAbilities`
+/// derives it from the visibility alone (`ChatRestriction`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ChatAbilities {
+    pub send_messages: bool,
+    pub send_commands: bool,
+    pub receive_player_messages: bool,
+    pub receive_system_messages: bool,
+}
+impl ChatAbilities {
+    /// `ChatRestriction.CHAT_AND_COMMANDS_DISABLED_BY_OPTIONS` (Hidden) takes
+    /// chat, commands, player messages and system messages;
+    /// `CHAT_DISABLED_BY_OPTIONS` (System) takes the chat and player messages.
+    pub fn new(visibility: ChatVisibility) -> Self {
+        match visibility {
+            ChatVisibility::Full => Self {
+                send_messages: true,
+                send_commands: true,
+                receive_player_messages: true,
+                receive_system_messages: true,
+            },
+            ChatVisibility::System => Self {
+                send_messages: false,
+                send_commands: true,
+                receive_player_messages: false,
+                receive_system_messages: true,
+            },
+            ChatVisibility::Hidden => Self {
+                send_messages: false,
+                send_commands: false,
+                receive_player_messages: false,
+                receive_system_messages: false,
+            },
+        }
+    }
+    /// `visibleMessagesFilter`: the client's own lines always show.
+    pub fn shows(&self, source: ChatSource) -> bool {
+        match source {
+            ChatSource::Player => self.receive_player_messages,
+            ChatSource::Server => self.receive_system_messages,
+            ChatSource::Client => true,
+        }
+    }
+    /// `ChatAbilities.hasAnyRestrictions`: the Chat option takes something.
+    pub fn any_restriction(&self) -> bool {
+        *self != Self::new(ChatVisibility::Full)
+    }
+    /// Whether the chat screen may send `input` (`hasAllowedInput`).
+    pub fn allows(&self, input: &str) -> bool {
+        if input.starts_with('/') {
+            self.send_commands
+        } else {
+            self.send_messages
+        }
+    }
+}
+
+impl Default for ChatAbilities {
+    fn default() -> Self {
+        Self::new(ChatVisibility::Full)
+    }
+}
+
+/// Where a chat line came from (`GuiMessageSource`): the visibility filters
+/// player messages and the server's, while the client's own always show.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChatSource {
+    Player,
+    Server,
+    Client,
+}
 
 /// The chat options (doubles, as vanilla keeps them).
 #[derive(Clone, Copy, Debug)]
@@ -71,6 +164,7 @@ struct Message {
     added: u64,
     content: Text,
     indicator: Option<u32>,
+    source: ChatSource,
 }
 /// A wrapped line (`GuiMessage.Line`).
 #[derive(Clone, Debug)]
@@ -98,6 +192,10 @@ pub struct Chat {
     lines: Vec<Line>,
     /// Sent messages and commands (ChatComponent.recentChat).
     pub recent: Vec<String>,
+    /// `CommandHistory`: the last commands, kept in `command_history.txt`
+    /// in the game folder once `load_history` has set it.
+    commands: Vec<String>,
+    history_file: Option<std::path::PathBuf>,
     scroll: usize,
     new_since_scroll: bool,
     pub options: ChatOptions,
@@ -105,6 +203,8 @@ pub struct Chat {
     pub log: bool,
     /// Messages added since the start, for the control socket's events.
     pub received: u64,
+    /// The Chat option's `visibleMessageFilter` (`set_abilities`).
+    abilities: ChatAbilities,
 }
 impl Chat {
     pub fn lines_per_page(&self, focused: bool) -> usize {
@@ -114,16 +214,32 @@ impl Chat {
     fn max_width(&self) -> i32 {
         (f64::from(self.options.width_px()) / self.options.scale).floor() as i32
     }
-    /// ChatComponent.addMessage: wrap, prepend and trim to 100 lines.
+    /// ChatComponent.addMessage: wrap, prepend and trim to 100 lines. A
+    /// message the Chat option hides is dropped, unlogged.
     pub fn add(
         &mut self,
         atlas: &HudAtlas,
         content: Text,
         indicator: Option<u32>,
+        source: ChatSource,
         ticks: u64,
         focused: bool,
     ) {
-        // ChatComponent.logChatMessage: every message is in the log.
+        self.add_message(&atlas.font, content, indicator, source, ticks, focused);
+    }
+    fn add_message(
+        &mut self,
+        font: &crate::font::Font,
+        content: Text,
+        indicator: Option<u32>,
+        source: ChatSource,
+        ticks: u64,
+        focused: bool,
+    ) {
+        if !self.abilities.shows(source) {
+            return;
+        }
+        // ChatComponent.logChatMessage: every message shown is in the log.
         crate::logging::write_only(log::Level::Info, &format!("[CHAT] {}", content.plain()));
         if self.log {
             println!("[CHAT] {}", content.plain());
@@ -132,16 +248,17 @@ impl Chat {
             added: ticks,
             content,
             indicator,
+            source,
         };
-        self.add_lines(atlas, &message, focused);
+        self.add_lines(font, &message, focused);
         self.messages.insert(0, message);
         self.messages.truncate(100);
         self.received += 1;
     }
-    fn add_lines(&mut self, atlas: &HudAtlas, message: &Message, focused: bool) {
+    fn add_lines(&mut self, font: &crate::font::Font, message: &Message, focused: bool) {
         let width = self.max_width();
         let content = self.displayed(&message.content);
-        for line in atlas.font.wrap_components(&content, width) {
+        for line in font.wrap_components(&content, width) {
             if focused && self.scroll > 0 {
                 self.new_since_scroll = true;
                 self.scroll_by(1, focused);
@@ -167,27 +284,75 @@ impl Chat {
             content.strip_legacy()
         }
     }
-    /// Re-wrap after a width or scale change (ChatComponent.rescaleChat).
+    /// Re-wrap after a width or scale change (ChatComponent.rescaleChat),
+    /// keeping only the messages the Chat option shows.
     pub fn rescale(&mut self, atlas: &HudAtlas) {
+        self.rewrap(&atlas.font);
+    }
+    fn rewrap(&mut self, font: &crate::font::Font) {
         self.scroll = 0;
         self.new_since_scroll = false;
         self.lines.clear();
-        let messages: Vec<Message> = self.messages.iter().rev().cloned().collect();
+        let messages: Vec<Message> = self
+            .messages
+            .iter()
+            .rev()
+            .filter(|m| self.abilities.shows(m.source))
+            .cloned()
+            .collect();
         for m in &messages {
-            self.add_lines(atlas, m, false);
+            self.add_lines(font, m, false);
         }
+    }
+    /// `ChatComponent.setVisibleMessageFilter`: the Chat option changed;
+    /// the messages it now hides leave the chat, those it shows again return.
+    pub fn set_abilities(&mut self, font: &crate::font::Font, abilities: ChatAbilities) {
+        if self.abilities != abilities {
+            self.abilities = abilities;
+            self.rewrap(font);
+        }
+    }
+    /// Whether a message from `source` would show (`visibleMessagesFilter`).
+    pub fn shows(&self, source: ChatSource) -> bool {
+        self.abilities.shows(source)
     }
     pub fn clear(&mut self) {
         self.messages.clear();
         self.lines.clear();
         self.scroll = 0;
     }
+    /// `new CommandHistory(gameFolder)`: the commands kept from earlier runs
+    /// start the chat's history (`ChatComponent`'s constructor).
+    pub fn load_history(&mut self, game_folder: &std::path::Path) {
+        let file = game_folder.join(COMMAND_HISTORY_FILE);
+        if let Ok(text) = horizon_platform::fs::read_to_string(&file) {
+            self.commands = text.lines().map(str::to_owned).collect();
+            self.recent.extend(self.commands.iter().cloned());
+        }
+        self.history_file = Some(file);
+    }
+    /// `ChatComponent.addRecentChat`: a command also goes to the saved history.
     pub fn add_recent(&mut self, message: &str) {
         if self.recent.last().map(String::as_str) != Some(message) {
             if self.recent.len() >= 100 {
                 self.recent.remove(0);
             }
             self.recent.push(message.to_owned());
+        }
+        if message.starts_with('/') && self.commands.last().map(String::as_str) != Some(message) {
+            if self.commands.len() >= MAX_PERSISTED_COMMAND_HISTORY {
+                self.commands.remove(0);
+            }
+            self.commands.push(message.to_owned());
+            if let Some(file) = &self.history_file {
+                let mut text = self.commands.join("\n");
+                text.push('\n');
+                if let Err(e) = horizon_platform::fs::write(file, text) {
+                    log::error!(
+                        "Failed to write {COMMAND_HISTORY_FILE}, command history will be missing: {e}"
+                    );
+                }
+            }
         }
     }
     pub fn reset_scroll(&mut self) {
@@ -310,10 +475,71 @@ impl Chat {
         out.push(GuiDraw::Pop);
         out
     }
-    /// Draws [`Chat::layout`] into the HUD batch.
+    /// Draws [`Chat::layout`] into the HUD batch, and with the chat screen
+    /// open the restricted prompt above the lines.
     pub fn draw(&self, batch: &mut HudBatch, atlas: &HudAtlas, ticks: u64, focused: bool) {
         let draws = self.layout(batch.height as i32, ticks, focused);
         hud_layout::paint(batch, atlas, &draws);
+        if focused && self.abilities.any_restriction() {
+            let prompt = self.restricted_prompt(&atlas.font, batch.height as i32);
+            hud_layout::paint(batch, atlas, &prompt);
+        }
+    }
+    /// `ChatComponent.extractRenderState` for `FOREGROUND_RESTRICTED`: a
+    /// background row and the red, underlined "Chat is restricted" line in
+    /// the row above the messages, clipped to the chat's width.
+    fn restricted_prompt(&self, font: &crate::font::Font, height: i32) -> Vec<GuiDraw> {
+        let o = &self.options;
+        let scale = o.scale as f32;
+        let max_width = hud_layout::ceil(o.width_px() as f32 / scale);
+        let chat_bottom = hud_layout::floor((height - 40) as f32 / scale);
+        let entry_height = o.line_height();
+        let bottom_to_text =
+            (8.0 * (o.line_spacing + 1.0) - 4.0 * o.line_spacing + 0.5).floor() as i32;
+        let shown = self
+            .lines
+            .len()
+            .saturating_sub(self.scroll)
+            .min(self.lines_per_page(true));
+        let top = chat_bottom - (shown as i32 + 1) * entry_height;
+        let mut prompt = Text::translate("chat_screen.restricted", &[]).with_style(&Style {
+            color: Some(text::RED),
+            underlined: Some(true),
+            ..Style::default()
+        });
+        // ComponentRenderUtils.clipText.
+        let mut width = 0.0;
+        let fits = prompt
+            .chars()
+            .take_while(|(c, style)| {
+                width += font.advance(*c, style);
+                width <= max_width as f32
+            })
+            .count();
+        if fits < prompt.chars().count() {
+            prompt = prompt.slice(0, fits);
+        }
+        vec![
+            GuiDraw::Push(vec![
+                PoseOp::Scale(scale, scale),
+                PoseOp::Translate(4.0, 0.0),
+            ]),
+            hud_layout::fill(
+                -2,
+                top,
+                max_width + 4 + 4,
+                top + entry_height,
+                hud_layout::as8(o.background_opacity as f32) << 24,
+            ),
+            GuiDraw::Text {
+                text: prompt,
+                x: 0,
+                y: top + entry_height - bottom_to_text - 1,
+                color: hud_layout::white(o.opacity as f32 * 0.9 + 0.1),
+                shadow: true,
+            },
+            GuiDraw::Pop,
+        ]
     }
     /// The click action under a GUI-space cursor while chat is focused.
     pub fn click_at(
@@ -330,26 +556,34 @@ impl Chat {
     pub fn hover_at(&self, font: &crate::font::Font, height: i32, x: f64, y: f64) -> Option<Text> {
         self.style_at(font, height, x, y)?.hover.map(|h| *h)
     }
-    /// ChatComponent.getClickedComponentStyleAt.
-    fn style_at(
-        &self,
-        font: &crate::font::Font,
-        height: i32,
-        x: f64,
-        y: f64,
-    ) -> Option<crate::text::Style> {
+    /// The wrapped line under a GUI-space cursor while chat is focused, and
+    /// the cursor's x within it (the text starts at 0).
+    fn line_at(&self, height: i32, x: f64, y: f64) -> Option<(&Line, f64)> {
         let scale = self.options.scale as f32;
-        let mut x = x / f64::from(scale) - 4.0;
+        let x = x / f64::from(scale) - 4.0;
         let bottom = hud_layout::floor((height - 40) as f32 / scale);
         let from_bottom = f64::from(bottom) - y / f64::from(scale);
-        if x < 0.0 || x >= f64::from(self.max_width()) || from_bottom <= 0.0 {
+        if x >= f64::from(self.max_width()) || from_bottom <= 0.0 {
             return None;
         }
         let row = (from_bottom / f64::from(self.options.line_height())).ceil() as usize - 1;
         if row >= self.lines_per_page(true) {
             return None;
         }
-        let line = self.lines.get(self.scroll + row)?;
+        Some((self.lines.get(self.scroll + row)?, x))
+    }
+    /// ChatComponent.getClickedComponentStyleAt.
+    pub fn style_at(
+        &self,
+        font: &crate::font::Font,
+        height: i32,
+        x: f64,
+        y: f64,
+    ) -> Option<crate::text::Style> {
+        let (line, mut x) = self.line_at(height, x, y)?;
+        if x < 0.0 {
+            return None;
+        }
         let content = line.content.resolve_legacy();
         for (c, style) in content.chars() {
             x -= f64::from(font.advance(c, style));
@@ -358,6 +592,13 @@ impl Chat {
             }
         }
         None
+    }
+    /// Whether the cursor is on a line's indicator bar while chat is focused
+    /// (`DrawingFocusedGraphicsAccess.handleTag`), whose tooltip is the
+    /// message tag's text.
+    pub fn indicator_at(&self, height: i32, x: f64, y: f64) -> bool {
+        self.line_at(height, x, y)
+            .is_some_and(|(line, x)| line.indicator.is_some() && (-4.0..-2.0).contains(&x))
     }
     /// Plain text of the newest messages (for tests and the control socket).
     pub fn recent_lines(&self, n: usize) -> Vec<String> {
@@ -437,6 +678,8 @@ pub struct ChatScreen {
     allow_suggestions: bool,
     keep_suggestions: bool,
     pub auto_suggestions: bool,
+    /// `CommandSuggestions.setRestrictions`: what the Chat option allows.
+    pub abilities: ChatAbilities,
 }
 /// Local completions waiting for the server's reply to request `id`.
 struct Awaiting {
@@ -482,6 +725,7 @@ impl ChatScreen {
         history_len: usize,
         width: i32,
         height: i32,
+        abilities: ChatAbilities,
     ) -> Self {
         let mut input = TextField::new(4, height - 12, width - 4, 12);
         input.max_length = 256;
@@ -505,6 +749,7 @@ impl ChatScreen {
             allow_suggestions: false,
             keep_suggestions: false,
             auto_suggestions: true,
+            abilities,
         };
         s.update_command_info(m, c);
         s
@@ -522,7 +767,8 @@ impl ChatScreen {
         if (width, height) != (self.width, self.height) {
             let value = self.input.value.clone();
             let auto = self.auto_suggestions;
-            *self = Self::new(m, c, &value, self.history_pos, width, height);
+            let abilities = self.abilities;
+            *self = Self::new(m, c, &value, self.history_pos, width, height, abilities);
             self.auto_suggestions = auto;
         }
     }
@@ -604,6 +850,14 @@ impl ChatScreen {
             self.pending = Some((range.0, list));
             self.usage_width = 0;
             self.usage_position = 0;
+            // CommandSuggestions.updateCommandInfo: the Chat option may take
+            // the messages.
+            if !self.abilities.send_messages {
+                let line =
+                    Text::translate("chat_screen.messages_not_allowed", &[]).with_color(text::RED);
+                self.usage_width = m.width(&line);
+                self.usage.push(line);
+            }
         } else {
             self.awaiting = None;
             self.pending = None;
@@ -707,6 +961,15 @@ impl ChatScreen {
                 self.usage.push(e.with_context());
             }
             self.usage.extend(entries);
+        }
+        // CommandSuggestions.updateUsageInfo: the Chat option may take the
+        // commands, under the usage. (Vanilla also counts a command with a
+        // message argument, `/say hi`, as a message; Horizon's parse keeps no
+        // argument kinds, so only a bare message does.)
+        if !self.abilities.send_commands {
+            self.usage.push(
+                Text::translate("chat_screen.commands_not_allowed", &[]).with_color(text::RED),
+            );
         }
         self.usage_width = self.usage.iter().map(|u| m.width(u)).max().unwrap_or(0);
         self.usage_position = if self.usage.is_empty() {
@@ -842,7 +1105,14 @@ impl ChatScreen {
         }
         match key {
             K::Escape => return ChatAction::Close,
-            K::Enter | K::NumpadEnter => return ChatAction::Submit(self.normalized()),
+            K::Enter | K::NumpadEnter => {
+                // ChatScreen.keyPressed: without `hasAllowedInput` the input
+                // stays, unsent, and the screen stays open.
+                if !self.abilities.allows(&self.input.value) {
+                    return ChatAction::None;
+                }
+                return ChatAction::Submit(self.normalized());
+            }
             K::ArrowUp => self.move_in_history(m, c, history, -1),
             K::ArrowDown => self.move_in_history(m, c, history, 1),
             _ => {

@@ -5,6 +5,10 @@
 //!
 //! usage: recipe_book_fixture RESOURCES CASES OUTPUT
 use horizon_client::recipe_book::{BookType, RecipeIndex, Settings};
+use horizon_protocol::{
+    buf::{Codec, Reader, Writer},
+    packets::recipes::RecipeBookChangeSettings,
+};
 use horizon_world::nbt::Tag;
 use serde_json::Value;
 use std::{collections::BTreeSet, fs, path::Path};
@@ -83,7 +87,7 @@ pub fn main() -> horizon_client::Result<()> {
             let mut extra = String::new();
             match kind {
                 "give" => count = book.add_recipes(&index, &list()).0,
-                "take" => count = book.remove_recipes(&index, &list()),
+                "take" => count = book.remove_recipes(&index, &list()).len(),
                 "seen" => book.remove_highlight(op["id"].as_str().unwrap_or_default()),
                 "set" => {
                     let i = match op["type"].as_str().unwrap_or_default() {
@@ -93,8 +97,23 @@ pub fn main() -> horizon_client::Result<()> {
                         _ => BookType::Smoker,
                     }
                     .index();
-                    book.open[i] = op["open"].as_bool().unwrap_or(false);
-                    book.filtering[i] = op["filtering"].as_bool().unwrap_or(false);
+                    let packet = RecipeBookChangeSettings {
+                        book_type: i as i32,
+                        open: op["open"].as_bool().unwrap_or(false),
+                        filtering: op["filtering"].as_bool().unwrap_or(false),
+                    };
+                    let mut wire = Writer::new();
+                    RecipeBookChangeSettings::write(&packet, &mut wire);
+                    extra = format!(
+                        " packet={}",
+                        wire.data
+                            .iter()
+                            .map(|b| format!("{b:02x}"))
+                            .collect::<String>()
+                    );
+                    let decoded = RecipeBookChangeSettings::read(&mut Reader::new(&wire.data))?;
+                    book.open[decoded.book_type as usize] = decoded.open;
+                    book.filtering[decoded.book_type as usize] = decoded.filtering;
                 }
                 "save" => {
                     let tag = book.write();

@@ -182,7 +182,7 @@ fn agent() -> ureq::Agent {
 
 /// The discovery document, fetched once per game (a failure is retried next time).
 #[cfg(not(target_family = "wasm"))]
-fn discovery() -> Result<Arc<serde_json::Value>, JoinError> {
+pub(crate) fn discovery() -> Result<Arc<serde_json::Value>, JoinError> {
     static CACHE: horizon_platform::sync::Mutex<Option<Arc<serde_json::Value>>> =
         horizon_platform::sync::Mutex::new(None);
     if let Some(d) = CACHE.lock().unwrap().clone() {
@@ -297,7 +297,11 @@ pub fn has_joined(
     Ok(parse_joined(&body))
 }
 
-/// The web build has no sockets of its own: the session service never answers there.
+/// The web build has no sockets of its own: the services never answer there.
+#[cfg(target_family = "wasm")]
+pub(crate) fn discovery() -> Result<Arc<serde_json::Value>, JoinError> {
+    Err(JoinError::Unavailable)
+}
 #[cfg(target_family = "wasm")]
 pub fn join_server(_session: &AuthSession, _server_hash: &str) -> Result<(), JoinError> {
     Err(JoinError::Unavailable)

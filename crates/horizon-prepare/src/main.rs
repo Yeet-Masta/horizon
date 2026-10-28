@@ -16,10 +16,12 @@ const HELP: &str = "\
 horizon-prepare: prepare Horizon's resources from your own Minecraft Java Edition
 
 Usage: horizon-prepare [--prepare] [--server-jar PATH] [--minecraft-dir PATH] [--root PATH]
+       horizon-prepare compile-exporters [--root PATH]
        horizon-prepare sounds [--minecraft-dir PATH] [--root PATH]
        horizon-prepare panorama [--minecraft-dir PATH] [--root PATH]
        horizon-prepare fonts [--minecraft-dir PATH] [--root PATH]
        horizon-prepare packs [--minecraft-dir PATH] [--root PATH]
+       horizon-prepare languages [--minecraft-dir PATH] [--root PATH]
 
   --prepare             Import the pinned game files from your own copy first
   --server-jar PATH     The pinned server jar you downloaded yourself
@@ -29,14 +31,16 @@ Usage: horizon-prepare [--prepare] [--server-jar PATH] [--minecraft-dir PATH] [-
   --root PATH           The Horizon folder to prepare (default: the folder this program is
                         in, else the nearest folder above the current one with research-lock.json)
 
-Needs Minecraft played once from the official launcher, and Java (a JDK) of the version
-research-lock.json pins: JAVA_HOME, else javac and java on the PATH.
+Needs Minecraft played once from the official launcher, and Java of the version
+research-lock.json pins. Releases use a runtime; development or changed exporters need a JDK.
+compile-exporters builds and validates a release bundle from the already imported pinned jars.
 The resources go to <root>/.local/horizon-client/<version>; pass that to horizon-client --resources.
 
 horizon-prepare panorama repairs the classic menu background in existing resources without Java.
 horizon-prepare fonts adds the GNU Unifont glyphs (characters the bitmap fonts lack) the same way.
 horizon-prepare packs adds the built-in Programmer Art and High Contrast resource packs the same way.
-Full preparation also imports all three after extracting the client JAR's placeholders.
+horizon-prepare languages adds the bundled languages and the language list the JAR lacks the same way.
+Full preparation also imports all four after extracting the client JAR's placeholders.
 
 horizon-prepare sounds copies the pinned version's sounds (about 380 MB) from the official
 launcher's asset store into the same folder, checking every file. It is optional: without it the
@@ -68,8 +72,12 @@ fn main() -> ExitCode {
     };
     let mut root = None;
     let mut args = std::env::args_os().skip(1).peekable();
-    let assets =
-        args.next_if(|a| matches!(a.to_str(), Some("sounds" | "panorama" | "fonts" | "packs")));
+    let assets = args.next_if(|a| {
+        matches!(
+            a.to_str(),
+            Some("sounds" | "panorama" | "fonts" | "packs" | "languages" | "compile-exporters")
+        )
+    });
     while let Some(arg) = args.next() {
         let text = arg.to_string_lossy().into_owned();
         let (flag, inline) = match text.split_once('=') {
@@ -126,6 +134,8 @@ fn main() -> ExitCode {
         let _ = out.flush();
     };
     let result = match assets.as_deref().and_then(|a| a.to_str()) {
+        Some("compile-exporters") => horizon_prepare::compile_exporters(&options, &log)
+            .inspect(|dir| log(&dir.display().to_string())),
         Some("sounds") => {
             horizon_prepare::sounds(&options.root, options.minecraft_dir.as_deref(), &log)
         }
@@ -137,6 +147,9 @@ fn main() -> ExitCode {
         }
         Some("packs") => {
             horizon_prepare::packs(&options.root, options.minecraft_dir.as_deref(), &log)
+        }
+        Some("languages") => {
+            horizon_prepare::languages(&options.root, options.minecraft_dir.as_deref(), &log)
         }
         _ => horizon_prepare::prepare(&options, &log),
     };

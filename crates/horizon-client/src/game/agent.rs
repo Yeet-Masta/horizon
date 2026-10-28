@@ -300,6 +300,8 @@ struct Glide {
 pub(super) struct Agent {
     task: Option<Task>,
     glide: Option<Glide>,
+    /// Control-fixture barrier: hold simulation and packet handling, not transport threads.
+    pub hold_server: bool,
 }
 
 pub(super) enum Handled {
@@ -390,6 +392,9 @@ impl Game<'_> {
         Ok(())
     }
     pub(super) fn screen_label(&self) -> &'static str {
+        if self.dialog_open() {
+            return "dialog";
+        }
         if self.title.is_some() {
             return "title";
         }
@@ -414,8 +419,12 @@ impl Game<'_> {
             Screen::Advancements => "advancements",
             Screen::WorldOptions => "world-options",
             Screen::Friends => "friends",
+            Screen::ServerLinks => "server-links",
+            Screen::ConfirmLink => "confirm-link",
+            Screen::DialogWarning => "dialog-warning",
             Screen::CommandBlock => "command-block",
             Screen::Win => "win",
+            Screen::Mod => "mod",
         }
     }
     pub(super) fn inventory_counts(&self) -> BTreeMap<String, i64> {
@@ -469,9 +478,14 @@ impl Game<'_> {
                 "flying": p.flying,
                 "fall_flying": p.fall_flying,
                 "sneaking": self.keys.contains(&KeyCode::ShiftLeft),
-                "sprinting": self.keys.contains(&KeyCode::ControlLeft),
+                "sprinting": p.sprinting,
+                "fov_modifier": self.view.fov_modifier,
                 "health": p.health.health(),
                 "absorption": p.health.absorption(),
+                // The hurt animation's ticks left (the camera's hurt tilt).
+                "hurt_time": p.health.hurt_animation_time,
+                // LivingEntity.deathTime while dead (the camera's death roll).
+                "death_time": self.death_time(),
                 "air": p.air,
                 "food": p.health.food.food,
                 "saturation": p.health.food.saturation,
@@ -481,6 +495,7 @@ impl Game<'_> {
             })
         });
         json!({
+            "dialog": self.dialog_status(),
             "screen": self.screen_label(),
             "menu": self.title.as_ref().map(|_| self.title_value()),
             "world": (self.title.is_none()).then(|| match &self.integrated {
@@ -552,6 +567,22 @@ impl Game<'_> {
                 "superflat": options.flat,
                 "generate_structures": options.structures,
                 "bonus_chest": options.bonus_chest(),
+            }),
+            Mode::CreateFlat {
+                name,
+                seed,
+                options,
+                flat,
+                ..
+            } => json!({
+                "mode": "customize-flat",
+                "fields": { "name": name, "seed": seed },
+                "superflat": options.flat,
+                "biome": flat.settings().biome,
+                "layers": flat.settings().layers.iter().map(|layer| json!({
+                    "block": layer.block,
+                    "height": layer.height,
+                })).collect::<Vec<_>>(),
             }),
             Mode::Edit {
                 world,
@@ -659,6 +690,7 @@ impl Game<'_> {
         });
         if let Some(chat) = &self.ui.chat_screen {
             v["chat_input"] = json!(chat.input.value);
+            v["chat_suggestions"] = json!(chat.suggestions_visible());
         }
         if self.title.is_some() {
             v["menu"] = self.title_value();
@@ -678,13 +710,28 @@ impl Game<'_> {
             v["craft_size"] = json!(self.craft_size);
             v["station"] = json!(self.station.as_ref().map(|s| format!("{:?}", s.kind)));
             v["container"] = json!(self.container);
+            // The title a server gave the menu, span by span as it is drawn.
+            if let Some(title) = self.remote_menu_title() {
+                let spans = title.spans.iter().map(|s| {
+                    json!({
+                        "text": s.text,
+                        "color": s.style.color.map(|c| format!("#{c:06X}")),
+                        "bold": s.style.is_bold(),
+                        "italic": s.style.is_italic(),
+                    })
+                });
+                v["title"] = json!(spans.collect::<Vec<_>>());
+            }
             // The recipe book's buttons (GUI pixels): the book button, then
             // the recipe buttons of the page, page arrows, filter and tabs.
             let book = self.recipe_book_targets();
             if !book.is_empty() {
+                let (open, filtering) = self.recipe_book_flags().unwrap_or_default();
                 v["recipe_book"] = json!({
                     "targets": book.iter().map(|t| t.rect).collect::<Vec<_>>(),
                     "known": self.recipe_book_known(),
+                    "open": open,
+                    "filtering": filtering,
                 });
             }
             v["slot_ids"] = json!(
@@ -1596,8 +1643,12 @@ impl Game<'_> {
                 if self.screen != Screen::Dead {
                     return Err("respawn needs the death screen".into());
                 }
-                let label =
-                    horizon_client::text::Text::translate("deathScreen.respawn", &[]).plain();
+                let key = if self.level.hardcore {
+                    "deathScreen.spectate"
+                } else {
+                    "deathScreen.respawn"
+                };
+                let label = horizon_client::text::Text::translate(key, &[]).plain();
                 let w = widgets::find(&widgets::last(), &label)?;
                 if !w.enabled {
                     // DeathScreen enables its buttons after 20 ticks.

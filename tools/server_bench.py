@@ -120,7 +120,7 @@ class Server:
         self.process = subprocess.Popen([str(c) for c in command], cwd=directory, stdin=subprocess.PIPE,
                                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                                         encoding='utf-8', errors='replace',
-                                        env=dict(os.environ, HORIZON_NO_AUDIO='1'))
+                                        env=lab.game_env())
         threading.Thread(target=self._read, daemon=True).start()
 
     def _read(self):
@@ -181,7 +181,7 @@ def paper_jar():
     lock, _ = lab.config()
     version = lock['minecraft']['version']
     request = urllib.request.Request(PAPER_API.format(version=version),
-                                     headers={'User-Agent': 'horizon-server-bench (github.com/ludovic111/horizon)'})
+                                     headers={'User-Agent': 'horizon-server-bench (github.com/horizon-rust/horizon)'})
     with urllib.request.urlopen(request, timeout=30) as response:
         build = json.load(response)
     download = build['downloads']['server:default']

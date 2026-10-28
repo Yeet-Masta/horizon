@@ -814,7 +814,6 @@ pub fn carry(
                     if kind == "structure" {
                         let path = rel.trim_start_matches("worldgen/structure/");
                         let structure = format!("{ns}:{}", path.trim_end_matches(".json"));
-                        changed |= crate::worldgen::disables(&structure, &mut v);
                         changed |=
                             crate::worldgen::add_piece_counts(&structure, &mut v, &piece_counts);
                     }
@@ -830,7 +829,7 @@ pub fn carry(
                 let modifier = serde_json::from_slice::<Value>(&bytes).ok();
                 let types = &mut report.worldgen_types;
                 if let Some((kind, mut added)) =
-                    modifier.and_then(|v| crate::worldgen::modifier(&v, loaded, types))
+                    modifier.and_then(|v| crate::lithostitched::modifier(&v, loaded, types))
                 {
                     crate::processors::carry(
                         kind,
@@ -910,7 +909,7 @@ pub fn carry(
     }
     // Entries the mod adds to other structure sets in Java code, for the
     // structures it has.
-    for (file, set, entries) in crate::worldgen::code_set_entries(id) {
+    for (file, set, entries) in crate::legacy_structure_mods::ctov::code_set_entries(id) {
         let entries: Vec<Value> = entries
             .into_iter()
             .filter(|(s, _)| {

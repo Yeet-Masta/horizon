@@ -50,11 +50,13 @@ import urllib.parse
 try:
     from . import lab, oracle_harness as oh, test_rust_parity as base
     from .test_dedicated_server_parity import Server, free_port
+    from .integration_env import run_game
 except ImportError:
     import lab
     import oracle_harness as oh
     import test_rust_parity as base
     from test_dedicated_server_parity import Server, free_port
+    from integration_env import run_game
 
 NAME = 'online-mode-parity'
 PLAYER = 'Tester'
@@ -179,13 +181,13 @@ def run_client(binary, build, port, label, token, discovery):
     shutil.rmtree(directory, ignore_errors=True)
     directory.mkdir()
     report = directory / 'report.json'
-    env = dict(os.environ, HORIZON_NO_AUDIO='1', HORIZON_NET_REPORT=str(report), HORIZON_API_DISCOVERY=discovery)
+    env = lab.game_env(HORIZON_NET_REPORT=report, HORIZON_API_DISCOVERY=discovery)
     command = [binary, '--resources', lab.RESOURCES, '--render-distance', 2,
                '--server', f'127.0.0.1:{port}', '--name', PLAYER]
     if token:
         command += ['--session-file', session_file(directory, token)]
     with (build / f'client-{label}.log').open('w') as log:
-        subprocess.run([str(c) for c in command], cwd=directory, env=env, stdout=log, stderr=subprocess.STDOUT,
+        run_game([str(c) for c in command], cwd=directory, env=env, stdout=log, stderr=subprocess.STDOUT,
                        timeout=300, check=True)
     got = json.loads(report.read_text())
     got['session file left'] = (directory / 'session.json').exists()
@@ -246,7 +248,7 @@ def run_side(label, command, binary, build, services, discovery):
     props = dict(PROPERTIES, **{'server-port': str(port)})
     (directory / 'server.properties').write_text(''.join(f'{k}={v}\n' for k, v in props.items()))
     (directory / 'eula.txt').write_text('eula=true\n')
-    os.environ.update(HORIZON_NO_AUDIO='1', HORIZON_API_DISCOVERY=discovery)
+    os.environ.update(lab.game_env(HORIZON_API_DISCOVERY=discovery))
     server = Server(command, directory, f'{label}-online')
     checks = []
     starts = []
@@ -349,11 +351,11 @@ def main():
     build.mkdir(parents=True, exist_ok=True)
     report = build / 'report.json'
     report.unlink(missing_ok=True)
-    oh.run_logged(['cargo', 'build', '--release', '-p', 'horizon-client', '--bin', 'horizon-client'], build,
+    oh.run_logged(['cargo', 'build', '--profile', 'fast', '-p', 'horizon-client', '--bin', 'horizon-client'], build,
                   'compile-rust')
     metadata = json.loads(subprocess.check_output(['cargo', 'metadata', '--no-deps', '--format-version', '1'],
                                                   cwd=lab.ROOT, text=True))
-    binary = Path(metadata['target_directory']) / 'release' / ('horizon-client.exe' if os.name == 'nt' else 'horizon-client')
+    binary = Path(metadata['target_directory']) / 'fast' / ('horizon-client.exe' if os.name == 'nt' else 'horizon-client')
     dependencies = os.pathsep.join(map(str, [jars['server'], *libraries]))
 
     services = Services()

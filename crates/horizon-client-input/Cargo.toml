@@ -1,0 +1,33 @@
+[package]
+name = "horizon-client-input"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version = "1.90"
+description = "The client's input layer: key bindings and their names, mouse, controllers, clipboard and window options"
+
+[dependencies]
+horizon-platform = { path = "../horizon-platform" }
+horizon-client-core = { path = "../horizon-client-core" }
+winit = "0.30.13"
+# The window icon.
+horizon-theme = { path = "../horizon-theme" }
+png = "0.18"
+# The DualSense's trigger effects (the `controllers` feature).
+horizon-dualsense = { path = "../horizon-dualsense", optional = true }
+
+# The system clipboard; the web build's stays in the game (clipboard.rs).
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+arboard = { version = "3.6.1", default-features = false, features = ["wayland-data-control"] }
+
+# The web build (web/README.md): the page's canvas and its pointer lock (window.rs).
+[target.'cfg(target_family = "wasm")'.dependencies]
+wasm-bindgen = "0.2.129"
+js-sys = "0.3.106"
+web-sys = { version = "0.3.106", features = ["Document", "Window", "Element", "HtmlCanvasElement"] }
+
+[features]
+controllers = ["dep:horizon-dualsense"]
+
+[lints]
+workspace = true

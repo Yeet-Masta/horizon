@@ -107,10 +107,11 @@ pub struct EffectIcon {
 
 impl From<&crate::effects::EffectInstance> for EffectIcon {
     fn from(effect: &crate::effects::EffectInstance) -> Self {
-        let def = crate::brewing::effect(effect.id);
+        let def = horizon_client_core::potions::effect(effect.id);
         Self {
             id: effect.id.to_owned(),
-            beneficial: def.is_some_and(|d| d.category == crate::brewing::Category::Beneficial),
+            beneficial: def
+                .is_some_and(|d| d.category == horizon_client_core::potions::Category::Beneficial),
             color: def.map_or(0, |d| d.color as i32),
             ambient: effect.ambient,
             duration: effect.duration,
@@ -189,6 +190,53 @@ pub fn effects(w: i32, demo: bool, effects: &[EffectIcon]) -> Vec<GuiDraw> {
         });
     }
     out
+}
+
+/// The saving indicator: `Hud.tickAutosaveIndicator` fades a value towards 1
+/// while the server is saving and `extractSavingIndicator` draws the text.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct SavingIndicator {
+    last: f32,
+    value: f32,
+}
+impl SavingIndicator {
+    /// `Hud.tickAutosaveIndicator`: `Mth.lerp(0.2F, value, saving ? 1 : 0)`.
+    pub fn tick(&mut self, saving: bool) {
+        self.last = self.value;
+        self.value += (if saving { 1.0 } else { 0.0 } - self.value) * 0.2;
+    }
+    /// `Hud.extractSavingIndicator` without the option check: the text in the
+    /// bottom right corner.
+    pub fn draw(
+        &self,
+        w: i32,
+        h: i32,
+        partial: f32,
+        font: &Font,
+        label: Text,
+        background: u32,
+    ) -> Vec<GuiDraw> {
+        let mut out = Vec::new();
+        if self.value <= 0.0 && self.last <= 0.0 {
+            return out;
+        }
+        let fade = (self.last + (self.value - self.last) * partial).clamp(0.0, 1.0);
+        let alpha = (255.0 * fade).floor() as u32;
+        if alpha > 0 {
+            let label_width = width(font, &label);
+            let color = crate::hud_layout::argb(alpha, 255, 255, 255);
+            text_with_backdrop(
+                &mut out,
+                label,
+                w - label_width - 5,
+                h - 9 - 5,
+                label_width,
+                color,
+                background,
+            );
+        }
+        out
+    }
 }
 
 /// Titles and the action bar: `Hud.title`, `subtitle`, `titleTime`, the
@@ -275,11 +323,13 @@ impl Titles {
             }
         }
     }
-    /// `Hud.extractOverlayMessage`.
+    /// `Hud.extractOverlayMessage`; `bar_height` is
+    /// `max(leftHeight, rightHeight)`.
     pub fn overlay_message(
         &self,
         w: i32,
         h: i32,
+        bar_height: i32,
         partial: f32,
         font: &Font,
         background: u32,
@@ -295,9 +345,12 @@ impl Titles {
         let alpha = ((t * 255.0 / 20.0) as i32).min(255);
         if alpha > 0 {
             let message = message.resolve_legacy();
+            // The bars' height plus the gap between the item name (59) and the
+            // overlay (68), at least the default level.
+            let y_shift = bar_height + (68 - 59);
             out.push(GuiDraw::Push(vec![PoseOp::Translate(
                 (w / 2) as f32,
-                (h - 68) as f32,
+                (h - y_shift.max(68)) as f32,
             )]));
             let color = if self.overlay_animated {
                 hsv_to_argb(t / 50.0, 0.7, 0.6, alpha as u32)
@@ -415,11 +468,13 @@ impl ToolHighlight {
         self.last = selected;
     }
     /// `Hud.extractSelectedItemName`; `can_hurt` is
-    /// `gameMode.canHurtPlayer()` (survival and adventure).
+    /// `gameMode.canHurtPlayer()` (survival and adventure) and `bar_height`
+    /// is `max(leftHeight, rightHeight)`.
     pub fn draw(
         &self,
         w: i32,
         h: i32,
+        bar_height: i32,
         can_hurt: bool,
         font: &Font,
         background: u32,
@@ -440,7 +495,7 @@ impl ToolHighlight {
         }
         let str_width = width(font, &name);
         let x = (w - str_width) / 2;
-        let mut y = h - 59;
+        let mut y = h - bar_height.max(59);
         if !can_hurt {
             y += 14;
         }
@@ -1111,8 +1166,9 @@ impl SubtitleOverlay {
                 s.purge_old_instances(3000.0 * frame.multiplier, now);
             }
             if s.audible_from(position) && !s.played.is_empty() {
-                width = width.max(width_of(&Text::translate(&s.key, &[])));
-                audible.push(i);
+                let text_width = width_of(&Text::translate(&s.key, &[]));
+                width = width.max(text_width);
+                audible.push((i, text_width));
             }
         }
         if audible.is_empty() {
@@ -1121,7 +1177,7 @@ impl SubtitleOverlay {
         let w = |s: &str| font.width(s) as i32;
         width += w("<") + w(" ") + w(">") + w(" ");
         let mut row = 0;
-        for i in audible {
+        for (i, text_width) in audible {
             let s = &self.subtitles[i];
             let text_value = Text::translate(&s.key, &[]);
             let Some(closest) = s.best_candidate(position) else {
@@ -1145,7 +1201,6 @@ impl SubtitleOverlay {
             let half_width = width / 2;
             let height = 9;
             let half_height = height / 2;
-            let text_width = width_of(&text_value);
             let brightness = s.brightness(closest, frame.multiplier, now);
             out.push(GuiDraw::Push(vec![
                 PoseOp::Translate(
