@@ -15,11 +15,10 @@ use horizon_platform::thread;
 use horizon_world::block_render::FaceVisibility;
 use horizon_world::worldgen::decoration_order::DecorationOrder;
 use std::{
-    collections::{BinaryHeap, HashSet},
+    collections::{BinaryHeap, HashSet, VecDeque},
     sync::{
-        Arc, Condvar,
+        Arc, Condvar, MutexGuard, TryLockError,
         atomic::{AtomicBool, Ordering},
-        mpsc,
     },
 };
 
@@ -100,6 +99,9 @@ pub trait LodSampler: Send {
     fn drain_details(&mut self) -> Vec<LodDetail> {
         Vec::new()
     }
+    /// Reduced far detail (`graphics::FarDetail::Reduced`): `grid` may then
+    /// approximate wide cells.
+    fn set_approximate(&mut self, _approximate: bool) {}
     fn sample(&mut self, x: i32, z: i32) -> Option<crate::lod::Surface>;
     fn column(&mut self, x: i32, z: i32) -> crate::lod::Column {
         crate::lod::Column::from_surface(self.sample(x, z))
@@ -169,6 +171,9 @@ enum Job {
     /// Proto chunks checked out to be saved (`ChunkGenerator::save_protos`),
     /// off the main thread like vanilla's IOWorker.
     Save(Vec<((i32, i32), Proto)>),
+    /// Meshes the renderer is done with (`Streaming::free`): their memory
+    /// is given back here, not in the frame.
+    Free(Vec<((i32, i32, i32), SectionMesh)>),
 }
 pub enum Done {
     Generated(Chunk),
@@ -215,14 +220,81 @@ struct Shared {
     /// What meshing reads (block models and sprites), swapped when resource
     /// packs reload; each mesh job takes the current one.
     context: RwLock<Arc<WorkerContext>>,
+    done: Mailbox,
 }
+/// Finished jobs, from the workers to the game thread, in the order they
+/// finished. Not an `mpsc` channel: its receiver waits for a sender it finds
+/// half way through a send, and a worker descheduled there on a busy machine
+/// held the frame for a scheduler quantum (10 to 30 ms, the RD 32 ocean
+/// flight's 1% lows). The frame takes what is there without waiting; while a
+/// worker holds the lock, it takes it the next frame.
+#[derive(Default)]
+struct Mailbox {
+    done: Mutex<VecDeque<Done>>,
+    arrived: Condvar,
+}
+impl Mailbox {
+    fn send(&self, done: Done) {
+        self.done.lock().unwrap().push_back(done);
+        self.arrived.notify_one();
+    }
+    fn try_lock(&self) -> Option<MutexGuard<'_, VecDeque<Done>>> {
+        match self.done.try_lock() {
+            Ok(done) => Some(done),
+            Err(TryLockError::WouldBlock) => None,
+            Err(TryLockError::Poisoned(e)) => panic!("{e}"),
+        }
+    }
+    /// Every finished job, or none while a worker is sending. (The frame
+    /// takes them one at a time, so the web build's can stop part way.)
+    #[cfg(test)]
+    fn take(&self) -> VecDeque<Done> {
+        self.try_lock()
+            .map(|mut done| std::mem::take(&mut *done))
+            .unwrap_or_default()
+    }
+    fn try_recv(&self) -> Option<Done> {
+        self.try_lock()?.pop_front()
+    }
+    #[cfg(not(target_family = "wasm"))]
+    fn recv_timeout(&self, timeout: std::time::Duration) -> Option<Done> {
+        let done = self.done.lock().unwrap();
+        let (mut done, _) = self
+            .arrived
+            .wait_timeout_while(done, timeout, |done| done.is_empty())
+            .unwrap();
+        done.pop_front()
+    }
+    /// The web build may not wait on the page's thread, and std's clock
+    /// panics there: it looks until the timeout, sleeping between looks on a
+    /// worker (an integrated server's) and spinning on the page.
+    #[cfg(target_family = "wasm")]
+    fn recv_timeout(&self, timeout: horizon_platform::time::Duration) -> Option<Done> {
+        use horizon_platform::time::{Duration, Instant};
+        let deadline = Instant::now() + timeout;
+        loop {
+            if let Some(done) = self.try_recv() {
+                return Some(done);
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return None;
+            }
+            if horizon_platform::thread::may_block() {
+                horizon_platform::thread::sleep((deadline - now).min(Duration::from_micros(500)));
+            } else {
+                std::hint::spin_loop();
+            }
+        }
+    }
+}
+
 /// The single-threaded web build's worker: the job runner, and where its
 /// results go. The threaded web build (web/README.md) has a pool of Web
 /// Workers, as natively.
 #[cfg(all(target_family = "wasm", not(target_feature = "atomics")))]
 struct Inline {
-    run: Box<dyn FnMut(Job) -> Done + Send>,
-    send: mpsc::Sender<Done>,
+    run: Box<dyn FnMut(Job) -> Option<Done> + Send>,
 }
 /// How long the threaded web build's frame takes in finished jobs
 /// (`Streaming::update`).
@@ -242,6 +314,7 @@ impl Job {
             Self::Light(..) => 3,
             Self::Mesh(..) => 4,
             Self::Save(..) => 5,
+            Self::Free(..) => 6,
         }
     }
 }
@@ -249,7 +322,6 @@ impl Job {
 pub struct Streaming {
     shared: Arc<Shared>,
     light_view: Arc<dyn Fn(&Proto) -> Option<Chunk> + Send + Sync>,
-    results: mpsc::Receiver<Done>,
     threads: Vec<thread::JoinHandle<()>>,
     /// The pool's workers (the threaded web build's are never joined, so
     /// `threads` holds none of them).
@@ -263,7 +335,7 @@ pub struct Streaming {
     /// What a job of each kind ([`Job::kind`]) has lately taken the web
     /// build's frames, in seconds.
     #[cfg(all(target_family = "wasm", not(target_feature = "atomics")))]
-    job_costs: [f64; 6],
+    job_costs: [f64; 7],
     order: u64,
     /// Ticks since the columns and protos that fell out of range were swept.
     scan_age: u8,
@@ -499,8 +571,8 @@ impl Streaming {
             ready: Condvar::new(),
             stop: AtomicBool::new(false),
             context: RwLock::new(context.clone()),
+            done: Mailbox::default(),
         });
-        let (send, results) = mpsc::channel();
         let light_tables = context.light.clone();
         let saves: Arc<dyn Saves> = generator.clone();
         // One worker's state and its job: what a pool thread runs natively,
@@ -513,56 +585,64 @@ impl Streaming {
                 // the worker across mesh jobs, like vanilla's per-thread cache:
                 // cloning it per job copied every state and face shape.
                 let mut faces: Option<(Arc<MeshTables>, FaceVisibility)> = None;
-                move |job: Job| match job {
-                    Job::Generate(x, z) => match generator.load(x, z) {
-                        Some(chunk) => {
-                            generator.prepare_loaded(&mut worker, &chunk);
-                            Done::Generated(chunk)
-                        }
-                        None => {
-                            let proto = generator.proto(&mut worker, x, z);
-                            let decorated = generator.is_decorated(&proto);
-                            Done::Proto(x, z, proto, decorated)
-                        }
-                    },
-                    Job::Decorate(x, z, mut region) => {
-                        generator.decorate(&mut worker, &mut region);
-                        Done::Decorated(x, z, region)
-                    }
-                    Job::Finish(proto) => Done::Generated(generator.finish(proto)),
-                    Job::Save(protos) => {
-                        let refs: Vec<&Proto> = protos.iter().map(|(_, p)| p).collect();
-                        generator.save_protos(&refs);
-                        Done::Saved(protos)
-                    }
-                    Job::Light(x, z, region, seq, sky) => {
-                        Done::Lit(x, z, light_chunk(&borrow(&region), &light, sky), seq)
-                    }
-                    Job::Mesh(x, sy, z, region, seq, settings) => {
-                        let context = shared.context.read().unwrap().clone();
-                        let visibility = match faces.take() {
-                            Some((tables, visibility)) if Arc::ptr_eq(&tables, &context.tables) => {
-                                visibility
+                move |job: Job| {
+                    Some(match job {
+                        Job::Generate(x, z) => match generator.load(x, z) {
+                            Some(chunk) => {
+                                generator.prepare_loaded(&mut worker, &chunk);
+                                Done::Generated(chunk)
                             }
-                            _ => context.tables.visibility.clone(),
-                        };
-                        let mut mesher = Mesher {
-                            nether_shading: settings.nether,
-                            zoom: settings.zoom,
-                            blend_radius: settings.blend_radius,
-                            smooth_lighting: settings.smooth_lighting,
-                            cutout_leaves: settings.cutout_leaves,
-                            assets: &context.assets,
-                            render: &context.render,
-                            tables: &context.tables,
-                            biomes: &context.biomes,
-                            visibility,
-                        };
-                        let mut mesh = mesher.mesh(&borrow(&region), sy);
-                        mesh.sort_solid();
-                        faces = Some((context.tables.clone(), mesher.visibility));
-                        Done::Meshed(x, sy, z, mesh, seq)
-                    }
+                            None => {
+                                let proto = generator.proto(&mut worker, x, z);
+                                let decorated = generator.is_decorated(&proto);
+                                Done::Proto(x, z, proto, decorated)
+                            }
+                        },
+                        Job::Decorate(x, z, mut region) => {
+                            generator.decorate(&mut worker, &mut region);
+                            Done::Decorated(x, z, region)
+                        }
+                        Job::Finish(proto) => Done::Generated(generator.finish(proto)),
+                        Job::Save(protos) => {
+                            let refs: Vec<&Proto> = protos.iter().map(|(_, p)| p).collect();
+                            generator.save_protos(&refs);
+                            Done::Saved(protos)
+                        }
+                        Job::Light(x, z, region, seq, sky) => {
+                            Done::Lit(x, z, light_chunk(&borrow(&region), &light, sky), seq)
+                        }
+                        Job::Mesh(x, sy, z, region, seq, settings) => {
+                            let context = shared.context.read().unwrap().clone();
+                            let visibility = match faces.take() {
+                                Some((tables, visibility))
+                                    if Arc::ptr_eq(&tables, &context.tables) =>
+                                {
+                                    visibility
+                                }
+                                _ => context.tables.visibility.clone(),
+                            };
+                            let mut mesher = Mesher {
+                                nether_shading: settings.nether,
+                                zoom: settings.zoom,
+                                blend_radius: settings.blend_radius,
+                                smooth_lighting: settings.smooth_lighting,
+                                cutout_leaves: settings.cutout_leaves,
+                                assets: &context.assets,
+                                render: &context.render,
+                                tables: &context.tables,
+                                biomes: &context.biomes,
+                                visibility,
+                            };
+                            let mut mesh = mesher.mesh(&borrow(&region), sy);
+                            mesh.sort_solid();
+                            faces = Some((context.tables.clone(), mesher.visibility));
+                            Done::Meshed(x, sy, z, mesh, seq)
+                        }
+                        Job::Free(meshes) => {
+                            drop(meshes);
+                            return None;
+                        }
+                    })
                 }
             }
         };
@@ -572,7 +652,6 @@ impl Streaming {
             (
                 Inline {
                     run: Box::new(worker(generator.clone(), context.light.clone())),
-                    send: send.clone(),
                 },
                 Vec::new(),
                 INLINE_WORKERS,
@@ -587,7 +666,6 @@ impl Streaming {
             let mut handles = Vec::new();
             for i in 0..count {
                 let shared = shared.clone();
-                let send = send.clone();
                 let generator = generator.clone();
                 let light = context.light.clone();
                 let worker = worker.clone();
@@ -608,8 +686,8 @@ impl Streaming {
                                 queue = shared.ready.wait(queue).unwrap();
                             }
                         };
-                        if send.send(run(job)).is_err() {
-                            return;
+                        if let Some(done) = run(job) {
+                            shared.done.send(done);
                         }
                     }
                 };
@@ -633,13 +711,12 @@ impl Streaming {
         Self {
             shared,
             light_view,
-            results,
             threads,
             worker_count,
             #[cfg(all(target_family = "wasm", not(target_feature = "atomics")))]
             inline,
             #[cfg(all(target_family = "wasm", not(target_feature = "atomics")))]
-            job_costs: [0.0; 6],
+            job_costs: [0.0; 7],
             order: 0,
             scan_age: 0,
             scan_area: ((i32::MIN, i32::MIN), i32::MIN),
@@ -742,6 +819,17 @@ impl Streaming {
             }
         }
     }
+    /// Give back meshes the renderer has copied: a worker frees them, ahead of
+    /// other jobs, as vanilla's compile task closes its mesh data on its own
+    /// thread once copied (`SectionRenderDispatcher.RenderSection.CompileTask.doTask`).
+    /// Freed in the frame, the hundreds of meshes a chunk border brings waited
+    /// on the allocator behind every busy worker: up to 20 ms of a frame each
+    /// time while flying at render distance 32.
+    pub fn free(&mut self, meshes: Vec<((i32, i32, i32), SectionMesh)>) {
+        if !meshes.is_empty() {
+            self.submit(None, 0, Job::Free(meshes));
+        }
+    }
     /// A column the server unloaded (ClientboundForgetLevelChunkPacket).
     pub fn forget(&mut self, world: &mut World, x: i32, z: i32) -> Option<Arc<Chunk>> {
         self.lit.remove(&(x, z));
@@ -758,7 +846,7 @@ impl Streaming {
     }
     /// Queue a job for the column `at`, nearest first: its distance (`distance`)
     /// times four plus `bias`, which orders a column's jobs. A job without a
-    /// column (a save) goes ahead of every other.
+    /// column (a save, meshes to free) goes ahead of every other.
     fn submit(&mut self, at: Option<(i32, i32)>, bias: i64, job: Job) {
         self.order += 1;
         let priority = at.map_or(i64::MIN, |(x, z)| self.distance(x, z) * 4 + bias);
@@ -1000,15 +1088,17 @@ impl Streaming {
         let until = cfg!(all(target_family = "wasm", target_feature = "atomics"))
             .then(|| horizon_platform::time::Instant::now() + WEB_RESULTS_TIME);
         let mut deferred = std::mem::take(&mut self.deferred).into_iter();
+        // Meshes made stale meanwhile, freed with the uploaded ones (`free`).
+        let mut stale = Vec::new();
         loop {
             let done = match deferred.next() {
                 Some(done) => done,
                 None if until.is_some_and(|t| horizon_platform::time::Instant::now() >= t) => {
                     break;
                 }
-                None => match self.results.try_recv() {
-                    Ok(done) => done,
-                    Err(_) => break,
+                None => match self.shared.done.try_recv() {
+                    Some(done) => done,
+                    None => break,
                 },
             };
             match done {
@@ -1066,12 +1156,14 @@ impl Streaming {
                 }
                 Done::Meshed(x, sy, z, mesh, seq) => {
                     if self.meshing.get(&(x, sy, z)) != Some(&seq) {
+                        stale.push(((x, sy, z), mesh));
                         continue;
                     }
                     // Its column unloaded while it was meshed: nothing would
                     // ever remove the uploaded section.
                     if !world.chunks.contains_key(&(x, z)) {
                         self.meshing.remove(&(x, sy, z));
+                        stale.push(((x, sy, z), mesh));
                         continue;
                     }
                     self.meshing.remove(&(x, sy, z));
@@ -1080,6 +1172,7 @@ impl Streaming {
                 }
             }
         }
+        self.free(stale);
         drop(results_span);
         let unload_span = crate::spans::begin("streaming_unload_generate");
         let mut removed = Vec::new();
@@ -1523,11 +1616,11 @@ impl Streaming {
             + horizon_platform::time::Duration::from_secs(30);
         while self.decorating > 0 || !self.finishing.is_empty() || self.saving > 0 {
             match self.next_result(deadline) {
-                Ok(Done::Decorated(x, z, region)) => self.receive_decorated(x, z, *region),
-                Ok(Done::Generated(chunk)) => self.receive_generated(chunk, world),
-                Ok(Done::Saved(protos)) => self.receive_saved(protos),
-                Ok(other) => self.deferred.push(other),
-                Err(_) => {
+                Some(Done::Decorated(x, z, region)) => self.receive_decorated(x, z, *region),
+                Some(Done::Generated(chunk)) => self.receive_generated(chunk, world),
+                Some(Done::Saved(protos)) => self.receive_saved(protos),
+                Some(other) => self.deferred.push(other),
+                None => {
                     log::warn!("Horizon: chunk generation did not finish before saving");
                     break;
                 }
@@ -1549,7 +1642,7 @@ impl Streaming {
     /// in `save(true)`, so older generation cannot overwrite the final chunks.
     pub fn poll_save(&mut self, world: &mut World) -> bool {
         let started = horizon_platform::time::Instant::now();
-        while let Ok(done) = self.results.try_recv() {
+        while let Some(done) = self.shared.done.try_recv() {
             match done {
                 Done::Decorated(x, z, region) => self.receive_decorated(x, z, *region),
                 Done::Generated(chunk) => self.receive_generated(chunk, world),
@@ -1576,35 +1669,23 @@ impl Streaming {
     /// queued job itself; the threaded one may not wait on the page's thread,
     /// so it looks until one comes (an integrated server's, on a worker,
     /// sleeps between looks).
-    fn next_result(
-        &mut self,
-        deadline: horizon_platform::time::Instant,
-    ) -> Result<Done, mpsc::RecvTimeoutError> {
-        #[cfg(not(target_family = "wasm"))]
+    fn next_result(&mut self, deadline: horizon_platform::time::Instant) -> Option<Done> {
+        #[cfg(any(not(target_family = "wasm"), target_feature = "atomics"))]
         {
             let left = deadline.saturating_duration_since(horizon_platform::time::Instant::now());
-            self.results.recv_timeout(left)
-        }
-        #[cfg(all(target_family = "wasm", target_feature = "atomics"))]
-        {
-            let left = deadline.saturating_duration_since(horizon_platform::time::Instant::now());
-            horizon_platform::sync::recv_timeout(&self.results, left)
+            self.shared.done.recv_timeout(left)
         }
         #[cfg(all(target_family = "wasm", not(target_feature = "atomics")))]
         loop {
-            if let Ok(done) = self.results.try_recv() {
-                return Ok(done);
+            if let Some(done) = self.shared.done.try_recv() {
+                return Some(done);
             }
             if horizon_platform::time::Instant::now() >= deadline {
-                return Err(mpsc::RecvTimeoutError::Timeout);
+                return None;
             }
-            let job = self.shared.queue.lock().unwrap().pop();
-            match job {
-                Some(queued) => {
-                    let done = (self.inline.run)(queued.job);
-                    let _ = self.inline.send.send(done);
-                }
-                None => return Err(mpsc::RecvTimeoutError::Disconnected),
+            let queued = self.shared.queue.lock().unwrap().pop()?;
+            if let Some(done) = (self.inline.run)(queued.job) {
+                self.shared.done.send(done);
             }
         }
     }
@@ -1655,7 +1736,9 @@ impl Streaming {
                 *cost * 0.8 + took * 0.2
             };
             ran += 1;
-            let _ = self.inline.send.send(done);
+            if let Some(done) = done {
+                self.shared.done.send(done);
+            }
         }
         self.shared.queue.lock().unwrap().extend(waiting);
     }
@@ -1726,7 +1809,7 @@ impl Streaming {
     /// Wait up to `timeout` for a worker to finish a job; the next `update`
     /// takes it. A server pumps generation with this between its ticks.
     pub fn wait(&mut self, timeout: horizon_platform::time::Duration) {
-        if let Ok(done) = horizon_platform::sync::recv_timeout(&self.results, timeout) {
+        if let Some(done) = self.shared.done.recv_timeout(timeout) {
             self.deferred.push(done);
         }
     }
@@ -2008,9 +2091,9 @@ impl Drop for Streaming {
             + horizon_platform::time::Duration::from_secs(30);
         while self.saving > 0 {
             match self.next_result(deadline) {
-                Ok(Done::Saved(_)) => self.saving -= 1,
-                Ok(_) => {}
-                Err(_) => break,
+                Some(Done::Saved(_)) => self.saving -= 1,
+                Some(_) => {}
+                None => break,
             }
         }
         self.shared.stop.store(true, Ordering::Relaxed);
@@ -2047,6 +2130,37 @@ fn rank_again(queue: &mut BinaryHeap<Queued>, distance: impl Fn(i32, i32) -> i64
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The frame never waits for a worker: while one holds the mailbox, the
+    /// frame takes nothing and finds the results, in order, the next time.
+    #[test]
+    fn the_frame_takes_finished_jobs_without_waiting() {
+        let mailbox = Mailbox::default();
+        let lit = |seq| Done::Lit(0, 0, Vec::new(), seq);
+        mailbox.send(lit(1));
+        mailbox.send(lit(2));
+        let sending = mailbox.done.lock().unwrap();
+        assert!(mailbox.take().is_empty());
+        assert!(mailbox.try_recv().is_none());
+        drop(sending);
+        let seqs: Vec<u64> = mailbox
+            .take()
+            .into_iter()
+            .map(|done| match done {
+                Done::Lit(_, _, _, seq) => seq,
+                _ => unreachable!(),
+            })
+            .collect();
+        assert_eq!(seqs, [1, 2]);
+        assert!(mailbox.take().is_empty());
+        let waiting = std::time::Instant::now();
+        assert!(
+            mailbox
+                .recv_timeout(std::time::Duration::from_millis(10))
+                .is_none()
+        );
+        assert!(waiting.elapsed() >= std::time::Duration::from_millis(10));
+    }
 
     #[test]
     fn queued_jobs_follow_the_centre_and_the_loading_screen() {

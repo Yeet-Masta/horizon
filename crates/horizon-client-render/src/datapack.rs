@@ -3,7 +3,10 @@
 //! line continuation), function tags and predicates.
 use crate::zip::Zip;
 use horizon_platform::fs::PathExt as _;
-use horizon_world::nbt::Tag;
+use horizon_world::{
+    nbt::Tag,
+    worldgen::overrides::{self, PackFile, WorldgenOverrides},
+};
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
@@ -124,6 +127,117 @@ pub fn discover(world: &Path) -> Vec<DataPack> {
     }
     packs.sort_by(|a, b| a.id.cmp(&b.id));
     packs
+}
+
+// ---- Create World ------------------------------------------------------------
+
+/// Create World's Data Packs screen (`PackSelectionScreen` on vanilla's
+/// `mcworld-` folder): the folder's packs (`PackSource.WORLD`) and the
+/// built-in one (`resources` holds its `pack.png`), which can be unselected
+/// and stays at the bottom. Horizon has no experiments, so their feature
+/// packs are not offered.
+pub fn screen_packs(dir: &Path, resources: &Path) -> Vec<crate::pack_screen::PackInfo> {
+    use crate::{
+        pack_screen::{Compat, PackInfo, Source, load_icon},
+        packs::Position,
+        text::{Style, Text},
+    };
+    let format = horizon_core::version::DATA_PACK_FORMAT;
+    let mut infos: Vec<PackInfo> = crate::packs::folder(dir, format)
+        .into_iter()
+        .map(|p| PackInfo {
+            icon: p.icon_png().as_deref().and_then(load_icon),
+            id: p.id,
+            title: p.title,
+            description: p.raw_description,
+            description_style: p.description_style,
+            source: Source::World,
+            compat: p.compatibility,
+            required: false,
+            position: Position::Top,
+            fixed: false,
+        })
+        .collect();
+    infos.push(PackInfo {
+        id: "vanilla".into(),
+        title: Text::translate("dataPack.vanilla.name", &[]),
+        description: Text::translate("dataPack.vanilla.description", &[]),
+        description_style: Style::default(),
+        source: Source::BuiltIn,
+        compat: Compat::Compatible,
+        icon: horizon_platform::fs::read(resources.join("pack.png"))
+            .ok()
+            .as_deref()
+            .and_then(load_icon),
+        required: false,
+        position: Position::Bottom,
+        fixed: false,
+    });
+    infos
+}
+/// A new empty folder for Create World's packs
+/// (`Files.createTempDirectory("mcworld-")`).
+pub fn temp_folder() -> std::io::Result<PathBuf> {
+    let nanos = horizon_platform::time::SystemTime::now()
+        .duration_since(horizon_platform::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let dir = horizon_platform::env::temp_dir().join(format!(
+        "mcworld-{}-{nanos}",
+        horizon_platform::process::id()
+    ));
+    horizon_platform::fs::create_dir_all(&dir)?;
+    Ok(dir)
+}
+/// What's in a folder of packs, to notice packs added or removed while the
+/// screen shows it (`PackSelectionScreen.Watcher`).
+pub fn folder_stamp(dir: &Path) -> Vec<(String, Option<horizon_platform::time::SystemTime>)> {
+    let mut stamp: Vec<_> = horizon_platform::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| {
+            let modified = e.metadata().and_then(|m| m.modified()).ok();
+            (e.file_name().to_string_lossy().into_owned(), modified)
+        })
+        .collect();
+    stamp.sort();
+    stamp
+}
+/// Create World's packs into the new world before it opens
+/// (`copyTempDataPackDirToNewWorld`): every pack of `dir` goes to
+/// `<world>/datapacks`, and `datapacks.json` enables those `selected`
+/// (lowest priority first) and disables the rest.
+pub fn install(dir: &Path, world: &Path, selected: &[String]) -> Result<(), String> {
+    let err = |p: &Path, e: std::io::Error| format!("{}: {e}", p.display());
+    let target = world.join("datapacks");
+    horizon_platform::fs::create_dir_all(&target).map_err(|e| err(&target, e))?;
+    let mut disabled = Vec::new();
+    for pack in crate::packs::folder(dir, horizon_core::version::DATA_PACK_FORMAT) {
+        let (crate::packs::Source::Dir(from) | crate::packs::Source::Zip(from)) = &pack.source;
+        copy(from, &target.join(pack.id.trim_start_matches("file/")))?;
+        if !selected.contains(&pack.id) {
+            disabled.push(pack.id);
+        }
+    }
+    if !selected.iter().any(|id| id == "vanilla") {
+        disabled.push("vanilla".into());
+    }
+    let json = serde_json::json!({ "enabled": selected, "disabled": disabled });
+    let file = world.join("datapacks.json");
+    horizon_platform::fs::write(&file, json.to_string()).map_err(|e| err(&file, e))
+}
+/// A file, or a folder and everything in it.
+fn copy(from: &Path, to: &Path) -> Result<(), String> {
+    let err = |e: std::io::Error| format!("{} -> {}: {e}", from.display(), to.display());
+    if !from.fs_is_dir() {
+        return horizon_platform::fs::copy(from, to).map(drop).map_err(err);
+    }
+    horizon_platform::fs::create_dir_all(to).map_err(err)?;
+    for e in horizon_platform::fs::read_dir(from).map_err(err)?.flatten() {
+        copy(&e.path(), &to.join(e.file_name()))?;
+    }
+    Ok(())
 }
 
 // ---- functions ---------------------------------------------------------------
@@ -422,9 +536,139 @@ fn hash_normalize(s: &str) -> String {
     }
 }
 
+/// The ids of `packs` (a world's, from `discover`) that are enabled, lowest
+/// priority first: those `<world>/datapacks.json` lists as enabled, in its
+/// order, then every pack it lists neither way, in name order.
+pub fn enabled_ids(world: &Path, packs: &[DataPack]) -> Vec<String> {
+    let saved: Option<serde_json::Value> = horizon_platform::fs::read(world.join("datapacks.json"))
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok());
+    let list = |key: &str| -> Vec<String> {
+        saved
+            .as_ref()
+            .and_then(|v| v[key].as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|s| s.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let disabled = list("disabled");
+    let mut enabled: Vec<String> = list("enabled")
+        .into_iter()
+        .filter(|id| packs.iter().any(|p| &p.id == id))
+        .collect();
+    for p in packs {
+        if !enabled.contains(&p.id) && !disabled.contains(&p.id) {
+            enabled.push(p.id.clone());
+        }
+    }
+    enabled
+}
+
+// ---- worldgen ----------------------------------------------------------------
+
+/// The worldgen entries of `packs` (lowest priority first, the built-in pack
+/// left out: the prepared bundles are it) for the chunk generator, and what
+/// it leaves out, for the log. `biomes` says which biomes the game has: a
+/// pack's new biome is left out (the game has no colours, sounds or id for it).
+pub fn worldgen_overrides(
+    packs: &[&DataPack],
+    biomes: impl Fn(&str) -> bool,
+) -> (WorldgenOverrides, Vec<String>) {
+    let mut out = WorldgenOverrides::default();
+    let mut not_read: BTreeMap<String, usize> = BTreeMap::new();
+    let mut warnings = Vec::new();
+    for pack in packs {
+        for file in pack.list_kinds(&overrides::PACK_KINDS) {
+            let read = || String::from_utf8(pack.read(&file)?).ok();
+            match out.add_file(&pack.id, &file, read) {
+                PackFile::Read | PackFile::Other => {}
+                PackFile::DimensionType { id, min_y, height } => warnings.push(format!(
+                    "{}: dimension type {id} (min_y {min_y}, height {height}) is not used: \
+                     the dimension keeps its vanilla build height",
+                    pack.id
+                )),
+                PackFile::NotRead(kind) => {
+                    *not_read.entry(format!("{}: {kind}", pack.id)).or_default() += 1
+                }
+                PackFile::Unreadable => warnings.push(format!("{}: {file}: unreadable", pack.id)),
+            }
+        }
+    }
+    warnings.extend(out.finish(biomes));
+    for (kind, files) in not_read {
+        warnings.push(format!("{kind}: {files} files the generator does not read"));
+    }
+    (out, warnings)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn enabled_packs_override_worldgen_in_order() {
+        let dir = horizon_platform::env::temp_dir()
+            .join(format!("hz-datapack-worldgen-{}", std::process::id()));
+        let _ = horizon_platform::fs::remove_dir_all(&dir);
+        let write = |pack: &str, p: &str, t: &str| {
+            let path = dir.join("datapacks").join(pack).join(p);
+            horizon_platform::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            horizon_platform::fs::write(path, t).unwrap();
+        };
+        for pack in ["a", "b", "off"] {
+            write(pack, "pack.mcmeta", "{}");
+            write(pack, "data/minecraft/worldgen/noise/cave.json", pack);
+            write(
+                pack,
+                "data/minecraft/tags/worldgen/biome/is_hill.json",
+                "{\"values\":[]}",
+            );
+        }
+        write("a", "data/minecraft/worldgen/biome/new_peaks.json", "{}");
+        write("a", "data/minecraft/worldgen/biome/plains.json", "{}");
+        write(
+            "a",
+            "data/minecraft/worldgen/world_preset/normal.json",
+            "{}",
+        );
+        write(
+            "b",
+            "data/minecraft/dimension_type/overworld.json",
+            "{\"min_y\":-64,\"height\":2096}",
+        );
+        // `b` is enabled first, so `a` (enabled after it) wins.
+        horizon_platform::fs::write(
+            dir.join("datapacks.json"),
+            "{\"enabled\":[\"file/b\",\"file/a\"],\"disabled\":[\"file/off\"]}",
+        )
+        .unwrap();
+        let packs = discover(&dir);
+        let enabled = enabled_ids(&dir, &packs);
+        assert_eq!(enabled, ["file/b", "file/a"]);
+        let enabled: Vec<&DataPack> = enabled
+            .iter()
+            .map(|id| packs.iter().find(|p| &p.id == id).unwrap())
+            .collect();
+        let (o, warnings) = worldgen_overrides(&enabled, |b| b == "minecraft:plains");
+        assert_eq!(
+            o.entries("noises").collect::<Vec<_>>(),
+            [("minecraft:cave", "a")]
+        );
+        assert_eq!(
+            o.entries("biomes").collect::<Vec<_>>(),
+            [("minecraft:plains", "{}")]
+        );
+        let tag_packs: Vec<&str> = o.tags("biome_tags").map(|(_, p, _)| p).collect();
+        assert_eq!(tag_packs, ["file/b", "file/a"]);
+        assert_eq!(warnings.len(), 3, "{warnings:?}");
+        assert!(warnings[0].contains("height 2096"));
+        assert!(warnings[1].contains("minecraft:new_peaks"));
+        assert!(warnings[2].contains("worldgen/world_preset"));
+        let _ = horizon_platform::fs::remove_dir_all(&dir);
+    }
     use horizon_world::nbt::parse_snbt;
 
     #[test]
@@ -568,5 +812,56 @@ mod tests {
         assert_eq!(wanted.len(), 7);
         assert_eq!(p.list_kinds(&kinds), wanted);
         let _ = horizon_platform::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn create_world_installs_its_packs() {
+        let root = horizon_platform::env::temp_dir()
+            .join(format!("hz-datapack-install-{}", std::process::id()));
+        let _ = horizon_platform::fs::remove_dir_all(&root);
+        let (dir, world) = (root.join("mcworld"), root.join("world"));
+        let write = |pack: &str, p: &str, t: &str| {
+            let path = dir.join(pack).join(p);
+            horizon_platform::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            horizon_platform::fs::write(path, t).unwrap();
+        };
+        write("fns", "pack.mcmeta", r#"{"pack":{"pack_format":121}}"#);
+        write("fns", "data/x/function/f.mcfunction", "say hi");
+        write("off", "pack.mcmeta", r#"{"pack":{"pack_format":121}}"#);
+        horizon_platform::fs::create_dir_all(&dir).unwrap();
+        let mut zip =
+            zip::ZipWriter::new(horizon_platform::fs::File::create(dir.join("old.zip")).unwrap());
+        zip.start_file("pack.mcmeta", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        std::io::Write::write_all(&mut zip, br#"{"pack":{"pack_format":48}}"#).unwrap();
+        zip.finish().unwrap();
+        let infos = screen_packs(&dir, &root);
+        let ids: Vec<&str> = infos.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(ids, ["file/fns", "file/off", "file/old.zip", "vanilla"]);
+        let compat: Vec<_> = infos.iter().map(|p| p.compat).collect();
+        use crate::pack_screen::Compat;
+        assert_eq!(
+            compat,
+            [
+                Compat::Compatible,
+                Compat::Compatible,
+                Compat::TooOld,
+                Compat::Compatible
+            ]
+        );
+        let selected = ["vanilla", "file/old.zip", "file/fns"].map(String::from);
+        install(&dir, &world, &selected).unwrap();
+        let packs = discover(&world);
+        let ids: Vec<&str> = packs.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(ids, ["file/fns", "file/off", "file/old.zip"]);
+        let saved: serde_json::Value = serde_json::from_slice(
+            &horizon_platform::fs::read(world.join("datapacks.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            saved,
+            serde_json::json!({"enabled": selected, "disabled": ["file/off"]})
+        );
+        let _ = horizon_platform::fs::remove_dir_all(&root);
     }
 }

@@ -165,7 +165,14 @@ fn record(
         ("url", request.url.as_str().into()),
         (
             "time",
-            chrono::Utc::now()
+            // The page's clock on the web build (std's, which chrono reads, panics there).
+            horizon_platform::time::SystemTime::now()
+                .duration_since(horizon_platform::time::UNIX_EPOCH)
+                .ok()
+                .and_then(|d| {
+                    chrono::DateTime::from_timestamp(d.as_secs() as i64, d.subsec_nanos())
+                })
+                .unwrap_or_default()
                 .to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true)
                 .into(),
         ),

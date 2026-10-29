@@ -7,15 +7,15 @@
 //! into its `IntegratedServer`.
 //!
 //! On by default. `--in-frame` (or `--no-server-thread`, or
-//! `HORIZON_SERVER_THREAD=0`) runs the world in the frame instead, the
-//! escape hatch. LAN guests and dedicated servers use the same code either
-//! way.
+//! `HORIZON_SERVER_THREAD=0`) runs the world in the frame instead. That path
+//! is DEPRECATED: never use it, it gets no fixes and will be removed soon.
+//! LAN guests and dedicated servers use the same code either way.
 //!
 //! The web build with threads runs it on a worker (web/README.md), which
 //! starts once the page's event loop turns: the window keeps drawing while
 //! its server opens the world (`poll_integrated_start`).
 use super::{
-    Game, Options, PackResources, Resources, UiResources,
+    Game, Options, PackResources, Resources, UiResources, WorldIcon,
     execution_role::ExecutionRole,
     lan::{LanSettings, Owner},
     world_loading::WorldRequest,
@@ -186,6 +186,8 @@ pub(super) struct Starting {
     handle: Integrated,
     ready: Receiver<Ready>,
     player: String,
+    /// The save's folder in `saves/`, for the world icon once joined.
+    folder: String,
     /// The loading screen's bar, easing towards the opening's progress.
     pub shown: f32,
 }
@@ -297,6 +299,7 @@ impl Game<'_> {
             handle,
             ready,
             player,
+            folder: folder.to_owned(),
             shown: 0.0,
         });
         // Harnesses, control scripts and runs without a window go on with the world open.
@@ -329,13 +332,25 @@ impl Game<'_> {
             }
         };
         let Some(Starting {
-            mut handle, player, ..
+            mut handle,
+            player,
+            folder,
+            ..
         }) = self.integrated_starting.take()
         else {
             return Ok(());
         };
         handle.world_name = world_name;
         self.connect_local(pipe, &player)?;
+        // IntegratedServer.getWorldScreenshotFile: the client grabs the frame
+        // the Select World list shows, and needs the save folder for it.
+        self.world_icon = Some(WorldIcon {
+            path: horizon_platform::env::current_dir()?
+                .join("saves")
+                .join(&folder)
+                .join("icon.png"),
+            last_attempt: None,
+        });
         self.integrated = Some(handle);
         Ok(())
     }
