@@ -61,6 +61,8 @@ web-sys = { version = "0.3.106", features = [
     # Sound: WebAudio (audio.rs `web_output`).
     "AudioBuffer", "AudioContext", "AudioContextState", "AudioDestinationNode", "AudioNode",
     "AudioProcessingEvent", "BaseAudioContext", "ScriptProcessorNode",
+    "AudioWorklet", "AudioWorkletNode", "AudioWorkletNodeOptions", "Worklet", "Blob",
+    "BlobPropertyBag", "Url", "MessagePort",
 ] }
 
 # glam's WebAssembly SIMD is wasm32's (core::arch::wasm32): wasm64, which builds on nightly,

@@ -1134,15 +1134,18 @@ mod tests {
     }
 }
 
-/// The web build's output: the page's WebAudio, a ScriptProcessor pulling
-/// stereo from the mixer between frames, on the page's thread. The context
-/// starts when the player first clicks or presses a key (browsers keep a
-/// page silent until then).
+/// The web build's output: the page's WebAudio. On the threaded build an
+/// AudioWorklet plays what a mixer worker mixes ahead into shared memory
+/// (`worklet`), so a long frame neither delays the mix nor crackles; the
+/// one-thread build, or a browser without AudioWorklet, has a ScriptProcessor
+/// pull stereo from the mixer between frames, on the page's thread. The
+/// context starts when the player first clicks or presses a key (browsers
+/// keep a page silent until then).
 #[cfg(target_family = "wasm")]
 mod web_output {
     use super::{Mixer, Result, mix};
     use horizon_platform::sync::Mutex;
-    use std::sync::Arc;
+    use std::{cell::RefCell, rc::Rc, sync::Arc};
     use wasm_bindgen::{JsCast, closure::Closure, prelude::*};
 
     #[wasm_bindgen]
@@ -1158,57 +1161,43 @@ mod web_output {
         ) -> std::result::Result<(), JsValue>;
     }
 
-    /// Frames per callback: about 43 ms at 48 kHz.
+    /// Frames per ScriptProcessor callback: about 43 ms at 48 kHz.
     const FRAMES: u32 = 2048;
+
+    fn js(e: JsValue) -> String {
+        format!("WebAudio: {e:?}")
+    }
+
+    /// What plays the mix.
+    enum Node {
+        #[cfg(target_feature = "atomics")]
+        Worklet(web_sys::AudioWorkletNode, Arc<worklet::Ring>),
+        Script {
+            node: web_sys::ScriptProcessorNode,
+            _process: Closure<dyn FnMut(web_sys::AudioProcessingEvent)>,
+        },
+    }
 
     pub struct Output {
         context: web_sys::AudioContext,
-        _node: web_sys::ScriptProcessorNode,
-        _process: Closure<dyn FnMut(web_sys::AudioProcessingEvent)>,
+        /// Empty until the worklet's module has loaded.
+        node: Rc<RefCell<Option<Node>>>,
         _resume: Closure<dyn FnMut()>,
     }
     impl Output {
         pub fn open(mixer: Arc<Mutex<Mixer>>) -> Result<Self> {
-            let js = |e: wasm_bindgen::JsValue| format!("WebAudio: {e:?}");
             let context = web_sys::AudioContext::new().map_err(js)?;
             let rate = context.sample_rate() as u32;
-            let node = context
-                .create_script_processor_with_buffer_size_and_number_of_input_channels_and_number_of_output_channels(
-                    FRAMES, 0, 2,
-                )
-                .map_err(js)?;
-            let mut scratch = Vec::new();
-            let mut channel = Vec::new();
-            let mut staging = js_sys::Float32Array::new_with_length(FRAMES);
-            let process = Closure::<dyn FnMut(web_sys::AudioProcessingEvent)>::new(
-                move |event: web_sys::AudioProcessingEvent| {
-                    let Ok(buffer) = event.output_buffer() else {
-                        return;
-                    };
-                    let frames = buffer.length() as usize;
-                    scratch.resize(frames * 2, 0.0f32);
-                    match mixer.lock() {
-                        Ok(mut m) => mix(&mut m, &mut scratch, 2, rate),
-                        Err(_) => scratch.fill(0.0),
-                    }
-                    channel.resize(frames, 0.0f32);
-                    if staging.length() as usize != frames {
-                        staging = js_sys::Float32Array::new_with_length(frames as u32);
-                    }
-                    for side in 0..2 {
-                        for (i, s) in channel.iter_mut().enumerate() {
-                            *s = scratch[i * 2 + side];
-                        }
-                        staging.copy_from(&channel);
-                        let _ = buffer
-                            .unchecked_ref::<Buffer>()
-                            .copy_to_channel(&staging, side as i32);
-                    }
-                },
-            );
-            node.set_onaudioprocess(Some(process.as_ref().unchecked_ref()));
-            node.connect_with_audio_node(&context.destination())
-                .map_err(js)?;
+            let node = Rc::new(RefCell::new(None));
+            #[cfg(target_feature = "atomics")]
+            if let Err(e) = worklet::start(&context, mixer.clone(), node.clone()) {
+                log::warn!("Horizon: no AudioWorklet ({e}), mixing on the page");
+                *node.borrow_mut() = Some(script(&context, mixer)?);
+            }
+            #[cfg(not(target_feature = "atomics"))]
+            {
+                *node.borrow_mut() = Some(script(&context, mixer)?);
+            }
             let resume = {
                 let context = context.clone();
                 Closure::<dyn FnMut()>::new(move || {
@@ -1226,15 +1215,219 @@ mod web_output {
             log::info!("Horizon: audio output WebAudio ({rate} Hz, 2 channels)");
             Ok(Self {
                 context,
-                _node: node,
-                _process: process,
+                node,
                 _resume: resume,
             })
         }
     }
     impl Drop for Output {
         fn drop(&mut self) {
+            match self.node.borrow_mut().take() {
+                #[cfg(target_feature = "atomics")]
+                Some(Node::Worklet(node, ring)) => worklet::stop(&node, &ring),
+                Some(Node::Script { node, .. }) => {
+                    let _ = node.disconnect();
+                }
+                None => {}
+            }
             let _ = self.context.close();
+        }
+    }
+
+    /// The ScriptProcessor: mixes on the page's thread when the browser asks.
+    fn script(context: &web_sys::AudioContext, mixer: Arc<Mutex<Mixer>>) -> Result<Node> {
+        let rate = context.sample_rate() as u32;
+        let node = context
+            .create_script_processor_with_buffer_size_and_number_of_input_channels_and_number_of_output_channels(
+                FRAMES, 0, 2,
+            )
+            .map_err(js)?;
+        let mut scratch = Vec::new();
+        let mut channel = Vec::new();
+        let mut staging = js_sys::Float32Array::new_with_length(FRAMES);
+        let process = Closure::<dyn FnMut(web_sys::AudioProcessingEvent)>::new(
+            move |event: web_sys::AudioProcessingEvent| {
+                let Ok(buffer) = event.output_buffer() else {
+                    return;
+                };
+                let frames = buffer.length() as usize;
+                scratch.resize(frames * 2, 0.0f32);
+                match mixer.lock() {
+                    Ok(mut m) => mix(&mut m, &mut scratch, 2, rate),
+                    Err(_) => scratch.fill(0.0),
+                }
+                channel.resize(frames, 0.0f32);
+                if staging.length() as usize != frames {
+                    staging = js_sys::Float32Array::new_with_length(frames as u32);
+                }
+                for side in 0..2 {
+                    for (i, s) in channel.iter_mut().enumerate() {
+                        *s = scratch[i * 2 + side];
+                    }
+                    staging.copy_from(&channel);
+                    let _ = buffer
+                        .unchecked_ref::<Buffer>()
+                        .copy_to_channel(&staging, side as i32);
+                }
+            },
+        );
+        node.set_onaudioprocess(Some(process.as_ref().unchecked_ref()));
+        node.connect_with_audio_node(&context.destination())
+            .map_err(js)?;
+        Ok(Node::Script {
+            node,
+            _process: process,
+        })
+    }
+
+    /// The threaded build's output: a mixer worker keeps `AHEAD` frames
+    /// mixed in a ring in the module's shared memory, which an AudioWorklet
+    /// (`audio_worklet.js`) plays on the browser's audio thread.
+    #[cfg(target_feature = "atomics")]
+    mod worklet {
+        use super::{Mixer, Node, Result, js, mix};
+        use horizon_platform::sync::Mutex;
+        use std::{
+            cell::RefCell,
+            rc::Rc,
+            sync::{
+                Arc,
+                atomic::{AtomicBool, AtomicU32, Ordering},
+            },
+        };
+        use wasm_bindgen::prelude::*;
+
+        /// The ring's length in frames, a power of two.
+        const RING: u32 = 8192;
+        /// Frames the mixer keeps ahead of the worklet: about 43 ms at
+        /// 48 kHz, as the ScriptProcessor's buffer, which a worker that
+        /// misses a few milliseconds never empties.
+        const AHEAD: u32 = 2048;
+        /// Frames mixed at once under the mixer's lock, which the page takes
+        /// to change sources.
+        const CHUNK: u32 = 256;
+
+        pub(super) struct Ring {
+            /// Frames read (by the worklet) and written (by the mixer):
+            /// counters that wrap.
+            indices: [AtomicU32; 2],
+            /// Interleaved stereo, as f32 bits.
+            samples: Box<[AtomicU32]>,
+            stop: AtomicBool,
+        }
+
+        /// Load the worklet's module, then (`node`) put the node in `slot`.
+        pub(super) fn start(
+            context: &web_sys::AudioContext,
+            mixer: Arc<Mutex<Mixer>>,
+            slot: Rc<RefCell<Option<Node>>>,
+        ) -> Result<()> {
+            let worklet = context.audio_worklet().map_err(js)?;
+            let parts = js_sys::Array::of1(&JsValue::from_str(include_str!("audio_worklet.js")));
+            let kind = web_sys::BlobPropertyBag::new();
+            kind.set_type("text/javascript");
+            let blob =
+                web_sys::Blob::new_with_str_sequence_and_options(&parts, &kind).map_err(js)?;
+            let url = web_sys::Url::create_object_url_with_blob(&blob).map_err(js)?;
+            let added = worklet.add_module(&url).map_err(js)?;
+            let context = context.clone();
+            wasm_bindgen_futures::spawn_local(async move {
+                let added = wasm_bindgen_futures::JsFuture::from(added).await;
+                let _ = web_sys::Url::revoke_object_url(&url);
+                // The output was dropped (its context closed) meanwhile.
+                if Rc::strong_count(&slot) == 1 {
+                    return;
+                }
+                let node = added
+                    .map_err(|e| js(e).into())
+                    .and_then(|_| node(&context, mixer.clone()));
+                let node = node.or_else(|e| {
+                    log::warn!("Horizon: no AudioWorklet ({e}), mixing on the page");
+                    super::script(&context, mixer)
+                });
+                match node {
+                    Ok(node) => *slot.borrow_mut() = Some(node),
+                    Err(e) => log::warn!("Horizon: no audio output: {e}"),
+                }
+            });
+            Ok(())
+        }
+
+        fn node(context: &web_sys::AudioContext, mixer: Arc<Mutex<Mixer>>) -> Result<Node> {
+            let ring = Arc::new(Ring {
+                indices: [AtomicU32::new(0), AtomicU32::new(0)],
+                samples: (0..RING * 2).map(|_| AtomicU32::new(0)).collect(),
+                stop: AtomicBool::new(false),
+            });
+            // The memory's buffer once the ring is in it: a buffer taken
+            // before the memory grew would be too short to view the ring.
+            let memory =
+                js_sys::Reflect::get(&wasm_bindgen::memory(), &"buffer".into()).map_err(js)?;
+            let options = js_sys::Object::new();
+            let set = |key: &str, value: &JsValue| {
+                js_sys::Reflect::set(&options, &key.into(), value).map(drop)
+            };
+            set("memory", &memory).map_err(js)?;
+            set("indices", &(ring.indices.as_ptr() as usize as f64).into()).map_err(js)?;
+            set("samples", &(ring.samples.as_ptr() as usize as f64).into()).map_err(js)?;
+            set("frames", &RING.into()).map_err(js)?;
+            let config = web_sys::AudioWorkletNodeOptions::new();
+            config.set_number_of_inputs(0);
+            config.set_number_of_outputs(1);
+            config.set_output_channel_count(&js_sys::Array::of1(&2.into()));
+            config.set_processor_options(Some(&options));
+            let node =
+                web_sys::AudioWorkletNode::new_with_options(context, "horizon-mixer", &config)
+                    .map_err(js)?;
+            node.connect_with_audio_node(&context.destination())
+                .map_err(js)?;
+            let rate = context.sample_rate() as u32;
+            let worker = ring.clone();
+            if let Err(e) = horizon_platform::thread::spawn_worker("Audio mixer", move || {
+                run(&worker, &mixer, rate)
+            }) {
+                let _ = node.disconnect();
+                return Err(format!("the mixer worker did not start: {e}").into());
+            }
+            log::info!("Horizon: sound mixed on a worker, played by an AudioWorklet");
+            Ok(Node::Worklet(node, ring))
+        }
+
+        /// The mixer worker: keep `AHEAD` frames mixed until stopped.
+        fn run(ring: &Ring, mixer: &Mutex<Mixer>, rate: u32) {
+            let mut scratch = vec![0.0f32; CHUNK as usize * 2];
+            while !ring.stop.load(Ordering::Relaxed) {
+                let read = ring.indices[0].load(Ordering::Acquire);
+                let write = ring.indices[1].load(Ordering::Relaxed);
+                let queued = write.wrapping_sub(read);
+                if queued >= AHEAD {
+                    // 4 ms is under 200 frames at 48 kHz.
+                    horizon_platform::thread::sleep(horizon_platform::time::Duration::from_millis(
+                        4,
+                    ));
+                    continue;
+                }
+                let frames = CHUNK.min(AHEAD - queued);
+                let data = &mut scratch[..frames as usize * 2];
+                match mixer.lock() {
+                    Ok(mut m) => mix(&mut m, data, 2, rate),
+                    Err(_) => data.fill(0.0),
+                }
+                for (i, frame) in data.chunks_exact(2).enumerate() {
+                    let at = (write.wrapping_add(i as u32) & (RING - 1)) as usize * 2;
+                    ring.samples[at].store(frame[0].to_bits(), Ordering::Relaxed);
+                    ring.samples[at + 1].store(frame[1].to_bits(), Ordering::Relaxed);
+                }
+                ring.indices[1].store(write.wrapping_add(frames), Ordering::Release);
+            }
+        }
+
+        pub(super) fn stop(node: &web_sys::AudioWorkletNode, ring: &Ring) {
+            ring.stop.store(true, Ordering::Relaxed);
+            if let Ok(port) = node.port() {
+                let _ = port.post_message(&JsValue::NULL);
+            }
+            let _ = node.disconnect();
         }
     }
 }
