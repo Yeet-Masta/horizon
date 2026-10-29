@@ -244,6 +244,7 @@ mod threads {
     #[wasm_bindgen]
     pub fn horizon_thread_entry(work: u32) {
         WORKER.set(true);
+        super::alloc::worker_started();
         let work = WORK
             .lock()
             .unwrap()

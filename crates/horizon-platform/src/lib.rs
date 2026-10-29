@@ -9,6 +9,12 @@
 //! The rest of the workspace names these modules where it named std's
 //! (`horizon_platform::fs::read`, `horizon_platform::time::Instant`), so a
 //! native build is unchanged.
+// The threaded web build (nightly, it builds std) sleeps its workers on the
+// allocator's lock with wasm's atomic wait (`web/alloc.rs`).
+#![cfg_attr(
+    all(target_family = "wasm", target_feature = "atomics"),
+    feature(stdarch_wasm_atomic_wait)
+)]
 pub mod env;
 pub mod fs;
 pub mod process;
