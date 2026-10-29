@@ -6194,6 +6194,7 @@ impl Game<'_> {
         // max(Hud.leftHeight, Hud.rightHeight) after the bars: the item name and
         // the action bar sit above it.
         let mut bar_height = 39;
+        let hotbar = horizon_client::spans::begin("hud.hotbar");
         if show_hud {
             self.draw_spyglass(&mut batch);
             // Hud.extractCrosshair / extractItemHotbar / extractPlayerHealth /
@@ -6251,6 +6252,7 @@ impl Game<'_> {
             self.draw_extras(&mut batch);
             self.draw_mod_shapes(&mut batch);
         }
+        drop(hotbar);
         if show_hud {
             // Hud.nextContextualInfoState: the jump bar, the experience bar or
             // the locator bar above the hotbar.
@@ -6383,7 +6385,7 @@ impl Game<'_> {
             let tw = HudBatch::text_width(atlas, text);
             batch.text(atlas, text, (w - tw) / 2.0, h - 59.0, u32::MAX, true);
         }
-        self.draw_chat(&mut batch);
+        horizon_client::spans::time("hud.chat", || self.draw_chat(&mut batch));
         self.draw_tab_list(&mut batch);
         // Screen.extractBlurredBackground blurs the world and HUD, while the
         // screen's background, widgets, toasts and debug overlay stay sharp.
@@ -8249,7 +8251,9 @@ impl Game<'_> {
         }
         // `ItemEntityRenderer`.
         self.mark_entity(out.len(), "minecraft:item");
-        self.dropped_item_geometry(camera, alpha, &mut out);
+        horizon_client::spans::time("entity_geometry.items", || {
+            self.dropped_item_geometry(camera, alpha, &mut out)
+        });
         // `VaultRenderer`.
         self.mark_entity(out.len(), "");
         self.vault_geometry(camera, alpha, &mut out);
@@ -8259,17 +8263,23 @@ impl Game<'_> {
         self.mark_entity(out.len(), "minecraft:ominous_item_spawner");
         self.ominous_item_spawner_geometry(camera, alpha, &mut out);
         // Mobs and their projectiles (a span each).
-        self.mob_geometry(camera, alpha, &mut out);
+        horizon_client::spans::time("entity_geometry.mobs", || {
+            self.mob_geometry(camera, alpha, &mut out)
+        });
         // In first person only a shader pack's shadow pass draws the player.
         self.mark_player(out.len(), !self.own_body_in_view());
+        let players = horizon_client::spans::begin("entity_geometry.players");
         self.player_model_geometry(camera, self.clock.camera_fraction(), &mut out);
         self.mark_entity(out.len(), "minecraft:player");
         self.guest_model_geometry(camera, alpha, &mut out);
+        drop(players);
         self.mark_entity(out.len(), "minecraft:evoker_fangs");
         self.fangs_geometry(camera, alpha, &mut out);
         let mut see_through = std::mem::take(&mut self.see_through_vertices);
         see_through.clear();
+        let name_tags = horizon_client::spans::begin("entity_geometry.name_tags");
         self.name_tag_geometry(camera, alpha, &mut out, &mut see_through);
+        drop(name_tags);
         self.text_display_geometry(camera, alpha, &mut out, &mut see_through);
         self.see_through_vertices = see_through;
         // Entity shadows (EntityRenderer.extractShadow).
@@ -8324,6 +8334,7 @@ impl Game<'_> {
             }
         }
         // Block entities (BlockEntityRenderers): chests, shulker boxes, banners, skulls...
+        let block_entities = horizon_client::spans::begin("entity_geometry.block_entities");
         if let Some(r) = &self.renderer {
             let lid = |p: [i32; 3]| self.chest_lid(p, alpha as f32);
             let anim = |p: [i32; 3]| self.block_anim(p, alpha as f32);
@@ -8400,6 +8411,7 @@ impl Game<'_> {
                     .render_breaking(&scene, pos, state.0, stage, &mut out);
             }
         }
+        drop(block_entities);
         // Experience orbs (ExperienceOrbRenderer): pulsing billboards from a 4x4 icon sheet.
         self.mark_entity(out.len(), "minecraft:experience_orb");
         if let Some(r) = self

@@ -81,7 +81,7 @@ pub struct Input<'a> {
     pub color: [f32; 4],
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct MeshKey {
     cell_x: i64,
     cell_z: i64,
@@ -143,79 +143,206 @@ impl Input<'_> {
 pub(crate) struct Mesh {
     key: Option<MeshKey>,
     pub vertices: Vec<crate::mesher::Vertex>,
+    /// The threaded web build builds the mesh on a worker, beside the page.
+    #[cfg(all(target_family = "wasm", target_feature = "atomics"))]
+    worker: Option<worker::Worker>,
 }
 
 impl Mesh {
     /// Returns true only when vertices must be uploaded. Sub-cell motion and
     /// color changes update only the uniform, as in CloudRenderer.prepare.
+    #[cfg(not(all(target_family = "wasm", target_feature = "atomics")))]
     pub fn prepare(&mut self, input: &Input<'_>) -> (bool, Uniform) {
         let (key, uniform) = input.state();
         if self.key.as_ref() == Some(&key) {
             return (false, uniform);
         }
-        self.vertices.clear();
         let (w, h, cells) = input.texture;
-        let (w, h) = (i64::from(*w), i64::from(*h));
-        let (cell_x, cell_z, radius) = (key.cell_x, key.cell_z, key.radius);
-        let bottom = uniform.offset[1];
-        let uv = input.uv;
-        let filled = |cx: i64, cz: i64| cells[(cz.rem_euclid(h) * w + cx.rem_euclid(w)) as usize];
-        for (dx, dz) in self::cells(radius) {
-            let (dx, dz) = (i64::from(dx), i64::from(dz));
-            let (cx, cz) = (cell_x + dx, cell_z + dz);
-            if !filled(cx, cz) {
-                continue;
-            }
-            let x0 = dx as f32 * 12.0;
-            let z0 = dz as f32 * 12.0;
-            let (x1, z1, y0, y1) = (x0 + 12.0, z0 + 12.0, 0.0, 4.0);
-            let mut quad = |p: [[f32; 3]; 4], shade: u32| {
-                for v in p {
-                    // Overlay 4: clouds (unlit, faded by the cloud fog end).
-                    self.vertices.push(crate::mesher::Vertex {
-                        normal: [0; 4],
-                        pos: v,
-                        uv,
-                        layer: 4,
-                        color: u32::MAX,
-                        light: shade,
-
-                        glint_uv: [0.0, 0.0],
-                    });
-                }
-            };
-            if input.fast {
-                for p in flat_cell(x0, z0, 0.0) {
-                    quad(p, 0);
-                }
-                continue;
-            }
-            let quads = [
-                ([[x1, y0, z0], [x1, y0, z1], [x0, y0, z1], [x0, y0, z0]], 1),
-                ([[x0, y1, z0], [x0, y1, z1], [x1, y1, z1], [x1, y1, z0]], 0),
-                ([[x0, y0, z0], [x0, y1, z0], [x1, y1, z0], [x1, y0, z0]], 2),
-                ([[x1, y0, z1], [x1, y1, z1], [x0, y1, z1], [x0, y0, z1]], 2),
-                ([[x0, y0, z1], [x0, y1, z1], [x0, y1, z0], [x0, y0, z0]], 3),
-                ([[x1, y0, z0], [x1, y1, z0], [x1, y1, z1], [x1, y0, z1]], 3),
-            ];
-            let mask = face_mask(
-                dx as i32,
-                dz as i32,
-                bottom,
-                [
-                    !filled(cx, cz - 1),
-                    !filled(cx, cz + 1),
-                    !filled(cx - 1, cz),
-                    !filled(cx + 1, cz),
-                ],
-            );
-            for (direction, inside) in faces(mask) {
-                let (p, shade) = quads[usize::from(direction)];
-                quad(if inside { [p[3], p[2], p[1], p[0]] } else { p }, shade);
-            }
-        }
+        build(&key, (*w, *h, cells), input.uv, &mut self.vertices);
         self.key = Some(key);
         (true, uniform)
+    }
+    /// [`prepare`] on the threaded web build: a new mesh is built on a
+    /// worker, and the last one is drawn, offset from its own cell, until it
+    /// is in (a rebuild of the default Cloud Distance took the page 3-6 ms).
+    #[cfg(all(target_family = "wasm", target_feature = "atomics"))]
+    pub fn prepare(&mut self, input: &Input<'_>) -> (bool, Uniform) {
+        let (key, mut uniform) = input.state();
+        let worker = self.worker.get_or_insert_with(worker::Worker::start);
+        let mut rebuilt = false;
+        if let Some((built, vertices)) = worker.take() {
+            self.key = Some(built);
+            worker.spare = std::mem::replace(&mut self.vertices, vertices);
+            rebuilt = true;
+        }
+        if self.key.as_ref() != Some(&key) {
+            worker.request(&key, input);
+        }
+        // Offset from the cell the drawn mesh was built around, the nearest
+        // of its repeats (the texture's pattern tiles the sky).
+        if let Some(drawn) = &self.key {
+            let (w, h, _) = input.texture;
+            let near = |now: i64, then: i64, size: u32| {
+                let size = i64::from(size.max(1));
+                let d = (now - then + size / 2).rem_euclid(size) - size / 2;
+                (d * 12) as f32
+            };
+            uniform.offset[0] -= near(key.cell_x, drawn.cell_x, *w);
+            uniform.offset[2] -= near(key.cell_z, drawn.cell_z, *h);
+        }
+        (rebuilt, uniform)
+    }
+}
+
+/// The mesh around `key`'s cell, into `out`.
+fn build(
+    key: &MeshKey,
+    (w, h, cells): (u32, u32, &[bool]),
+    uv: [f32; 2],
+    out: &mut Vec<crate::mesher::Vertex>,
+) {
+    out.clear();
+    let (w, h) = (i64::from(w), i64::from(h));
+    let (cell_x, cell_z, radius) = (key.cell_x, key.cell_z, key.radius);
+    // `face_mask` reads the camera's height against the layer only through
+    // these two tests, which the key holds.
+    let bottom = match (key.top, key.bottom) {
+        (true, true) => -2.0,
+        (true, false) => -8.0,
+        _ => 2.0,
+    };
+    let filled = |cx: i64, cz: i64| cells[(cz.rem_euclid(h) * w + cx.rem_euclid(w)) as usize];
+    for (dx, dz) in self::cells(radius) {
+        let (dx, dz) = (i64::from(dx), i64::from(dz));
+        let (cx, cz) = (cell_x + dx, cell_z + dz);
+        if !filled(cx, cz) {
+            continue;
+        }
+        let x0 = dx as f32 * 12.0;
+        let z0 = dz as f32 * 12.0;
+        let (x1, z1, y0, y1) = (x0 + 12.0, z0 + 12.0, 0.0, 4.0);
+        let mut quad = |p: [[f32; 3]; 4], shade: u32| {
+            for v in p {
+                // Overlay 4: clouds (unlit, faded by the cloud fog end).
+                out.push(crate::mesher::Vertex {
+                    normal: [0; 4],
+                    pos: v,
+                    uv,
+                    layer: 4,
+                    color: u32::MAX,
+                    light: shade,
+
+                    glint_uv: [0.0, 0.0],
+                });
+            }
+        };
+        if key.fast {
+            for p in flat_cell(x0, z0, 0.0) {
+                quad(p, 0);
+            }
+            continue;
+        }
+        let quads = [
+            ([[x1, y0, z0], [x1, y0, z1], [x0, y0, z1], [x0, y0, z0]], 1),
+            ([[x0, y1, z0], [x0, y1, z1], [x1, y1, z1], [x1, y1, z0]], 0),
+            ([[x0, y0, z0], [x0, y1, z0], [x1, y1, z0], [x1, y0, z0]], 2),
+            ([[x1, y0, z1], [x1, y1, z1], [x0, y1, z1], [x0, y0, z1]], 2),
+            ([[x0, y0, z1], [x0, y1, z1], [x0, y1, z0], [x0, y0, z0]], 3),
+            ([[x1, y0, z0], [x1, y1, z0], [x1, y1, z1], [x1, y0, z1]], 3),
+        ];
+        let mask = face_mask(
+            dx as i32,
+            dz as i32,
+            bottom,
+            [
+                !filled(cx, cz - 1),
+                !filled(cx, cz + 1),
+                !filled(cx - 1, cz),
+                !filled(cx + 1, cz),
+            ],
+        );
+        for (direction, inside) in faces(mask) {
+            let (p, shade) = quads[usize::from(direction)];
+            quad(if inside { [p[3], p[2], p[1], p[0]] } else { p }, shade);
+        }
+    }
+}
+
+/// The threaded web build's cloud worker: one mesh at a time, the vertices
+/// handed back and forth so their memory is reused.
+#[cfg(all(target_family = "wasm", target_feature = "atomics"))]
+mod worker {
+    use super::{Input, MeshKey, build};
+    use crate::mesher::Vertex;
+    use std::sync::{Arc, mpsc};
+
+    struct Job {
+        key: MeshKey,
+        texture: Arc<(u32, u32, Vec<bool>)>,
+        uv: [f32; 2],
+        vertices: Vec<Vertex>,
+    }
+    pub(super) struct Worker {
+        jobs: mpsc::Sender<Job>,
+        done: mpsc::Receiver<(MeshKey, Vec<Vertex>)>,
+        /// The key being built.
+        busy: Option<MeshKey>,
+        /// Vertices to build the next mesh into.
+        pub(super) spare: Vec<Vertex>,
+        /// The texture, shared with the worker while it is the same.
+        texture: Option<Arc<(u32, u32, Vec<bool>)>>,
+    }
+    impl Worker {
+        pub(super) fn start() -> Self {
+            let (jobs, rx) = mpsc::channel::<Job>();
+            let (tx, done) = mpsc::channel();
+            let _ = horizon_platform::thread::spawn_worker("Clouds", move || {
+                while let Ok(mut job) = rx.recv() {
+                    let (w, h, cells) = &*job.texture;
+                    build(&job.key, (*w, *h, cells), job.uv, &mut job.vertices);
+                    if tx.send((job.key, job.vertices)).is_err() {
+                        return;
+                    }
+                }
+            });
+            Self {
+                jobs,
+                done,
+                busy: None,
+                spare: Vec::new(),
+                texture: None,
+            }
+        }
+        /// A finished mesh.
+        pub(super) fn take(&mut self) -> Option<(MeshKey, Vec<Vertex>)> {
+            let done = self.done.try_recv().ok()?;
+            self.busy = None;
+            Some(done)
+        }
+        /// Build `key`'s mesh, unless one is being built (the next request
+        /// after it finishes asks again).
+        pub(super) fn request(&mut self, key: &MeshKey, input: &Input<'_>) {
+            if self.busy.is_some() {
+                return;
+            }
+            let texture = match &self.texture {
+                Some(t) if **t == *input.texture => t.clone(),
+                _ => {
+                    let t = Arc::new(input.texture.clone());
+                    self.texture = Some(t.clone());
+                    t
+                }
+            };
+            let job = Job {
+                key: key.clone(),
+                texture,
+                uv: input.uv,
+                vertices: std::mem::take(&mut self.spare),
+            };
+            if self.jobs.send(job).is_ok() {
+                self.busy = Some(key.clone());
+            }
+        }
     }
 }
 

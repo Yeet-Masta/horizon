@@ -165,8 +165,9 @@ The web build is the native game with the operating system swapped out
   only once the page's event loop turns, so the window joins it through
   memory at once and the server answers when the world is open
   (`game/integrated.rs`). `--in-frame` (or `?env=HORIZON_SERVER_THREAD=0`)
-  runs the world in the frame instead. Loaders run where they are started,
-  so loading the resources holds the page for a while. The page's thread may not
+  runs the world in the frame instead. The resource loader, the world loader
+  and the other loads run on workers, so their loading screens keep drawing;
+  cloud meshes are built on one too. The page's thread may not
   wait on a lock, so it spins on the locks it shares with the workers
   (`horizon_platform::sync`); the workers wait on them. The `--no-threads` build has no workers: chunk
   work runs between frames, most urgent first, for 8 ms a frame (more while
@@ -175,8 +176,15 @@ The web build is the native game with the operating system swapped out
   they are saved, and single player runs in the frame.
 - **Graphics**: WebGPU only. The device opens before the game starts. Block
   textures are split across texture arrays at the adapter's layer limit.
-  Occlusion culling runs on the render thread. Far terrain (`lodDistance`) is off.
-- **Sound**: WebAudio, mixed by the game's own mixer between frames; it starts
+  Occlusion culling runs on the render thread. GPU occlusion culling tests the
+  boxes of sections that may be hidden in the shader, as on Metal (WebGPU
+  can't force the depth test before it); on a tile-based GPU (Apple, ARM,
+  Qualcomm) it starts from 1,600 sections in view. `?env=HORIZON_GPU_CULL=0`
+  turns it off, to compare. Far terrain (`lodDistance`) is off.
+- **Sound**: WebAudio. On the threaded build a worker runs the game's mixer
+  about 43 ms ahead into shared memory and an AudioWorklet plays it on the
+  browser's audio thread, so a long frame neither delays nor crackles it; the
+  `--no-threads` build mixes between frames (a ScriptProcessor). Sound starts
   at the first click or key press (browsers keep a page silent until then).
   Sounds decode where they start, so the first play of a long track stutters.
 - **Network**: servers through WebSockets, and friends' browsers over WebRTC
