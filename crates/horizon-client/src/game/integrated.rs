@@ -11,10 +11,9 @@
 //! escape hatch. LAN guests and dedicated servers use the same code either
 //! way.
 //!
-//! The web build with threads runs it on a worker. A worker starts only once
-//! the page's event loop turns, so the window can't wait for its server to
-//! open the world: it joins at once, over a pipe whose other end the server
-//! takes up when the world is open ([`Launch::pipe`]).
+//! The web build with threads runs it on a worker (web/README.md), which
+//! starts once the page's event loop turns: the window keeps drawing while
+//! its server opens the world (`poll_integrated_start`).
 use super::{
     Game, Options, PackResources, Resources, UiResources,
     execution_role::ExecutionRole,
@@ -74,8 +73,6 @@ pub(super) struct Integrated {
     tasks: Sender<Task>,
     /// The world's name (`level.dat`'s `LevelName`), for the pause menu.
     pub world_name: String,
-    /// The web build's server, until it says the world is open.
-    ready: Option<Receiver<Ready>>,
 }
 impl Integrated {
     pub fn smoothed_tick_ms(&self) -> f32 {
@@ -113,19 +110,6 @@ impl Integrated {
             }))
             .ok()?;
         horizon_platform::sync::recv_timeout(&rx, Duration::from_secs(10)).ok()
-    }
-    /// The web build's server opened the world (its name) or failed to
-    /// (which ends the window's connection, and [`Self::stop`] says why).
-    pub fn poll_ready(&mut self) {
-        let Some(ready) = &self.ready else {
-            return;
-        };
-        match ready.try_recv() {
-            Ok(Ok((_, world_name))) => self.world_name = world_name,
-            Ok(Err(_)) | Err(std::sync::mpsc::TryRecvError::Disconnected) => {}
-            Err(std::sync::mpsc::TryRecvError::Empty) => return,
-        }
-        self.ready = None;
     }
     /// `IntegratedServer.halt(true)`: returns once the world is saved and let go.
     pub fn stop(mut self) -> Result<()> {
@@ -191,9 +175,18 @@ enum Publish {
 }
 
 /// What the server thread hands the window once the world is open: its end
-/// of the connection (unless the window made the pipe) and the world's
-/// name, or why it failed.
-type Ready = std::result::Result<(Option<Pipe>, String), String>;
+/// of the connection and the world's name, or why it failed.
+type Ready = std::result::Result<(Pipe, String), String>;
+
+/// An integrated server loading its world: the window keeps drawing its
+/// loading screen and joins once the server is ready, as vanilla's client
+/// does while its server prepares (`Minecraft.doWorldLoad`), instead of
+/// waiting for it frozen for the whole load.
+pub(super) struct Starting {
+    handle: Integrated,
+    ready: Receiver<Ready>,
+    player: String,
+}
 
 /// The world to open and the player who owns it.
 struct Launch {
@@ -207,9 +200,6 @@ struct Launch {
     owner: u128,
     /// Its name, for the LAN's MOTD.
     player: String,
-    /// The server's end of the pipe the window already joined through (the
-    /// web build's); without one the server makes the pair.
-    pipe: Option<Pipe>,
 }
 
 impl Game<'_> {
@@ -226,9 +216,8 @@ impl Game<'_> {
                 .as_ref()
                 .is_some_and(|s| s.published().is_some())
     }
-    /// `Minecraft.doWorldLoad`: start the server thread on the world, wait
-    /// until it can be joined, then join it through memory (the web build
-    /// joins at once: see the module's comment).
+    /// `Minecraft.doWorldLoad`: start the server thread on the world; the
+    /// window joins it through memory once it is ready (`poll_integrated_start`).
     pub(super) fn open_integrated(
         &mut self,
         folder: &str,
@@ -241,7 +230,7 @@ impl Game<'_> {
         let player = auth
             .as_ref()
             .map_or_else(|| self.options.player_name(), |a| a.name.clone());
-        let mut launch = Launch {
+        let launch = Launch {
             folder: folder.to_owned(),
             name: name.map(str::to_owned),
             seed,
@@ -250,15 +239,6 @@ impl Game<'_> {
             // An offline-mode server names its players by their offline profile.
             owner: offline_uuid(&player),
             player: player.clone(),
-            pipe: None,
-        };
-        // The web build's window joins through its end before the world is open.
-        let joined = if horizon_platform::WEB {
-            let (window, server) = Pipe::pair();
-            launch.pipe = Some(server);
-            Some(window)
-        } else {
-            None
         };
         let mut options = self.options.clone();
         // A server without a console: no local player, no window, no control socket.
@@ -304,27 +284,53 @@ impl Game<'_> {
                 let _ = ready_tx.send(Err(e.to_string()));
             }
         })?;
-        let mut handle = Integrated {
+        let handle = Integrated {
             flags,
             thread: Some(thread),
             tasks,
             world_name: String::new(),
-            ready: None,
         };
-        let pipe = match joined {
-            Some(pipe) => {
-                handle.ready = Some(ready);
-                pipe
-            }
-            None => match ready.recv() {
-                Ok(Ok((Some(pipe), world_name))) => {
-                    handle.world_name = world_name;
-                    pipe
+        self.integrated_starting = Some(Starting {
+            handle,
+            ready,
+            player,
+        });
+        // Harnesses, control scripts and runs without a window go on with the world open.
+        if self.window.is_none() || super::synchronous_startup(&self.options) {
+            while self.integrated_starting.is_some() {
+                self.poll_integrated_start()?;
+                if self.integrated_starting.is_some() {
+                    horizon_platform::thread::sleep(Duration::from_millis(5));
                 }
-                Ok(Ok((None, _))) | Err(_) => return Err("the integrated server stopped".into()),
-                Ok(Err(e)) => return Err(e.into()),
-            },
+            }
+        }
+        Ok(())
+    }
+
+    /// The starting server's answer, polled each frame: joined once it is ready.
+    pub(super) fn poll_integrated_start(&mut self) -> Result<()> {
+        let Some(starting) = &self.integrated_starting else {
+            return Ok(());
         };
+        let (pipe, world_name) = match starting.ready.try_recv() {
+            Ok(Ok(ready)) => ready,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return Ok(()),
+            Ok(Err(e)) => {
+                self.integrated_starting = None;
+                return Err(e.into());
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.integrated_starting = None;
+                return Err("the integrated server stopped".into());
+            }
+        };
+        let Some(Starting {
+            mut handle, player, ..
+        }) = self.integrated_starting.take()
+        else {
+            return Ok(());
+        };
+        handle.world_name = world_name;
         self.connect_local(pipe, &player)?;
         self.integrated = Some(handle);
         Ok(())
@@ -334,7 +340,7 @@ impl Game<'_> {
     /// second, the world held while the window is paused.
     fn run_integrated(
         &mut self,
-        mut launch: Launch,
+        launch: Launch,
         flags: Arc<Flags>,
         tasks: Receiver<Task>,
         ready: &Sender<Ready>,
@@ -405,13 +411,7 @@ impl Game<'_> {
                 uuid: owner,
                 saved: Some(saved),
             });
-            match launch.pipe.take() {
-                Some(server) => {
-                    host.hub.lan.serve_local(server)?;
-                    None
-                }
-                None => Some(host.hub.lan.connect_local()?),
-            }
+            host.hub.lan.connect_local()?
         };
         self.serving = Some(Serving {
             flags: flags.clone(),
@@ -432,6 +432,7 @@ impl Game<'_> {
             return result.and(stopped);
         }
         let mut next = Instant::now();
+        let mut was_paused = false;
         while !flags.stop.load(Ordering::Relaxed) {
             self.run_tasks();
             if self.agent.hold_server {
@@ -441,6 +442,14 @@ impl Game<'_> {
                 continue;
             }
             let paused = flags.paused.load(Ordering::Relaxed);
+            if paused && !was_paused {
+                // IntegratedServer.tickServer: the tick the game pauses saves
+                // everything (saveEverything, without flushing), as an
+                // autosave does.
+                log::info!("Saving and pausing game...");
+                self.save_game_with(false)?;
+            }
+            was_paused = paused;
             if paused {
                 // Only the connections run.
                 self.tick_server_timed(true)?;
@@ -485,6 +494,8 @@ impl Game<'_> {
             self.lan = Some(host);
         }
         horizon_platform::thread::sleep(Duration::from_millis(100));
+        // ServerPlayer.disconnect: nobody is left in a bed.
+        self.free_player_beds()?;
         self.save_game()?;
         self.lan_close(false);
         self.save.flush()?;
@@ -852,7 +863,6 @@ mod tests {
             })),
             tasks,
             world_name: String::new(),
-            ready: None,
         };
         server.request_stop();
         assert!(flags.stop.load(Ordering::Relaxed));
@@ -873,7 +883,6 @@ mod tests {
             })),
             tasks,
             world_name: String::new(),
-            ready: None,
         };
         assert_eq!(server.stop().unwrap_err().to_string(), "disk write failed");
     }

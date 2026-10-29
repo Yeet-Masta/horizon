@@ -1,0 +1,92 @@
+[package]
+name = "horizon-client-render"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version = "1.90"
+description = "The client's world data, rendering and screens: chunks, meshing, light, streaming, the renderer, the HUD, menus and settings; no gameplay"
+
+[dependencies]
+# std::fs, std::time and std::thread, or the browser's on the web build (web/README.md).
+horizon-platform = { path = "../horizon-platform" }
+horizon-assets = { path = "../horizon-assets" }
+horizon-bench = { path = "../horizon-bench" }
+horizon-client-core = { path = "../horizon-client-core" }
+horizon-client-input = { path = "../horizon-client-input" }
+horizon-command = { path = "../horizon-command" }
+horizon-core = { path = "../horizon-core" }
+horizon-hdr = { path = "../horizon-hdr" }
+horizon-items = { path = "../horizon-items" }
+horizon-protocol = { path = "../horizon-protocol" }
+horizon-shader-api = { path = "../horizon-shader-api" }
+horizon-shaders = { path = "../horizon-shaders" }
+horizon-telemetry = { path = "../horizon-telemetry", default-features = false }
+horizon-theme = { path = "../horizon-theme" }
+horizon-threads = { path = "../horizon-threads" }
+horizon-world = { path = "../horizon-world" }
+ab_glyph = "0.2.32"
+bytemuck = { version = "1.24", features = ["derive"] }
+# Sound (ALSA on Linux); the `audio` feature.
+cpal = { version = "0.16", optional = true }
+chrono = { version = "0.4.42", default-features = false, features = ["clock", "std"] }
+flate2 = { version = "1.1.10", default-features = false, features = ["zlib-rs", "runtime_detection"] }
+glam = "0.30"
+log = "0.4"
+miniz_oxide = "0.8"
+naga = { version = "30.0.1", features = ["wgsl-in", "hlsl-out"] }
+png = "0.18"
+pollster = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1.0.151", features = ["raw_value"] }
+sha2 = "0.10.9"
+symphonia = { version = "0.5", default-features = false, features = ["ogg", "vorbis"] }
+unicode-bidi = "0.3.18"
+wgpu = { version = "30.0.1", default-features = false, features = ["std", "parking_lot", "vulkan", "metal", "wgsl", "naga-ir"] }
+winit = "0.30.13"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+horizon-telemetry = { path = "../horizon-telemetry", default-features = false, features = ["live"] }
+# HTTPS to the Minecraft services (online-mode session join, skins).
+ureq = { version = "2", default-features = false, features = ["tls"] }
+
+# The web build (web/README.md): WebGPU on the page's canvas, WebAudio.
+[target.'cfg(target_family = "wasm")'.dependencies]
+wgpu = { version = "30.0.1", default-features = false, features = ["webgpu", "fragile-send-sync-non-atomic-wasm"] }
+wasm-bindgen = "0.2.129"
+wasm-bindgen-futures = "0.4.79"
+js-sys = "0.3.106"
+web-sys = { version = "0.3.106", features = [
+    "Document", "Window", "Element", "EventTarget", "HtmlCanvasElement",
+    # Sound: WebAudio (audio.rs `web_output`).
+    "AudioBuffer", "AudioContext", "AudioContextState", "AudioDestinationNode", "AudioNode",
+    "AudioProcessingEvent", "BaseAudioContext", "ScriptProcessorNode",
+] }
+
+# glam's WebAssembly SIMD is wasm32's (core::arch::wasm32): wasm64, which builds on nightly,
+# vectorizes through the portable SIMD module instead (web/simd.toml).
+[target.'cfg(target_arch = "wasm64")'.dependencies]
+glam = { version = "0.30", features = ["core-simd"] }
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1", default-features = false, features = ["std", "time"] }
+
+[target.'cfg(windows)'.dependencies]
+wgpu = { version = "30.0.1", default-features = false, features = ["dx12"] }
+
+# The web build has WebGPU only.
+[target.'cfg(not(any(target_os = "macos", target_family = "wasm")))'.dependencies]
+wgpu = { version = "30.0.1", default-features = false, features = ["gles"] }
+
+[features]
+# Sound output: horizon-client's `audio` feature.
+audio = ["dep:cpal"]
+# Helpers horizon-client's tests build their fixtures with.
+test-support = []
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+horizon-items = { path = "../horizon-items", features = ["test-support"] }
+naga = { version = "30.0.1", features = ["wgsl-in", "hlsl-out", "msl-out", "spv-out"] }

@@ -869,6 +869,18 @@ impl Accounts {
     /// Plays as `who`: an account, an offline name (kept, only beside an account that owns the
     /// game), or the game's own name.
     pub fn play_as(&mut self, store: &dyn SecretStore, who: Player) -> Result<(), String> {
+        self.play_as_with(store, who, false)
+    }
+
+    /// [`Self::play_as`], where `offline_without_owner` (the window's hidden developer option,
+    /// `backend::Settings::dev_offline`) lets an offline name play without an account that owns
+    /// the game.
+    pub fn play_as_with(
+        &mut self,
+        store: &dyn SecretStore,
+        who: Player,
+        offline_without_owner: bool,
+    ) -> Result<(), String> {
         match who {
             Player::Microsoft(uuid) => {
                 if !self.accounts.iter().any(|a| a.uuid == uuid) {
@@ -877,7 +889,7 @@ impl Accounts {
                 self.selected = Some(uuid);
             }
             Player::Offline(name) => {
-                if !self.has_owner(store) {
+                if !offline_without_owner && !self.has_owner(store) {
                     return Err(OFFLINE_NEEDS_OWNER.into());
                 }
                 let name = self.add_offline(&name)?;
@@ -907,14 +919,16 @@ impl Accounts {
         Ok(name.to_string())
     }
 
-    /// Forgets an offline name; if it was playing, the game's own name plays.
-    pub fn remove_offline(&mut self, name: &str) -> Result<(), String> {
+    /// Forgets an offline name: its look and its skin and cape files (`skins`) go with it; if
+    /// it was playing, the game's own name plays.
+    pub fn remove_offline(&mut self, name: &str, skins_dir: &Path) -> Result<(), String> {
         let before = self.offline.len();
         self.offline.retain(|n| !n.eq_ignore_ascii_case(name));
         self.looks.remove(&name.to_ascii_lowercase());
         if self.offline.len() == before {
             return Err(format!("No offline name {name}."));
         }
+        crate::skins::forget(skins_dir, name);
         if self
             .offline_selected
             .as_ref()
@@ -1052,6 +1066,23 @@ pub fn launch(
     }
 }
 
+/// The owner gate before the game starts. With the window's hidden developer option
+/// (`backend::Settings::dev_offline`, `offline_without_owner`) no owner is no refusal: the game
+/// starts offline, without a session and without an `owner`. Downloads never come through here:
+/// `backend::download_for_owner` asks [`launch`] itself, so the option never downloads the game.
+pub fn launch_for_game(
+    ep: &Endpoints,
+    client_id: Option<&str>,
+    store: &dyn SecretStore,
+    accounts: &mut Accounts,
+    offline_without_owner: bool,
+) -> Result<Launch, NoOwner> {
+    match launch(ep, client_id, store, accounts) {
+        Err(NoOwner) if offline_without_owner => Ok(Launch::default()),
+        pass => pass,
+    }
+}
+
 /// Write the session for the game, readable by this user only, in a fresh file it deletes
 /// when it reads it.
 pub fn write_session_file(
@@ -1146,13 +1177,18 @@ impl SignIn {
 
 /// The owner gate for the game about to start, then the selected account's session in a file
 /// for it: the file (none: offline) and why the account plays offline this time, if it does.
-pub fn session_for_game(game_home: &Path) -> Result<(Option<PathBuf>, Option<String>), NoOwner> {
+/// `offline_without_owner`: see [`launch_for_game`].
+pub fn session_for_game(
+    game_home: &Path,
+    offline_without_owner: bool,
+) -> Result<(Option<PathBuf>, Option<String>), NoOwner> {
     let mut accounts = Accounts::load();
-    let pass = launch(
+    let pass = launch_for_game(
         &Endpoints::live(),
         client_id().as_deref(),
         store(),
         &mut accounts,
+        offline_without_owner,
     )?;
     let _ = accounts.save();
     let Some((account, secrets)) = pass.session else {
@@ -1162,6 +1198,48 @@ pub fn session_for_game(game_home: &Path) -> Result<(Option<PathBuf>, Option<Str
         Ok(file) => Ok((Some(file), None)),
         Err(e) => Ok((None, Some(e))),
     }
+}
+
+/// Who plays the real Minecraft: Java Edition (a Java instance), past the owner gate itself
+/// ([`launch`]): the selected account when it owns the game, else one that does. With no answer
+/// from the services, an account that owned it plays with its last token. Mojang's game takes the
+/// token on its command line, as Mojang's launcher gives it; that command is never logged.
+pub fn java_player() -> Result<crate::java_launch::Player, String> {
+    let mut accounts = Accounts::load();
+    let player = java_player_with(
+        &Endpoints::live(),
+        client_id().as_deref(),
+        store(),
+        &mut accounts,
+    );
+    let _ = accounts.save();
+    player
+}
+
+fn java_player_with(
+    ep: &Endpoints,
+    client_id: Option<&str>,
+    store: &dyn SecretStore,
+    accounts: &mut Accounts,
+) -> Result<crate::java_launch::Player, String> {
+    let pass = launch(ep, client_id, store, accounts).map_err(|e| e.to_string())?;
+    let kept = || {
+        let order = accounts.selected().into_iter().chain(&accounts.accounts);
+        order
+            .into_iter()
+            .find_map(|a| Some((a.clone(), secrets_in(store, &a.uuid).filter(|s| s.owns)?)))
+    };
+    let (account, secrets) = pass
+        .session
+        .or(pass.owner)
+        .or_else(kept)
+        .ok_or_else(|| NoOwner.to_string())?;
+    Ok(crate::java_launch::Player {
+        name: account.name,
+        uuid: account.uuid,
+        token: secrets.minecraft_token,
+        xuid: secrets.xuid.unwrap_or_default(),
+    })
 }
 
 #[cfg(test)]
