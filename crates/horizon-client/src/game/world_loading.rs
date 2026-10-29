@@ -49,10 +49,12 @@ impl WorldRequest {
         options: &Options,
         settings: &Settings,
     ) -> Result<PreparedWorld> {
+        set_open_progress(0.05);
         // Before any chunk is read: a loaded container with a loot table is rolled as its chunk
         // is decoded (`save::roll_loaded_loot`), and the spawn chunks are read while the world
         // opens. Every world opens here: in-frame, on the server thread, on a dedicated server.
         horizon_client::structure_blocks::loot_data(&options.resources);
+        set_open_progress(0.15);
         let Self {
             save_root,
             folder,
@@ -115,8 +117,11 @@ impl WorldRequest {
             level.position = None;
         }
         let dim = Dim::from_id(&level.dimension);
+        set_open_progress(0.25);
+        // The worldgen bundle, read here the first time: most of the wait.
         let (mut streaming, save, locator) =
             make_streaming(res, pack, options, settings, &save_root, dim, level.seed)?;
+        set_open_progress(0.85);
         streaming.radius = settings.render_distance;
         let mut world = World::new(res.facts().air, level.seed);
         world.fast_lava = dim == Dim::Nether;
@@ -138,6 +143,7 @@ impl WorldRequest {
         }
 
         growth::install_live_features(res, pack, options);
+        set_open_progress(0.95);
 
         // Persist new metadata on the worker too, before publishing the world.
         if !save_root.join("level.dat").fs_exists() {
@@ -156,9 +162,21 @@ impl WorldRequest {
     }
 }
 
+/// How far the world being opened is (`WorldRequest::prepare`), 0 to 1, for
+/// the window's loading screen: on its server thread the window can't see
+/// the world, and the worldgen bundle takes seconds to read on the web build.
+/// One world opens at a time.
+static OPEN_PROGRESS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+pub(super) fn set_open_progress(progress: f32) {
+    OPEN_PROGRESS.store(progress.to_bits(), std::sync::atomic::Ordering::Relaxed);
+}
+pub(super) fn open_progress() -> f32 {
+    f32::from_bits(OPEN_PROGRESS.load(std::sync::atomic::Ordering::Relaxed))
+}
+
 pub(super) struct WorldLoader {
     pub cancelled: bool,
-    handle: JoinHandle<std::result::Result<PreparedWorld, String>>,
+    handle: horizon_platform::thread::ThreadHandle<std::result::Result<PreparedWorld, String>>,
 }
 
 impl WorldLoader {
@@ -169,13 +187,13 @@ impl WorldLoader {
         options: Options,
         settings: Settings,
     ) -> Result<Self> {
-        let handle = horizon_platform::thread::Builder::new()
-            .name("World initialization".into())
-            .spawn(move || {
-                request
-                    .prepare(&res, &pack, &options, &settings)
-                    .map_err(|e| e.to_string())
-            })?;
+        set_open_progress(0.0);
+        // A Web Worker on the web build with threads.
+        let handle = horizon_platform::thread::spawn_thread("World initialization", move || {
+            request
+                .prepare(&res, &pack, &options, &settings)
+                .map_err(|e| e.to_string())
+        })?;
         Ok(Self {
             cancelled: false,
             handle,
@@ -185,12 +203,13 @@ impl WorldLoader {
     // Wait for construction and disposal off the window thread. Keeping this
     // handle prevents a queued reopen racing the old session lock.
     pub fn cancel(self) -> Self {
+        let handle = horizon_platform::thread::spawn_thread("World initialization", move || {
+            drop(self.finish());
+            Err("world initialization cancelled".into())
+        });
         Self {
             cancelled: true,
-            handle: horizon_platform::thread::spawn(move || {
-                drop(self.finish());
-                Err("world initialization cancelled".into())
-            }),
+            handle: handle.expect("spawn the cancelled world's worker"),
         }
     }
 
@@ -217,7 +236,7 @@ enum Preload {
     /// Read, or being read, on the "World data preload" thread. `left`: when
     /// the player last left the world screens.
     Started {
-        thread: horizon_platform::thread::JoinHandle<()>,
+        thread: horizon_platform::thread::ThreadHandle<()>,
         left: Option<horizon_platform::time::Instant>,
     },
     /// A world opened: the data is the world's now, and stays.
@@ -244,24 +263,24 @@ pub(super) fn preload_world_data(
     let mut preload = PRELOAD.lock().unwrap_or_else(|e| e.into_inner());
     match &mut *preload {
         Preload::Used => {}
-        Preload::Idle if on_world_screens => {
+        // The one-thread web build would read it all in a frame: the world
+        // opening reads it instead.
+        Preload::Idle if on_world_screens && horizon_platform::THREADS => {
             let resources = resources.to_owned();
-            let spawned = horizon_platform::thread::Builder::new()
-                .name("World data preload".into())
-                .spawn(move || {
-                    horizon_threads::behind_server();
-                    // Errors are left for the world opening to report.
-                    if let Ok(data) = horizon_client::vanillagen::shared_data(
-                        &resources.join("worldgen"),
-                        registry,
-                    ) {
-                        // The Overworld's feature decoration, which every
-                        // seed shares: about 140 ms off opening the world.
-                        let _ = data.prepare_decoration("minecraft:normal", "minecraft:overworld");
-                    }
-                    let _ = horizon_client::structure_blocks::loot_data(&resources);
-                    let _ = super::lan::sync_data(&resources);
-                });
+            // A Web Worker on the web build with threads.
+            let spawned = horizon_platform::thread::spawn_thread("World data preload", move || {
+                horizon_threads::behind_server();
+                // Errors are left for the world opening to report.
+                if let Ok(data) =
+                    horizon_client::vanillagen::shared_data(&resources.join("worldgen"), registry)
+                {
+                    // The Overworld's feature decoration, which every
+                    // seed shares: about 140 ms off opening the world.
+                    let _ = data.prepare_decoration("minecraft:normal", "minecraft:overworld");
+                }
+                let _ = horizon_client::structure_blocks::loot_data(&resources);
+                let _ = super::lan::sync_data(&resources);
+            });
             match spawned {
                 Ok(thread) => *preload = Preload::Started { thread, left: None },
                 Err(e) => log::warn!("Horizon: world data preload: {e}"),
@@ -297,13 +316,16 @@ pub(super) fn preload_server_loot(resources: &std::path::Path) {
     if horizon_client::structure_blocks::loaded_loot_data().is_some() {
         return;
     }
+    // Not on the one-thread web build, which would read it in a frame.
+    if !horizon_platform::THREADS {
+        return;
+    }
     let resources = resources.to_owned();
-    let spawned = horizon_platform::thread::Builder::new()
-        .name("Loot preload".into())
-        .spawn(move || {
-            horizon_threads::behind_server();
-            let _ = horizon_client::structure_blocks::loot_data(&resources);
-        });
+    // A Web Worker on the web build with threads.
+    let spawned = horizon_platform::thread::spawn_worker("Loot preload", move || {
+        horizon_threads::behind_server();
+        let _ = horizon_client::structure_blocks::loot_data(&resources);
+    });
     if let Err(e) = spawned {
         log::warn!("Horizon: loot preload: {e}");
     }

@@ -215,8 +215,9 @@ const RELOAD_LINES: [&str; 4] = [
 /// on the render thread.
 pub(super) struct PackReload {
     pub(super) progress: Progress,
-    handle:
-        horizon_platform::thread::JoinHandle<std::result::Result<super::packs::StagedPack, String>>,
+    handle: horizon_platform::thread::ThreadHandle<
+        std::result::Result<super::packs::StagedPack, String>,
+    >,
 }
 
 impl Game<'_> {
@@ -443,15 +444,14 @@ impl Game<'_> {
         let (unicode, japanese) = (self.settings.force_unicode, self.settings.japanese_glyphs);
         let progress = Progress::with(&RELOAD_LINES);
         let worker = progress.clone();
-        let handle = horizon_platform::thread::Builder::new()
-            .name("server-pack-reload".into())
-            .spawn(move || {
-                super::packs::stage_pack(
-                    &vanilla, &selected, &server, &mods, &dev_mods, &assets, &res, &context,
-                    unicode, japanese, &worker,
-                )
-                .map_err(|e| e.to_string())
-            });
+        // A Web Worker on the web build with threads.
+        let handle = horizon_platform::thread::spawn_thread("server-pack-reload", move || {
+            super::packs::stage_pack(
+                &vanilla, &selected, &server, &mods, &dev_mods, &assets, &res, &context, unicode,
+                japanese, &worker,
+            )
+            .map_err(|e| e.to_string())
+        });
         match handle {
             Ok(handle) => self.server_packs.reload = Some(PackReload { progress, handle }),
             Err(e) => {

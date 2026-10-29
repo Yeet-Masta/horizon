@@ -256,10 +256,7 @@ use horizon_core::{
 };
 use horizon_core::{geometry::Vec3, random::RandomSource};
 use horizon_platform::fs::PathExt as _;
-use horizon_platform::{
-    thread::JoinHandle,
-    time::{Duration, Instant},
-};
+use horizon_platform::time::{Duration, Instant};
 use horizon_world::{
     block_collision::BlockCollisionRegistry,
     collision_context::{CollisionContext, CollisionEntity, CollisionItem},
@@ -11745,9 +11742,16 @@ impl Game<'_> {
     }
     fn render(&mut self) -> Result<bool> {
         // Minecraft.doWorldLoad: the LevelLoadingScreen while single player's
-        // server starts. Its chunk map and progress are the server's, which
-        // the window doesn't see yet: the title alone, over the menu background.
-        if self.integrated_starting.is_some() {
+        // server starts. Its chunk map is the server's, which the window
+        // doesn't see yet: the title over the menu background and the turning
+        // panorama, with the world's opening as the bar (it takes seconds on
+        // the web build, which would look frozen without).
+        if let Some(starting) = &mut self.integrated_starting {
+            starting.shown = horizon_client::level_loading::smooth(
+                starting.shown,
+                world_loading::open_progress(),
+            );
+            let progress = starting.shown;
             if let Some(renderer) = &mut self.renderer {
                 let mut hud = HudBatch::new([renderer.config.width, renderer.config.height]);
                 let (w, h) = (hud.width, hud.height);
@@ -11760,8 +11764,18 @@ impl Game<'_> {
                     h,
                     false,
                 );
-                horizon_client::level_loading::draw(&mut hud, &self.gui.atlas, None, None);
-                return renderer.render(&loading_frame(&hud));
+                horizon_client::level_loading::draw(
+                    &mut hud,
+                    &self.gui.atlas,
+                    None,
+                    Some(progress),
+                );
+                let mut frame = loading_frame(&hud);
+                frame.yaw = self.panorama_rotation.update(
+                    self.started.elapsed().as_secs_f32(),
+                    self.settings.file.double("panoramaScrollSpeed") as f32,
+                );
+                return renderer.render(&frame);
             }
             return Ok(false);
         }
@@ -11776,7 +11790,7 @@ impl Game<'_> {
                     } else {
                         "Opening world"
                     },
-                    0.0,
+                    world_loading::open_progress(),
                 );
                 return renderer.render(&loading_frame(&hud));
             }
@@ -14441,7 +14455,7 @@ enum PendingWorldEntry {
 
 struct WorldRestLoader {
     progress: Progress,
-    handle: JoinHandle<std::result::Result<(), String>>,
+    handle: horizon_platform::thread::ThreadHandle<std::result::Result<(), String>>,
 }
 
 impl WorldRestLoader {
@@ -14822,31 +14836,31 @@ fn load_resources(
         let root = root.clone();
         let rest_progress = progress.clone();
         let progress = progress.clone();
-        let handle = horizon_platform::thread::Builder::new()
-            .name("world-rest-loader".into())
-            .spawn(move || {
-                let rest = load_world_rest(
-                    &root,
-                    &resources,
-                    &assets,
-                    &behaviour_json,
-                    &gameplay_projection,
-                    &progress,
-                    started,
-                )
-                .map_err(|error| error.to_string())?;
-                resources
-                    .rest
-                    .set(rest)
-                    .map_err(|_| "world resources already loaded".to_owned())?;
-                progress.set(9);
-                horizon_client::telemetry::mark_rest_ready();
-                log::info!(
-                    "Horizon: rest-ready after {} ms",
-                    started.elapsed().as_millis()
-                );
-                Ok(())
-            })?;
+        // A Web Worker on the web build with threads, so the title is up
+        // while the world's tables load (web/README.md).
+        let handle = horizon_platform::thread::spawn_thread("world-rest-loader", move || {
+            let rest = load_world_rest(
+                &root,
+                &resources,
+                &assets,
+                &behaviour_json,
+                &gameplay_projection,
+                &progress,
+                started,
+            )
+            .map_err(|error| error.to_string())?;
+            resources
+                .rest
+                .set(rest)
+                .map_err(|_| "world resources already loaded".to_owned())?;
+            progress.set(9);
+            horizon_client::telemetry::mark_rest_ready();
+            log::info!(
+                "Horizon: rest-ready after {} ms",
+                started.elapsed().as_millis()
+            );
+            Ok(())
+        })?;
         Some(WorldRestLoader {
             progress: rest_progress,
             handle,
@@ -15347,7 +15361,7 @@ struct Loading {
     progress: Progress,
     receiver: Receiver<LoaderMsg>,
     loaded: Option<std::result::Result<Loaded, String>>,
-    handle: Option<JoinHandle<()>>,
+    handle: Option<horizon_platform::thread::ThreadHandle<()>>,
     shown: bool,
     menu: startup_menu::StartupMenu,
     error: Option<Box<dyn std::error::Error>>,

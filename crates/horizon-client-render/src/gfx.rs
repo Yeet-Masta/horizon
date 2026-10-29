@@ -600,12 +600,13 @@ fn sprite_split() -> u32 {
         .filter(|&n| (1..=SPRITE_SPLIT).contains(&n))
         .unwrap_or(SPRITE_SPLIT);
     // WebGPU promises only 256 layers: the web build splits at what its
-    // adapter has, opened before the textures are prepared.
+    // adapter has, opened before the textures are prepared (on the loader's
+    // worker, which can't see the page's device: hence a global).
     #[cfg(target_family = "wasm")]
-    let split = WEB_DEVICE.with_borrow(|opened| match opened {
-        Some(opened) => split.min(opened.1.limits().max_texture_array_layers.max(1)),
-        None => split,
-    });
+    let split = match WEB_LAYERS.load(std::sync::atomic::Ordering::Relaxed) {
+        0 => split,
+        layers => split.min(layers),
+    };
     split
 }
 /// Sprite arrays terrain.wgsl binds (`sprites`, `sprites_1`...).
@@ -918,6 +919,10 @@ type WebDevice = (wgpu::Instance, wgpu::Adapter, wgpu::Device, wgpu::Queue);
 thread_local! {
     static WEB_DEVICE: std::cell::RefCell<Option<WebDevice>> = const { std::cell::RefCell::new(None) };
 }
+/// The web device's `max_texture_array_layers`, for threads other than the
+/// page's (0 until it is open).
+#[cfg(target_family = "wasm")]
+static WEB_LAYERS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 /// Opens the browser's WebGPU device, with what `open_device` asks natively.
 #[cfg(target_family = "wasm")]
 pub async fn open_web_device() -> Result<()> {
@@ -955,6 +960,10 @@ pub async fn open_web_device() -> Result<()> {
         })
         .await
         .map_err(|e| format!("{NO_GPU_DRIVER} (device: {e})"))?;
+    WEB_LAYERS.store(
+        device.limits().max_texture_array_layers.max(1),
+        std::sync::atomic::Ordering::Relaxed,
+    );
     WEB_DEVICE.set(Some((instance, adapter, device, queue)));
     Ok(())
 }

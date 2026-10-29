@@ -186,6 +186,8 @@ pub(super) struct Starting {
     handle: Integrated,
     ready: Receiver<Ready>,
     player: String,
+    /// The loading screen's bar, easing towards the opening's progress.
+    pub shown: f32,
 }
 
 /// The world to open and the player who owns it.
@@ -265,6 +267,7 @@ impl Game<'_> {
         let (ready_tx, ready) = channel();
         let (tasks, server_tasks) = channel();
         let server_flags = flags.clone();
+        super::world_loading::set_open_progress(0.0);
         let thread = horizon_platform::thread::spawn_thread("Server thread", move || {
             // MinecraftServer.spin's Thread.setPriority(8).
             horizon_threads::favour_current();
@@ -294,6 +297,7 @@ impl Game<'_> {
             handle,
             ready,
             player,
+            shown: 0.0,
         });
         // Harnesses, control scripts and runs without a window go on with the world open.
         if self.window.is_none() || super::synchronous_startup(&self.options) {
@@ -419,6 +423,7 @@ impl Game<'_> {
             owner,
             pending: None,
         });
+        super::world_loading::set_open_progress(1.0);
         let _ = ready.send(Ok((pipe, self.level.name.clone())));
         self.settle_spawn()?;
         if let (Some(script), Some(output)) = (

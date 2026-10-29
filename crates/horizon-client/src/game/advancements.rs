@@ -115,7 +115,7 @@ pub(super) struct AdvState {
     pub(super) announced: Vec<Text>,
     /// The tree being read on another thread since the world opened
     /// (`prefetch_advancement_tree`), taken by the first `advancement_tree`.
-    pub(super) pending_tree: Option<horizon_platform::thread::JoinHandle<Tree>>,
+    pub(super) pending_tree: Option<horizon_platform::thread::ThreadHandle<Tree>>,
     /// `inventory_changed`'s criteria by item, built for `tree`.
     inventory_index: Option<(Arc<Tree>, Arc<adv::InventoryIndex>)>,
 }
@@ -297,9 +297,11 @@ impl Game<'_> {
             return;
         }
         let data = self.options.resources.join("data");
-        self.adv.pending_tree = horizon_platform::thread::Builder::new()
-            .name("horizon-advancements".into())
-            .spawn(move || Tree::load(&data))
+        // A Web Worker on the web build with threads.
+        self.adv.pending_tree =
+            horizon_platform::thread::spawn_thread("horizon-advancements", move || {
+                Tree::load(&data)
+            })
             .ok();
     }
     pub(super) fn load_advancements(&mut self) {

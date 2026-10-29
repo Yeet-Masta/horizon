@@ -169,23 +169,25 @@ impl ChunkDecoder {
         let (jobs, todo) = mpsc::channel::<(Arc<ChunkFormat>, Box<C>)>();
         let (finished, done) = mpsc::channel();
         // The thread ends with the connection, when `jobs` is dropped.
-        let spawned = horizon_platform::thread::Builder::new()
-            .name("Chunk decoder".into())
-            .spawn(move || {
-                // A frame waits for its columns, as it would for the render
-                // thread's own work.
-                horizon_threads::favour_current();
-                for (format, packet) in todo {
-                    let column = match &*packet {
-                        C::LevelChunkWithLight(p) => format.column(p),
-                        _ => Err("not a chunk packet".into()),
-                    };
-                    if finished.send((packet, column)).is_err() {
-                        break;
-                    }
+        let work = move || {
+            // A frame waits for its columns, as it would for the render
+            // thread's own work.
+            horizon_threads::favour_current();
+            for (format, packet) in todo {
+                let column = match &*packet {
+                    C::LevelChunkWithLight(p) => format.column(p),
+                    _ => Err("not a chunk packet".into()),
+                };
+                if finished.send((packet, column)).is_err() {
+                    break;
                 }
-            });
-        if let Err(e) = spawned {
+            }
+        };
+        // A Web Worker on the web build with threads; the one-thread build
+        // has none to decode on, so its chunks decode in the frame.
+        if horizon_platform::THREADS
+            && let Err(e) = horizon_platform::thread::spawn_worker("Chunk decoder", work)
+        {
             log::warn!("Horizon: no chunk decoder thread ({e}); chunks decode in the frame");
         }
         Self { jobs, done }

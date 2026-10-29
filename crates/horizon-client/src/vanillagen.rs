@@ -376,32 +376,35 @@ impl VanillaTerrain {
     pub fn search_rings_behind(self: &Arc<Self>) {
         const QUIET: u64 = 2_000;
         const LATEST: u64 = 60_000;
+        // The one-thread web build has no thread to wait on: a chunk or a
+        // query that needs the rings searches them then.
+        if !horizon_platform::THREADS {
+            return;
+        }
         let terrain = Arc::downgrade(self);
-        let spawned = horizon_platform::thread::Builder::new()
-            .name("Ring search".into())
-            .spawn(move || {
-                horizon_threads::idle_current();
-                loop {
-                    horizon_platform::thread::sleep(horizon_platform::time::Duration::from_millis(
-                        500,
-                    ));
-                    // The world closed: nothing to search for.
-                    let Some(terrain) = terrain.upgrade() else {
-                        return;
-                    };
-                    let now = terrain.elapsed_ms();
-                    let last = terrain
-                        .last_proto
-                        .load(std::sync::atomic::Ordering::Relaxed);
-                    if now >= LATEST || (last > 0 && now - last >= QUIET) {
-                        let _ = terrain
-                            .generator
-                            .worker()
-                            .ring_positions("minecraft:strongholds");
-                        return;
-                    }
+        // A Web Worker on the web build with threads (a spawned thread runs
+        // where it is spawned there, and this one waits).
+        let spawned = horizon_platform::thread::spawn_worker("Ring search", move || {
+            horizon_threads::idle_current();
+            loop {
+                horizon_platform::thread::sleep(horizon_platform::time::Duration::from_millis(500));
+                // The world closed: nothing to search for.
+                let Some(terrain) = terrain.upgrade() else {
+                    return;
+                };
+                let now = terrain.elapsed_ms();
+                let last = terrain
+                    .last_proto
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                if now >= LATEST || (last > 0 && now - last >= QUIET) {
+                    let _ = terrain
+                        .generator
+                        .worker()
+                        .ring_positions("minecraft:strongholds");
+                    return;
                 }
-            });
+            }
+        });
         if let Err(e) = spawned {
             log::warn!("ring search thread: {e}");
         }

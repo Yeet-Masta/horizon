@@ -79,9 +79,9 @@ fi
 
 cp "$here/index.html" "$here/horizon.js" "$here/worker.js" "$dist/"
 cp "$here/apache.htaccess" "$dist/.htaccess"
-cp website/public/favicon.svg "$dist/"
-cp website/public/fonts/Geist-Regular.woff2 website/public/fonts/Geist-Medium.woff2 \
-  website/public/fonts/PixelifySans-SemiBold.woff2 website/public/fonts/OFL-*.txt "$dist/fonts/"
+cp docs/media/brand/web/favicon.svg "$dist/"
+cp crates/horizon-theme/fonts/Geist-Regular.ttf crates/horizon-theme/fonts/PixelifySans-SemiBold.ttf \
+  crates/horizon-theme/fonts/OFL-*.txt "$dist/fonts/"
 commit="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
 threads_json=false
 [ "$threads" = 1 ] && threads_json=true
