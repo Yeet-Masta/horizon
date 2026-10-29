@@ -599,6 +599,12 @@ pub struct Renderer {
     pub screenshot: Option<ScreenshotRequest>,
     /// Outcome of the last screenshot: frame size, or the error.
     pub screenshot_result: Option<std::result::Result<[u32; 2], String>>,
+    /// The web build's screenshots in flight: a browser maps the copy only
+    /// once the page's event loop turns, so the PNG is written then, and the
+    /// outcome waits here for the next frame (`screenshot_result`).
+    #[cfg(target_family = "wasm")]
+    screenshots_mapped:
+        std::sync::Arc<horizon_platform::sync::Mutex<Vec<std::result::Result<[u32; 2], String>>>>,
     /// Brightness option (lightmap gamma), 0..1.
     pub gamma: f32,
     /// Optional full-light lightmap (Horizon Extras).
@@ -2873,6 +2879,8 @@ impl Renderer {
             started: Instant::now(),
             screenshot: None,
             screenshot_result: None,
+            #[cfg(target_family = "wasm")]
+            screenshots_mapped: Default::default(),
             gamma: 0.5,
             fullbright: false,
             animated_textures: true,
@@ -5538,11 +5546,24 @@ impl Renderer {
         if let Some(Some(timer)) = Self::pass_timer(&mut self.pack_post, &mut self.native) {
             timer.submitted(&self.queue);
         }
+        #[cfg(not(target_family = "wasm"))]
         if let Some((request, buffer)) = readback {
             self.screenshot_result = Some(
                 self.write_screenshot(&request, &buffer)
                     .map_err(|e| e.to_string()),
             );
+        }
+        #[cfg(target_family = "wasm")]
+        {
+            if let Some((request, buffer)) = readback {
+                self.write_screenshot_later(request, buffer);
+            }
+            if self.screenshot_result.is_none() {
+                let mut mapped = self.screenshots_mapped.lock().unwrap();
+                if !mapped.is_empty() {
+                    self.screenshot_result = Some(mapped.remove(0));
+                }
+            }
         }
         let present = Instant::now();
         if let Some(surface_frame) = surface_frame {
@@ -5647,6 +5668,7 @@ impl Renderer {
             None
         }
     }
+    #[cfg(not(target_family = "wasm"))]
     fn write_screenshot(
         &self,
         request: &ScreenshotRequest,
@@ -5663,49 +5685,71 @@ impl Renderer {
             .recv()
             .map_err(|e| e.to_string())?
             .map_err(|e| e.to_string())?;
-        let (width, height, row) = (
-            self.config.width,
-            self.config.height,
-            padded_row(self.config.width) as usize,
-        );
-        let bgra = matches!(
-            self.config.format.remove_srgb_suffix(),
-            wgpu::TextureFormat::Bgra8Unorm
-        );
-        let mut pixels = Vec::with_capacity((width * height * 4) as usize);
-        {
-            let data = buffer.get_mapped_range(..).map_err(|e| e.to_string())?;
-            for y in 0..height as usize {
-                for px in data[y * row..y * row + width as usize * 4]
-                    .as_chunks::<4>()
-                    .0
-                {
-                    let (r, b) = if bgra { (px[2], px[0]) } else { (px[0], px[2]) };
-                    pixels.extend_from_slice(&[r, px[1], b, 255]);
-                }
+        save_frame(
+            request,
+            buffer,
+            [self.config.width, self.config.height],
+            self.config.format,
+        )
+    }
+    /// [`write_screenshot`] on the web build: the copy is mapped, and the
+    /// PNG written, once the page's event loop turns.
+    #[cfg(target_family = "wasm")]
+    fn write_screenshot_later(&self, request: ScreenshotRequest, buffer: wgpu::Buffer) {
+        let mapped = self.screenshots_mapped.clone();
+        let (size, format) = ([self.config.width, self.config.height], self.config.format);
+        let frame = buffer.clone();
+        buffer.map_async(wgpu::MapMode::Read, .., move |r| {
+            let result = r.map_err(|e| e.to_string()).and_then(|()| {
+                save_frame(&request, &frame, size, format).map_err(|e| e.to_string())
+            });
+            mapped.lock().unwrap().push(result);
+        });
+    }
+}
+/// A mapped screenshot copy of a `size` frame in `format` saved as `request`'s
+/// PNG, then unmapped.
+fn save_frame(
+    request: &ScreenshotRequest,
+    buffer: &wgpu::Buffer,
+    [width, height]: [u32; 2],
+    format: wgpu::TextureFormat,
+) -> Result<[u32; 2]> {
+    let row = padded_row(width) as usize;
+    let bgra = matches!(format.remove_srgb_suffix(), wgpu::TextureFormat::Bgra8Unorm);
+    let mut pixels = Vec::with_capacity((width * height * 4) as usize);
+    {
+        let data = buffer.get_mapped_range(..).map_err(|e| e.to_string())?;
+        for y in 0..height as usize {
+            for px in data[y * row..y * row + width as usize * 4]
+                .as_chunks::<4>()
+                .0
+            {
+                let (r, b) = if bgra { (px[2], px[0]) } else { (px[0], px[2]) };
+                pixels.extend_from_slice(&[r, px[1], b, 255]);
             }
         }
-        buffer.unmap();
-        // NativeImage.resizeSubRectTo on takeAutoScreenshot's grab: the icon
-        // is the frame's centre square averaged down to its size.
-        let (width, height, pixels) = match request.size {
-            Some(size) => (
-                size[0],
-                size[1],
-                square_downscale(&pixels, self.config.width, self.config.height, size),
-            ),
-            None => (self.config.width, self.config.height, pixels),
-        };
-        let mut encoder = png::Encoder::new(
-            std::io::BufWriter::new(horizon_platform::fs::File::create(&request.path)?),
-            width,
-            height,
-        );
-        encoder.set_color(png::ColorType::Rgba);
-        encoder.set_depth(png::BitDepth::Eight);
-        encoder.write_header()?.write_image_data(&pixels)?;
-        Ok([width, height])
     }
+    buffer.unmap();
+    // NativeImage.resizeSubRectTo on takeAutoScreenshot's grab: the icon
+    // is the frame's centre square averaged down to its size.
+    let (width, height, pixels) = match request.size {
+        Some(size) => (
+            size[0],
+            size[1],
+            square_downscale(&pixels, width, height, size),
+        ),
+        None => (width, height, pixels),
+    };
+    let mut encoder = png::Encoder::new(
+        std::io::BufWriter::new(horizon_platform::fs::File::create(&request.path)?),
+        width,
+        height,
+    );
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    encoder.write_header()?.write_image_data(&pixels)?;
+    Ok([width, height])
 }
 /// Centre-crop the frame to a square and average it down to `size`.
 pub(crate) fn square_downscale(pixels: &[u8], width: u32, height: u32, size: [u32; 2]) -> Vec<u8> {
@@ -6322,7 +6366,8 @@ static DISPLAY_LOG: horizon_platform::sync::Mutex<DisplayLog> =
     });
 const DISPLAY_LOG_QUIET: horizon_platform::time::Duration =
     horizon_platform::time::Duration::from_secs(1);
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+// Only Wayland's HDR reports call it so far.
+#[cfg(target_os = "linux")]
 fn log_display(line: String) {
     let now = horizon_platform::time::Instant::now();
     let mut log = DISPLAY_LOG

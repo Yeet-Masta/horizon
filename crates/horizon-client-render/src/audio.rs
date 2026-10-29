@@ -681,10 +681,6 @@ impl Audio {
             stopped: Default::default(),
         }
     }
-    #[cfg(all(not(feature = "audio"), not(target_family = "wasm")))]
-    fn open(_: Arc<Mutex<Mixer>>) -> Result<Stream> {
-        Err("this build has no sound output (built without the `audio` feature)".into())
-    }
     /// The web build has one output, the page's.
     #[cfg(target_family = "wasm")]
     fn open_named(mixer: Arc<Mutex<Mixer>>, _: &str) -> Result<Stream> {

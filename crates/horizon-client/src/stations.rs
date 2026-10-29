@@ -180,7 +180,6 @@ pub fn increased_repair_cost(cost: u32) -> u32 {
 pub fn hover_name(names: &dyn Fn(&str) -> String, stack: &ItemStack) -> String {
     stack
         .custom_name()
-        .map(str::to_owned)
         .or_else(|| stack.item_name())
         .unwrap_or_else(|| names(&stack.item))
 }
@@ -289,7 +288,7 @@ pub fn anvil_result(
             if n != hover_name {
                 naming_cost = 1;
                 price += 1;
-                result.data_mut().custom_name = Some(n.to_owned());
+                result.data_mut().custom_name = Some(horizon_world::nbt::Tag::String(n.into()));
             }
         }
         _ => {
@@ -836,7 +835,7 @@ mod tests {
         assert_eq!(r.cost, 8);
         assert!(r.only_renaming);
         let out = r.result.unwrap();
-        assert_eq!(out.custom_name(), Some("Excalibur"));
+        assert_eq!(out.custom_name().as_deref(), Some("Excalibur"));
         // Renaming alone does not raise the penalty.
         assert_eq!(out.repair_cost(), 7);
         // Same name: nothing to do.
