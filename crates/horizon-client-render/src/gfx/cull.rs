@@ -31,7 +31,8 @@
 //! are drawn in a pass of their own between the phases, which reads phase
 //! 1's depth as a texture and makes the same comparison in the shader: the
 //! fragment's depth against the stored one, greater or equal passing. The
-//! same fragments pass, so the same sections are seen.
+//! same fragments pass, so the same sections are seen. WebGPU has no way to
+//! force the test early either, and takes the same pass.
 use std::num::NonZeroU64;
 use std::sync::{
     Arc,
@@ -97,7 +98,7 @@ pub enum DepthTest {
     /// Forced before the fragment shader, in phase 1's pass (Vulkan).
     Early,
     /// In the fragment shader, against phase 1's depth read as a texture,
-    /// in a pass of its own (Metal).
+    /// in a pass of its own (Metal, WebGPU).
     InShader,
 }
 
@@ -184,9 +185,9 @@ impl Cull {
         adapter.features() & wgpu::Features::SHADER_EARLY_DEPTH_TEST
     }
     /// Where the device can run the test, if it can: Vulkan with early
-    /// depth tests, or Metal, both drawing an indirect multi-draw's entries
-    /// with the instance counts the GPU wrote, with fragment shaders that
-    /// write storage.
+    /// depth tests, or Metal and WebGPU in the shader, all drawing an
+    /// indirect multi-draw's entries with the instance counts the GPU wrote,
+    /// with fragment shaders that write storage.
     pub fn supported(adapter: &wgpu::Adapter, device: &wgpu::Device) -> Option<DepthTest> {
         let depth_test = match adapter.get_info().backend {
             wgpu::Backend::Vulkan
@@ -196,7 +197,7 @@ impl Cull {
             {
                 DepthTest::Early
             }
-            wgpu::Backend::Metal => DepthTest::InShader,
+            wgpu::Backend::Metal | wgpu::Backend::BrowserWebGpu => DepthTest::InShader,
             _ => return None,
         };
         (device

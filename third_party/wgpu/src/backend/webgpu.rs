@@ -929,8 +929,10 @@ fn map_adapter_info(adapter_info: &webgpu_sys::GpuAdapterInfo) -> wgt::AdapterIn
             wgt::DeviceType::Other
         },
         device_pci_bus_id: String::new(),
-        driver: String::new(),
-        driver_info: String::new(),
+        // Horizon: the vendor and architecture the browser tells (`GPUAdapterInfo`), which
+        // the AdapterInfo has no other place for.
+        driver: adapter_info.vendor(),
+        driver_info: adapter_info.architecture(),
         backend: wgt::Backend::BrowserWebGpu,
         subgroup_min_size: adapter_info.subgroup_min_size(),
         subgroup_max_size: adapter_info.subgroup_max_size(),

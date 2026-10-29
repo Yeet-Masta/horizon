@@ -860,10 +860,12 @@ struct Opened {
 fn describe_adapter(adapter: &wgpu::Adapter) {
     let info = adapter.get_info();
     log::info!(
-        "Horizon renderer: {} ({:?}, {:?})",
+        "Horizon renderer: {} ({:?}, {:?}) {} {}",
         info.name,
         info.backend,
-        info.device_type
+        info.device_type,
+        info.driver,
+        info.driver_info
     );
     crate::telemetry::set_gpu(crate::telemetry::Gpu {
         name: info.name.clone(),
@@ -1146,6 +1148,20 @@ enum FirstFrame {
 }
 fn on_off(on: bool) -> &'static str {
     if on { "on" } else { "off" }
+}
+/// A tile-based GPU, which stores and reloads the frame at each pass occlusion
+/// culling adds (`cull::TILED_MIN_SECTIONS`): Apple's under Metal, and in a
+/// browser the GPUs whose vendor (`GPUAdapterInfo.vendor`, in `driver` there)
+/// makes tiled GPUs.
+fn tiled_gpu(info: &wgpu::AdapterInfo) -> bool {
+    match info.backend {
+        wgpu::Backend::Metal => true,
+        wgpu::Backend::BrowserWebGpu => matches!(
+            info.driver.as_str(),
+            "apple" | "arm" | "qualcomm" | "img-tec" | "imagination" | "samsung" | "broadcom"
+        ),
+        _ => false,
+    }
 }
 impl Renderer {
     /// Sections with GPU buffers, for soak tests watching residency.
@@ -2653,7 +2669,7 @@ impl Renderer {
                 let mut cull =
                     cull::Cull::new(&device, config.format.remove_srgb_suffix(), depth_test);
                 cull.always = cull_env.as_deref() == Ok("all");
-                if !cull.always && adapter.get_info().backend == wgpu::Backend::Metal {
+                if !cull.always && tiled_gpu(&adapter.get_info()) {
                     cull.min_sections = cull::TILED_MIN_SECTIONS;
                 }
                 cull
