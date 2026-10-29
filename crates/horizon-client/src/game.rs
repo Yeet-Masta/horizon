@@ -8151,12 +8151,16 @@ impl Game<'_> {
         mut out: Vec<Vertex>,
     ) -> Vec<Vertex> {
         self.entity_spans.borrow_mut().clear();
+        // HORIZON_SPIKES names each part of this function (`entity_geometry.*`).
+        let span = horizon_client::spans::begin("entity_geometry.culling");
         self.prepare_entity_culling(camera);
-        self.prepare_trims();
+        drop(span);
+        horizon_client::spans::time("entity_geometry.trims", || self.prepare_trims());
         self.mark_entity(out.len(), "minecraft:entity_flame");
         // One scan for both passes that draw them (block entities below and the
         // overlay near the end of this function).
-        let cracks = self.cracks(camera);
+        let cracks = horizon_client::spans::time("entity_geometry.cracks", || self.cracks(camera));
+        let span = horizon_client::spans::begin("entity_geometry.fire");
         let fire_yaw = if self.camera_type == perspective::CameraType::ThirdPersonFront {
             self.yaw + 180.0
         } else {
@@ -8249,12 +8253,14 @@ impl Game<'_> {
                 );
             }
         }
+        drop(span);
         // `ItemEntityRenderer`.
         self.mark_entity(out.len(), "minecraft:item");
         horizon_client::spans::time("entity_geometry.items", || {
             self.dropped_item_geometry(camera, alpha, &mut out)
         });
         // `VaultRenderer`.
+        let span = horizon_client::spans::begin("entity_geometry.vaults");
         self.mark_entity(out.len(), "");
         self.vault_geometry(camera, alpha, &mut out);
         // `CampfireRenderer`.
@@ -8262,6 +8268,7 @@ impl Game<'_> {
         self.campfire_geometry(camera, &mut out);
         self.mark_entity(out.len(), "minecraft:ominous_item_spawner");
         self.ominous_item_spawner_geometry(camera, alpha, &mut out);
+        drop(span);
         // Mobs and their projectiles (a span each).
         horizon_client::spans::time("entity_geometry.mobs", || {
             self.mob_geometry(camera, alpha, &mut out)
@@ -8274,15 +8281,20 @@ impl Game<'_> {
         self.guest_model_geometry(camera, alpha, &mut out);
         drop(players);
         self.mark_entity(out.len(), "minecraft:evoker_fangs");
-        self.fangs_geometry(camera, alpha, &mut out);
+        horizon_client::spans::time("entity_geometry.fangs", || {
+            self.fangs_geometry(camera, alpha, &mut out)
+        });
         let mut see_through = std::mem::take(&mut self.see_through_vertices);
         see_through.clear();
         let name_tags = horizon_client::spans::begin("entity_geometry.name_tags");
         self.name_tag_geometry(camera, alpha, &mut out, &mut see_through);
         drop(name_tags);
+        let span = horizon_client::spans::begin("entity_geometry.text_displays");
         self.text_display_geometry(camera, alpha, &mut out, &mut see_through);
+        drop(span);
         self.see_through_vertices = see_through;
         // Entity shadows (EntityRenderer.extractShadow).
+        let span = horizon_client::spans::begin("entity_geometry.shadows");
         self.mark_translucent_entity(out.len(), "minecraft:entity_shadow");
         let shadow_sprite = self
             .settings
@@ -8333,6 +8345,7 @@ impl Game<'_> {
                 );
             }
         }
+        drop(span);
         // Block entities (BlockEntityRenderers): chests, shulker boxes, banners, skulls...
         let block_entities = horizon_client::spans::begin("entity_geometry.block_entities");
         if let Some(r) = &self.renderer {
@@ -8413,6 +8426,7 @@ impl Game<'_> {
         }
         drop(block_entities);
         // Experience orbs (ExperienceOrbRenderer): pulsing billboards from a 4x4 icon sheet.
+        let span = horizon_client::spans::begin("entity_geometry.orbs");
         self.mark_entity(out.len(), "minecraft:experience_orb");
         if let Some(r) = self
             .gui
@@ -8478,7 +8492,9 @@ impl Game<'_> {
                 }
             }
         }
+        drop(span);
         // Falling blocks use their baked model, including non-cubic shapes.
+        let span = horizon_client::spans::begin("entity_geometry.objects");
         self.mark_entity(out.len(), "minecraft:falling_block");
         for f in &self.falling {
             let Some((_, tint)) = self.block_face_sprite(f.state) else {
@@ -8538,8 +8554,10 @@ impl Game<'_> {
         self.rocket_geometry(camera, alpha, &mut out);
         self.mark_entity(out.len(), "minecraft:splash_potion");
         self.thrown_potion_geometry(camera, alpha, &mut out);
+        drop(span);
         // Particles (ParticleEngine.extract): camera-facing quads.
         self.mark_stage(out.len(), "PARTICLES");
+        let span = horizon_client::spans::begin("entity_geometry.particles");
         let world = &self.world;
         self.particles.render(
             camera,
@@ -8549,7 +8567,9 @@ impl Game<'_> {
             &|b| world.light(b[0], b[1], b[2]),
             &mut out,
         );
+        drop(span);
         // Breaking progress overlays (destroy_stage_0..9): ours and the other players'.
+        let _span = horizon_client::spans::begin("entity_geometry.destroy_stages");
         self.mark_stage(out.len(), "DESTROY");
         for &(pos, stage) in &cracks {
             let o = (glam::DVec3::new(f64::from(pos[0]), f64::from(pos[1]), f64::from(pos[2]))
