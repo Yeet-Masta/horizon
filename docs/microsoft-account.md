@@ -187,8 +187,9 @@ through the web build's relay (`horizon-web-relay`, which opens TCP connections 
 `ACCOUNT_HOSTS`, port 443 only) with TLS spoken in the game's module (rustls with RustCrypto's
 algorithms, `horizon_platform::web::https`): the relay carries ciphertext and never sees a token.
 The account's tokens stay in the browser's IndexedDB, encrypted with a non-extractable WebCrypto
-key the page makes, apart from the game folder; Sign out deletes them. The client ID is the
-build's `HORIZON_MSA_CLIENT_ID`, or the page's `?env=HORIZON_MSA_CLIENT_ID=`.
+key the page makes, apart from the game folder; Sign out deletes them. The client ID is Horizon's,
+built in (`CLIENT_ID` in `web_account.rs`); the build's `HORIZON_MSA_CLIENT_ID` or the page's
+`?env=HORIZON_MSA_CLIENT_ID=` replaces it.
 
 ## Skins and capes (part b)
 

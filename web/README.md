@@ -120,9 +120,10 @@ with a key the page makes and can't read back (a non-extractable WebCrypto
 key), apart from the game folder: its export and *Delete saved worlds* leave
 it alone. *Sign out* deletes it.
 
-The sign-in is Horizon's Azure app: the build's `HORIZON_MSA_CLIENT_ID`
-(`HORIZON_MSA_CLIENT_ID=… web/build.sh`), or `?env=HORIZON_MSA_CLIENT_ID=…`
-on the page's URL. A build without one says so when you sign in.
+The sign-in is Horizon's Azure app, built in (`CLIENT_ID` in
+`web_account.rs`). Another one can be set at build time
+(`HORIZON_MSA_CLIENT_ID=… web/build.sh`) or on the page's URL
+(`?env=HORIZON_MSA_CLIENT_ID=…`).
 
 ### Play with friends, browser to browser
 

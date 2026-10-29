@@ -10,7 +10,8 @@
 # Threads and wasm64 build std here, with nightly Rust (rustup adds rust-src). Needs the
 # wasm-bindgen CLI from the commit Cargo.lock pins (the error says the command); wasm-opt
 # (binaryen) is used when it is on the PATH. Serve the result with web/serve.py.
-# HORIZON_MSA_CLIENT_ID in the environment builds in Horizon's Azure app (Microsoft sign-in).
+# HORIZON_MSA_CLIENT_ID in the environment builds in another Azure app for Microsoft sign-in
+# than Horizon's own.
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"

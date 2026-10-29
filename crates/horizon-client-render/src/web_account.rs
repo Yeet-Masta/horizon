@@ -26,7 +26,9 @@ const MINECRAFT: &str = "https://api.minecraftservices.com";
 /// The Minecraft token is renewed when it has less than this left.
 const RENEW_BEFORE: u64 = 3600;
 const TIMEOUT: Duration = Duration::from_secs(20);
-const NOT_CONFIGURED: &str = "This build has no Microsoft sign-in (HORIZON_MSA_CLIENT_ID).";
+/// Horizon's Azure app (Ludovic's registration, approved by Mojang): client IDs
+/// are public, and the web build signs in with it unless told otherwise.
+const CLIENT_ID: &str = "c36a9fb6-4f2a-41ff-90bd-ae7cc92031eb";
 const DOES_NOT_OWN: &str = "This account doesn't own Minecraft: Java Edition.";
 const NO_PROFILE: &str =
     "This account has no Minecraft profile yet. Create one at minecraft.net, then sign in again.";
@@ -40,13 +42,17 @@ fn now() -> u64 {
         .map_or(0, |d| d.as_secs())
 }
 
-/// Horizon's Azure app: the one the page names (`?env=HORIZON_MSA_CLIENT_ID=`), else the build's.
-fn app_id(given: &str) -> Result<String, String> {
-    Some(given.trim().to_owned())
-        .filter(|id| !id.is_empty())
-        .or_else(|| option_env!("HORIZON_MSA_CLIENT_ID").map(|id| id.trim().to_owned()))
-        .filter(|id| !id.is_empty())
-        .ok_or_else(|| NOT_CONFIGURED.to_owned())
+/// The Azure app to sign in with: the one the page names
+/// (`?env=HORIZON_MSA_CLIENT_ID=`), else the build's (`HORIZON_MSA_CLIENT_ID`),
+/// else Horizon's.
+fn app_id(given: &str) -> String {
+    [Some(given), option_env!("HORIZON_MSA_CLIENT_ID")]
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .find(|id| !id.is_empty())
+        .unwrap_or(CLIENT_ID)
+        .to_owned()
 }
 
 enum Body {
@@ -387,7 +393,7 @@ async fn sign_in(
     if relay.trim().is_empty() {
         return Err("Signing in needs a WebSocket relay (Options): a page can't reach Microsoft's sign-in by itself.".into());
     }
-    let client_id = app_id(client_id)?;
+    let client_id = app_id(client_id);
     let (status, v) = send(
         relay,
         "POST",
@@ -489,7 +495,7 @@ async fn session(relay: &str, client_id: &str, record: &str) -> Result<String, S
     let expires_at = record["minecraft_expires_at"].as_u64().unwrap_or(0);
     if expires_at <= now() + RENEW_BEFORE {
         let renewed = async {
-            let id = app_id(client_id)?;
+            let id = app_id(client_id);
             let refresh = record["refresh_token"].as_str().ok_or(SIGN_IN_AGAIN)?;
             let ms = refresh_ms(relay, &id, refresh).await?;
             Ok::<_, String>((minecraft_login(relay, &ms.access).await?, ms.refresh))
