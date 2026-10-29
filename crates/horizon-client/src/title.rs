@@ -43,11 +43,16 @@ fn translate(key: &str, fallback: &str, args: &[&dyn std::fmt::Display]) -> Stri
     format_translation(&lang::get_or(key, fallback), &args).plain()
 }
 
-enum BackupToast {
-    Created { folder: String, bytes: u64 },
+enum WorldToast {
+    Created {
+        folder: String,
+        bytes: u64,
+    },
     Failed(String),
+    /// `SystemToast.onWorldAccessFailure`: the folder of a world that couldn't be locked.
+    AccessFailure(String),
 }
-impl BackupToast {
+impl WorldToast {
     fn text(&self) -> (String, String) {
         match self {
             Self::Created { folder, bytes } => (
@@ -61,6 +66,10 @@ impl BackupToast {
             Self::Failed(error) => (
                 lang::get_or("selectWorld.edit.backupFailed", "Backup failed"),
                 error.clone(),
+            ),
+            Self::AccessFailure(folder) => (
+                lang::get_or("selectWorld.access_failure", "Failed to access world"),
+                folder.clone(),
             ),
         }
     }
@@ -162,8 +171,8 @@ pub struct Title {
     backup_then_open: bool,
     /// The folder to open next, once that backup has finished.
     open_request: Option<String>,
-    /// EditWorldScreen's `SystemToast` (`WORLD_BACKUP`) and its slide.
-    toast: Option<(crate::toasts::Slide, BackupToast)>,
+    /// EditWorldScreen's and WorldOpenFlows' `SystemToast` and its slide.
+    toast: Option<(crate::toasts::Slide, WorldToast)>,
     icons: RefCell<
         std::collections::HashMap<PathBuf, (horizon_platform::time::SystemTime, Option<Vec<u8>>)>,
     >,
@@ -543,8 +552,8 @@ impl Title {
                 self.open_request = Some(folder.clone());
             }
             let toast = match result {
-                Ok(bytes) => BackupToast::Created { folder, bytes },
-                Err(error) => BackupToast::Failed(error),
+                Ok(bytes) => WorldToast::Created { folder, bytes },
+                Err(error) => WorldToast::Failed(error),
             };
             self.toast = Some((crate::toasts::Slide::default(), toast));
         }
@@ -572,9 +581,18 @@ impl Title {
     pub fn take_open_request(&mut self) -> Option<String> {
         self.open_request.take()
     }
-    /// `WorldOpenFlows.openWorldCheckVersionCompatibility`: a world whose file
-    /// fixes are due asks for a backup first; any other opens at once.
+    /// `WorldOpenFlows.openWorld`: a world that can't be locked, as one another
+    /// instance has open, stays closed behind `onWorldAccessFailure`
+    /// (`createWorldAccess`); then `openWorldCheckVersionCompatibility`: a world
+    /// whose file fixes are due asks for a backup first; any other opens at once.
     fn play(&mut self, world: WorldEntry) -> Action {
+        if crate::save::SessionLock::acquire(&self.saves.join(&world.folder)).is_err() {
+            self.toast = Some((
+                crate::toasts::Slide::default(),
+                WorldToast::AccessFailure(world.folder),
+            ));
+            return Action::None;
+        }
         if crate::save::needs_file_fixes(&self.saves.join(&world.folder)) {
             self.mode = Mode::BackupBeforeUpgrade { world };
             return Action::None;
