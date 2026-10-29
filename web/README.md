@@ -61,8 +61,8 @@ serving it, anywhere public.
 
 A browser opens WebSockets but no TCP connections, so the web build reaches
 Minecraft servers through a WebSocket. The Minecraft protocol stays end to end,
-between the game in the tab and the server; only offline-mode servers can be
-joined for now (no account sign-in on the web).
+between the game in the tab and the server. Online-mode servers need a
+Microsoft account signed in on the page (see Microsoft account below).
 
 - A **`ws://` or `wss://` address** in the server list is joined directly: a
   server with a WebSocket listener, or any server behind a WebSocket-to-TCP
@@ -97,6 +97,32 @@ server when it lets pages read it (CORS), else through the relay
 web server lines as the WebSocket). The relay downloads only from public
 addresses, at most 250 MiB, and does so when it reaches servers
 (`--no-downloads` turns it off, `--downloads` on for a relay with rooms only).
+
+### Microsoft account
+
+*Sign in with Microsoft* on the page signs in as the launcher does
+(docs/microsoft-account.md): it shows a code to enter at microsoft.com/link,
+then goes through Xbox Live and the Minecraft services, checks that the
+account owns Java Edition and reads its profile. On Play the Minecraft token
+is renewed when it has less than an hour left and the game plays as that
+profile, so online-mode servers let it in (vanilla's join through the session
+service). Without an account, or when the services can't be reached, the game
+starts offline and says why.
+
+Those services refuse requests from other sites' pages, so the requests go
+through the relay set in Options: it opens TCP connections to them
+(`ACCOUNT_HOSTS` in `crates/horizon-web-relay`, port 443 only;
+`--no-accounts` turns that off) and the game speaks TLS with them itself
+(rustls with RustCrypto's algorithms, `horizon_platform::web::https`), so the
+relay carries ciphertext and never sees a token. The account's record (its
+refresh and Minecraft tokens) stays in this browser's IndexedDB, encrypted
+with a key the page makes and can't read back (a non-extractable WebCrypto
+key), apart from the game folder: its export and *Delete saved worlds* leave
+it alone. *Sign out* deletes it.
+
+The sign-in is Horizon's Azure app: the build's `HORIZON_MSA_CLIENT_ID`
+(`HORIZON_MSA_CLIENT_ID=… web/build.sh`), or `?env=HORIZON_MSA_CLIENT_ID=…`
+on the page's URL. A build without one says so when you sign in.
 
 ### Play with friends, browser to browser
 
@@ -194,5 +220,5 @@ The web build is the native game with the operating system swapped out
   Single player's connection through memory runs on workers, as natively.
 - **Off**: controllers, mods with code (content-only mods still load),
   the system clipboard (copy and paste work inside the game), LAN discovery
-  and Open to LAN (no ports to open), online-mode servers and account
-  sign-in, skin downloads and telemetry.
+  and Open to LAN (no ports to open), chat signing (as natively), skin
+  downloads and telemetry.

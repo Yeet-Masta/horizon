@@ -518,6 +518,12 @@ impl Options {
                 Err(e) => eprintln!("Horizon: not signed in: {e}"),
             }
         }
+        // The web build's page signs in itself and hands the session over
+        // before the game starts (`web_account`).
+        #[cfg(target_family = "wasm")]
+        if let Some(session) = horizon_client::auth::current() {
+            o.player_name = Some(session.name.clone());
+        }
         Ok(Some(o))
     }
 }

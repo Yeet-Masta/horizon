@@ -81,6 +81,8 @@ pub mod trims;
 pub mod ui;
 pub mod vault;
 pub mod weather;
+#[cfg(target_family = "wasm")]
+pub mod web_account;
 pub mod widgets;
 pub mod world;
 pub mod worldborder;

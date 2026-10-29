@@ -3,6 +3,7 @@
 //! a place to keep what the game writes, the console and randomness.
 #[cfg(target_feature = "atomics")]
 mod alloc;
+pub mod https;
 pub mod rtc;
 pub mod socket;
 pub mod vfs;

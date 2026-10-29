@@ -23,6 +23,13 @@ flate2 = "1"
 # .cargo/config.toml) and 0.2 (its `custom` feature).
 getrandom = "0.3"
 getrandom02 = { package = "getrandom", version = "0.2", features = ["custom"] }
+# HTTPS through the relay's TCP tunnel with TLS in the module (web/https.rs), so the relay only
+# carries ciphertext: RustCrypto's algorithms, which build for wasm64 (ring's don't).
+rustls = { version = "0.23", default-features = false, features = ["std", "tls12"] }
+rustls-rustcrypto = "0.0.2-alpha"
+webpki-roots = "1"
+# Its clock is the page's (`UnixTime::now` needs it in a browser).
+rustls-pki-types = { version = "1", features = ["web"] }
 
 [lints]
 workspace = true

@@ -118,6 +118,45 @@ impl Entry {
 thread_local! {
     static SOCKETS: RefCell<HashMap<u32, Entry>> = RefCell::new(HashMap::new());
     static NEXT: Cell<u32> = const { Cell::new(1) };
+    static ALARMS: RefCell<HashMap<u32, Closure<dyn FnMut()>>> = RefCell::new(HashMap::new());
+}
+
+/// A timer that runs `fire` on a socket's state after a while, until
+/// dropped. Its handler lives in this thread's registry, so the futures that
+/// wait with one stay `Send` (a login waits on a worker in a memory
+/// connection's case).
+struct Alarm {
+    key: u32,
+    timer: f64,
+}
+impl Alarm {
+    fn new(
+        state: &Arc<Mutex<State>>,
+        timeout: Duration,
+        fire: impl Fn(&mut State) + 'static,
+    ) -> Self {
+        let state = state.clone();
+        let handler = Closure::<dyn FnMut()>::new(move || {
+            let mut state = state.lock().unwrap();
+            fire(&mut state);
+            state.wake();
+        });
+        let timer = set_timeout(
+            handler.as_ref().unchecked_ref(),
+            timeout.as_secs_f64() * 1000.0,
+        )
+        .as_f64()
+        .unwrap_or_default();
+        let key = NEXT.with(|n| n.replace(n.get() + 1));
+        ALARMS.with(|a| a.borrow_mut().insert(key, handler));
+        Self { key, timer }
+    }
+}
+impl Drop for Alarm {
+    fn drop(&mut self) {
+        clear_timeout(&JsValue::from_f64(self.timer));
+        ALARMS.with(|a| a.borrow_mut().remove(&self.key));
+    }
 }
 
 /// The last clone of a socket closes it.
@@ -176,20 +215,13 @@ impl Socket {
 
     /// Waits until it is open, or for `timeout`; the error says why not.
     pub async fn opened(&self, timeout: Duration) -> Result<(), String> {
-        let state = self.0.state.clone();
-        let expire = Closure::<dyn FnMut()>::new(move || {
-            let mut state = state.lock().unwrap();
+        let _alarm = Alarm::new(&self.0.state, timeout, |state| {
             if !state.open && !state.closed {
                 state.closed = true;
                 state.reason = Some("Timed out".to_owned());
-                state.wake();
             }
         });
-        let timer = set_timeout(
-            expire.as_ref().unchecked_ref(),
-            timeout.as_secs_f64() * 1000.0,
-        );
-        let opened = poll_fn(|cx| {
+        poll_fn(|cx| {
             let mut state = self.0.state.lock().unwrap();
             if state.open {
                 Poll::Ready(Ok(()))
@@ -201,9 +233,7 @@ impl Socket {
                 Poll::Pending
             }
         })
-        .await;
-        clear_timeout(&timer);
-        opened
+        .await
     }
 
     fn over(transport: Transport, keep: Option<Transport>) -> Self {
@@ -297,17 +327,29 @@ impl Socket {
         })
         .await
     }
+    /// [`Socket::readable`], for at most `timeout`: false if nothing came.
+    pub async fn readable_within(&self, timeout: Duration) -> bool {
+        let _alarm = Alarm::new(&self.0.state, timeout, |_| {});
+        let deadline = crate::time::Instant::now() + timeout;
+        poll_fn(|cx| {
+            let mut state = self.0.state.lock().unwrap();
+            if !state.received.is_empty() || state.closed {
+                Poll::Ready(true)
+            } else if crate::time::Instant::now() >= deadline {
+                Poll::Ready(false)
+            } else {
+                state.waker = Some(cx.waker().clone());
+                Poll::Pending
+            }
+        })
+        .await
+    }
     /// The next whole message (what is left of it, if it was partly read);
     /// None once the socket closed or `timeout` passed.
     pub async fn message(&self, timeout: Duration) -> Option<Vec<u8>> {
-        let state = self.0.state.clone();
-        let expire = Closure::<dyn FnMut()>::new(move || state.lock().unwrap().wake());
-        let timer = set_timeout(
-            expire.as_ref().unchecked_ref(),
-            timeout.as_secs_f64() * 1000.0,
-        );
+        let _alarm = Alarm::new(&self.0.state, timeout, |_| {});
         let deadline = crate::time::Instant::now() + timeout;
-        let message = poll_fn(|cx| {
+        poll_fn(|cx| {
             let mut state = self.0.state.lock().unwrap();
             let at = std::mem::take(&mut state.read_at);
             if let Some(mut message) = state.received.pop_front() {
@@ -320,9 +362,7 @@ impl Socket {
                 Poll::Pending
             }
         })
-        .await;
-        clear_timeout(&timer);
-        message
+        .await
     }
     /// Sends `data`, in messages of at most [`MAX_MESSAGE`] bytes. A data
     /// channel whose buffer is full keeps the rest until it drains.

@@ -174,6 +174,22 @@ session service); that is separate work.
 `-Dminecraft.api.discovery.host`; it is how the harness points both the vanilla server and Horizon at
 a local mock.
 
+## The web build
+
+The web build's page signs in itself (`crates/horizon-client-render/src/web_account.rs`, called by
+`web/horizon.js`): the same device-code flow, Xbox Live, XSTS, `launcher/login` (then
+`login_with_xbox`), ownership and profile, and the same renewal before each Play. The session goes
+to the game in memory (`auth::set_current`) instead of a session file, and online-mode joins call
+the session service as above (`auth::join_server_web`).
+
+A page can't call these services itself (they allow no other site's pages), so every request goes
+through the web build's relay (`horizon-web-relay`, which opens TCP connections to the hosts in
+`ACCOUNT_HOSTS`, port 443 only) with TLS spoken in the game's module (rustls with RustCrypto's
+algorithms, `horizon_platform::web::https`): the relay carries ciphertext and never sees a token.
+The account's tokens stay in the browser's IndexedDB, encrypted with a non-extractable WebCrypto
+key the page makes, apart from the game folder; Sign out deletes them. The client ID is the
+build's `HORIZON_MSA_CLIENT_ID`, or the page's `?env=HORIZON_MSA_CLIENT_ID=`.
+
 ## Skins and capes (part b)
 
 Profile properties (`textures`, base64 JSON) arrive in `ClientboundPlayerInfoUpdatePacket` for every

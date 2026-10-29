@@ -9,9 +9,13 @@
 // and sets globalThis.horizonFlush, called here as the page is hidden.
 
 const DB_NAME = "horizon";
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 const FILES = "files"; // the game folder: path -> { kind, data, mtime }
 const RESOURCES = "resources"; // "zip" -> { name, blob } or "folder" -> { name, files: [[path, blob]] }
+// The Microsoft account: "key" -> a non-extractable AES-GCM CryptoKey, "account" -> { name, uuid,
+// iv, data }, data being the account's record (its tokens) encrypted with it. Apart from the game
+// folder, so neither its export nor "Delete saved worlds" touches it.
+const ACCOUNTS = "accounts";
 
 const $ = (id) => document.getElementById(id);
 const shell = $("shell");
@@ -36,8 +40,9 @@ function db() {
   dbPromise ??= new Promise((resolve, reject) => {
     const open = indexedDB.open(DB_NAME, DB_VERSION);
     open.onupgradeneeded = () => {
-      open.result.createObjectStore(FILES);
-      open.result.createObjectStore(RESOURCES);
+      for (const name of [FILES, RESOURCES, ACCOUNTS]) {
+        if (!open.result.objectStoreNames.contains(name)) open.result.createObjectStore(name);
+      }
     };
     open.onsuccess = () => resolve(open.result);
     open.onerror = () => reject(open.error);
@@ -237,6 +242,128 @@ $("forget").addEventListener("click", async () => {
   location.reload();
 });
 
+// ---- The Microsoft account ---------------------------------------------------------------------
+
+// The game's module (its sign-in functions, web_account.rs), once it has loaded.
+let game = null;
+// HORIZON_* variables from the URL: ?env=HORIZON_WEB_WORK_MS=12,HORIZON_SPIKES=30
+function urlEnv() {
+  const env = {};
+  for (const pair of (new URLSearchParams(location.search).get("env") ?? "").split(",").filter(Boolean)) {
+    const at = pair.indexOf("=");
+    if (at > 0) env[pair.slice(0, at)] = pair.slice(at + 1);
+  }
+  return env;
+}
+// Horizon's Azure app: the URL's, else the one the build has (empty).
+const msaClientId = () => urlEnv().HORIZON_MSA_CLIENT_ID ?? "";
+
+async function accountPut(value, key) {
+  const tx = (await db()).transaction(ACCOUNTS, "readwrite");
+  if (value === undefined) tx.objectStore(ACCOUNTS).delete(key);
+  else tx.objectStore(ACCOUNTS).put(value, key);
+  await done(tx);
+}
+async function accountGet(key) {
+  return request((await store(ACCOUNTS)).get(key));
+}
+// The key the record is encrypted with: made once, and never readable by a script.
+async function accountKey() {
+  let key = await accountGet("key");
+  if (!key) {
+    key = await crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]);
+    await accountPut(key, "key");
+  }
+  return key;
+}
+async function saveAccount(record) {
+  const key = await accountKey();
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const data = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, new TextEncoder().encode(record));
+  const { name, uuid } = JSON.parse(record);
+  await accountPut({ name, uuid, iv, data }, "account");
+  showAccount(name);
+}
+async function loadAccount() {
+  const entry = await accountGet("account");
+  if (!entry) return null;
+  const plain = await crypto.subtle.decrypt({ name: "AES-GCM", iv: entry.iv }, await accountKey(), entry.data);
+  return new TextDecoder().decode(plain);
+}
+function showAccount(name) {
+  const text = $("account-text");
+  text.replaceChildren();
+  if (name) {
+    const strong = document.createElement("strong");
+    strong.textContent = name;
+    text.append("Signed in as ", strong, " (Microsoft account): online-mode servers let you in.");
+  } else {
+    text.append("Microsoft account: not signed in. Single player and offline-mode servers need none; online-mode servers do.");
+  }
+  $("sign-in").hidden = !!name;
+  $("sign-out").hidden = !name;
+}
+
+let signing = null; // the AbortController of a sign-in under way
+$("sign-in").addEventListener("click", async () => {
+  if (!game || signing) return;
+  const relay = $("relay").value.trim();
+  if (!relay) {
+    $("relay").closest("details").open = true;
+    setStatus("Signing in needs a WebSocket relay (Options): a page can't reach Microsoft's sign-in by itself.", true);
+    return;
+  }
+  localStorageSet("horizon.relay", relay);
+  signing = new AbortController();
+  $("sign-in").disabled = true;
+  setStatus("Asking Microsoft for a sign-in code…", false, true);
+  try {
+    const record = await game.horizon_account_sign_in(relay, msaClientId(), (code, uri) => {
+      $("user-code").textContent = code;
+      $("sign-in-link").href = uri;
+      $("sign-in-link").textContent = uri.replace(/^https?:\/\/(www\.)?/, "");
+      $("sign-in-code").hidden = false;
+      setStatus("Waiting for you to sign in at Microsoft…", false, true);
+    }, signing.signal);
+    await saveAccount(record);
+    setStatus("");
+  } catch (e) {
+    setStatus(String(e?.message ?? e), true);
+  } finally {
+    signing = null;
+    $("sign-in-code").hidden = true;
+    $("sign-in").disabled = false;
+  }
+});
+$("cancel-sign-in").addEventListener("click", () => signing?.abort());
+$("copy-code").addEventListener("click", () => navigator.clipboard?.writeText($("user-code").textContent));
+$("sign-out").addEventListener("click", async () => {
+  await accountPut(undefined, "account");
+  showAccount(null);
+  setStatus("Signed out: this browser no longer keeps the account. To revoke Horizon's access too, see account.live.com/consent/Manage.");
+});
+accountGet("account").then((entry) => showAccount(entry?.name ?? null)).catch(() => {});
+
+// On Play: the account's tokens renewed as needed, and its session handed to the game.
+async function startSession(relay) {
+  let record;
+  try {
+    record = await loadAccount();
+  } catch (e) {
+    console.warn("Horizon: the saved account can't be read:", e);
+    return;
+  }
+  if (!record || !game) return;
+  setStatus("Signing in to the Minecraft services…", false, true);
+  try {
+    await saveAccount(await game.horizon_account_session(relay, msaClientId(), record));
+  } catch (e) {
+    console.warn(`Horizon: playing offline: ${e?.message ?? e}`);
+    globalThis.horizonStatus?.(`Playing offline: ${e?.message ?? e}`, false);
+    setTimeout(() => { overlay.hidden = true; }, 8000);
+  }
+}
+
 // ---- The game folder ---------------------------------------------------------------------------
 
 $("wipe").addEventListener("click", async () => {
@@ -330,11 +457,9 @@ globalThis.horizonBoot = async () => {
   const relay = $("relay").value.trim();
   localStorageSet("horizon.relay", relay);
   if (relay) boot.env.HORIZON_WEB_RELAY = relay;
-  // HORIZON_* variables from the URL: ?env=HORIZON_WEB_WORK_MS=12,HORIZON_SPIKES=30
-  for (const pair of (params.get("env") ?? "").split(",").filter(Boolean)) {
-    const at = pair.indexOf("=");
-    if (at > 0) boot.env[pair.slice(0, at)] = pair.slice(at + 1);
-  }
+  Object.assign(boot.env, urlEnv());
+  // The signed-in account's session, before the game reads its options.
+  if (relay) await startSession(relay);
   if (chosen.files) {
     boot.resourceFiles = await Promise.all(
       chosen.files.map(async ([path, blob]) => [path, new Uint8Array(await blob.arrayBuffer())]));
@@ -411,7 +536,15 @@ else setStatus(resourceProblem ?? "", !!resourceProblem);
 // it runs `main`, which waits in horizonBoot until Play.
 try {
   const glue = await import("./pkg/horizon-client.js");
-  await glue.default({ module_or_path: new URL("pkg/horizon-client_bg.wasm", import.meta.url) });
+  const ready = () => {
+    game = glue;
+    $("sign-in").disabled = false;
+  };
+  try {
+    await glue.default({ module_or_path: new URL("pkg/horizon-client_bg.wasm", import.meta.url) });
+  } finally {
+    ready();
+  }
 } catch (e) {
   // winit's web event loop throws to hand control back to the page: not an error.
   if (!String(e).includes("Using exceptions for control flow")) {

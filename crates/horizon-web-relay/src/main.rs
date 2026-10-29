@@ -16,6 +16,10 @@
 //! addresses only, at most 250 MiB): `--no-downloads` turns that off, and
 //! `--downloads` turns it on for a relay with rooms only.
 //!
+//! Pages also reach the Microsoft, Xbox and Minecraft services a sign-in and
+//! an online-mode join call (HTTPS, with TLS in the page: the relay sees no
+//! token); `--no-accounts` turns that off.
+//!
 //! `--listen` (127.0.0.1:8081 by default) is where WebSockets arrive; serve
 //! them as `wss://` from behind a web server (web/apache.htaccess).
 //! `--origin https://example.net` lets only that page in; `--max` caps
@@ -27,7 +31,7 @@ fn usage() -> ! {
     eprintln!(
         "usage: horizon-web-relay [--listen ADDR:PORT] [--target HOST:PORT | --allow HOST:PORT|*:PORT ...] \
          [--origin URL ...] [--max N] [--no-rooms] [--max-rooms N] [--max-guests N] \
-         [--downloads | --no-downloads]"
+         [--downloads | --no-downloads] [--no-accounts]"
     );
     exit(2);
 }
@@ -74,6 +78,7 @@ fn main() {
             "--max-guests" => config.max_guests = value().parse().unwrap_or_else(|_| usage()),
             "--downloads" => downloads = Some(true),
             "--no-downloads" => downloads = Some(false),
+            "--no-accounts" => config.accounts = false,
             "-h" | "--help" => usage(),
             _ => {
                 eprintln!("horizon-web-relay: unknown option {arg}");
@@ -104,10 +109,12 @@ fn main() {
     };
     let on = |on: bool| if on { "on" } else { "off" };
     println!(
-        "horizon-web-relay {} on ws://{listen}/, reaching {reaches}; rooms {}, downloads {}",
+        "horizon-web-relay {} on ws://{listen}/, reaching {reaches}; rooms {}, downloads {}, \
+         Microsoft sign-in {}",
         env!("CARGO_PKG_VERSION"),
         on(config.rooms),
         on(config.downloads),
+        on(config.accounts),
     );
     serve(listener, config);
 }

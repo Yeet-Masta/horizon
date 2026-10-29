@@ -297,7 +297,9 @@ pub fn has_joined(
     Ok(parse_joined(&body))
 }
 
-/// The web build has no sockets of its own: the services never answer there.
+/// The web build reaches the services only through the relay, with TLS in
+/// the module (horizon-platform's `web::https`), which can't block:
+/// [`join_server_web`] instead.
 #[cfg(target_family = "wasm")]
 pub(crate) fn discovery() -> Result<Arc<serde_json::Value>, JoinError> {
     Err(JoinError::Unavailable)
@@ -305,6 +307,52 @@ pub(crate) fn discovery() -> Result<Arc<serde_json::Value>, JoinError> {
 #[cfg(target_family = "wasm")]
 pub fn join_server(_session: &AuthSession, _server_hash: &str) -> Result<(), JoinError> {
     Err(JoinError::Unavailable)
+}
+/// [`join_server`] on the web build, through the relay at `relay`.
+#[cfg(target_family = "wasm")]
+pub async fn join_server_web(
+    relay: &str,
+    session: &AuthSession,
+    server_hash: &str,
+) -> Result<(), JoinError> {
+    use horizon_platform::web::https;
+    static CACHE: horizon_platform::sync::Mutex<Option<Arc<serde_json::Value>>> =
+        horizon_platform::sync::Mutex::new(None);
+    let agent = format!("Horizon/{} (web)", horizon_core::release::VERSION);
+    let timeout = Duration::from_secs(15);
+    let cached = CACHE.lock().unwrap().clone();
+    let doc = match cached {
+        Some(doc) => doc,
+        None => {
+            let headers = [
+                ("User-Agent", agent.as_str()),
+                ("Accept", "application/json"),
+            ];
+            let response = https::request(relay, "GET", &discovery_url(), &headers, &[], timeout)
+                .await
+                .map_err(|_| JoinError::Unavailable)?;
+            let doc: serde_json::Value = serde_json::from_slice(&response.body)
+                .ok()
+                .filter(|_| response.status == 200)
+                .ok_or(JoinError::Unavailable)?;
+            let doc = Arc::new(doc);
+            *CACHE.lock().unwrap() = Some(doc.clone());
+            doc
+        }
+    };
+    let url = endpoint(&doc, "session", "join").ok_or(JoinError::Unavailable)?;
+    let headers = [
+        ("User-Agent", agent.as_str()),
+        ("Content-Type", "application/json; charset=utf-8"),
+    ];
+    let body = join_request(session, server_hash);
+    let response = https::request(relay, "POST", &url, &headers, body.as_bytes(), timeout)
+        .await
+        .map_err(|_| JoinError::Unavailable)?;
+    match response.status {
+        200..=299 => Ok(()),
+        status => Err(JoinError::from_response(status, &response.text())),
+    }
 }
 #[cfg(target_family = "wasm")]
 pub fn has_joined(

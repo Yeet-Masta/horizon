@@ -17,6 +17,12 @@
 //! few messages that set the connection up. And it passes a server's
 //! resource pack on to a page whose own fetch the pack's server refuses
 //! (`?download=URL`, [`Config::downloads`]).
+//!
+//! Every page may also reach the Microsoft, Xbox and Minecraft services a
+//! sign-in and an online-mode join call ([`ACCOUNT_HOSTS`], port 443):
+//! their APIs refuse other sites' pages, so the game speaks TLS with them
+//! through the tunnel (horizon-platform's `web::https`). The relay carries
+//! that TLS as it carries the game: it sees no token.
 pub mod rooms;
 use base64::Engine;
 use sha1::{Digest, Sha1};
@@ -29,6 +35,17 @@ use std::{
     },
     time::Duration,
 };
+
+/// The services a Microsoft sign-in and an online-mode join call, which any
+/// page may reach on port 443 ([`Config::accounts`]).
+pub const ACCOUNT_HOSTS: &[&str] = &[
+    "login.microsoftonline.com",
+    "user.auth.xboxlive.com",
+    "xsts.auth.xboxlive.com",
+    "api.minecraftservices.com",
+    "discovery.minecraftservices.com",
+    "sessionserver.mojang.com",
+];
 
 /// A server the page may name: a host, or any public one (`*`), on a port.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -67,6 +84,8 @@ pub struct Config {
     /// Pass server resource packs on to pages (`?download=URL`): from public
     /// addresses only, at most [`MAX_DOWNLOAD`] bytes.
     pub downloads: bool,
+    /// Let pages reach [`ACCOUNT_HOSTS`] on port 443 (`--no-accounts`: no).
+    pub accounts: bool,
 }
 impl Default for Config {
     fn default() -> Self {
@@ -80,6 +99,7 @@ impl Default for Config {
             max_rooms: 256,
             max_guests: 16,
             downloads: false,
+            accounts: true,
         }
     }
 }
@@ -293,6 +313,23 @@ fn resolve_with(
     asked: Option<&str>,
     srv: impl FnOnce(&str, u16) -> Option<(String, u16)>,
 ) -> Result<(String, Vec<SocketAddr>), String> {
+    // The account services, whatever else the relay reaches: at their
+    // public addresses, without SRV records.
+    if config.accounts
+        && let Some((host, 443)) = asked.and_then(split_host_port)
+        && ACCOUNT_HOSTS.contains(&normal_host(&host).as_str())
+    {
+        let shown = format!("{host}:443");
+        let addrs: Vec<SocketAddr> = (host.as_str(), 443)
+            .to_socket_addrs()
+            .map_err(|_| format!("Unknown host {host}"))?
+            .filter(|a| is_public(a.ip()))
+            .collect();
+        if addrs.is_empty() {
+            return Err(format!("This relay doesn't reach {shown}"));
+        }
+        return Ok((shown, addrs));
+    }
     let (host, port) = match (&config.target, asked) {
         (Some(target), _) => target.clone(),
         (None, None) => return Err("Name a server: ?target=host:port".to_owned()),
@@ -779,6 +816,19 @@ mod tests {
             "127.0.0.1:25565"
         );
         assert!(!is_public(IpAddr::V4(Ipv4Addr::new(100, 64, 0, 1))));
+    }
+
+    #[test]
+    fn account_services_are_reached_on_https_only() {
+        let rooms_only = Config::default();
+        // Not an account service, or not its HTTPS port: refused before any lookup.
+        assert!(resolve(&rooms_only, Some("example.com:443")).is_err());
+        assert!(resolve(&rooms_only, Some("login.microsoftonline.com:80")).is_err());
+        let off = Config {
+            accounts: false,
+            ..Config::default()
+        };
+        assert!(resolve(&off, Some("login.microsoftonline.com:443")).is_err());
     }
 
     #[test]

@@ -630,7 +630,15 @@ async fn login(
                 if hello.should_authenticate {
                     let account = auth.ok_or_else(|| NOT_SIGNED_IN.to_owned())?;
                     let hash = server_hash(&hello.server_id, &secret, &hello.public_key);
-                    if let Err(err) = crate::auth::join_server(account, &hash) {
+                    #[cfg(not(target_family = "wasm"))]
+                    let joined = crate::auth::join_server(account, &hash);
+                    // Through the relay, with TLS in the module.
+                    #[cfg(target_family = "wasm")]
+                    let joined = match web_relay() {
+                        Some(relay) => crate::auth::join_server_web(&relay, account, &hash).await,
+                        None => Err(crate::auth::JoinError::Unavailable),
+                    };
+                    if let Err(err) = joined {
                         let reason = match err.reason() {
                             Ok(key) => tr(lang, key),
                             Err(message) => message.to_owned(),
