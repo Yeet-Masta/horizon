@@ -79,7 +79,7 @@ else
   echo "wasm-opt not found: the module is not optimized further (install binaryen to shrink it)" >&2
 fi
 
-cp "$here/index.html" "$here/horizon.js" "$here/worker.js" "$dist/"
+cp "$here/index.html" "$here/horizon.js" "$here/worker.js" "$here/coi.js" "$dist/"
 cp "$here/apache.htaccess" "$dist/.htaccess"
 cp docs/media/brand/web/favicon.svg "$dist/"
 cp crates/horizon-theme/fonts/Geist-Regular.ttf crates/horizon-theme/fonts/PixelifySans-SemiBold.ttf \

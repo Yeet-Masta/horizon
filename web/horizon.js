@@ -125,6 +125,29 @@ const SIMD = new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0, 1, 5, 1, 96, 0, 1, 123
 const build = await fetch("build.json").then((r) => r.json()).catch(() => ({ target: "wasm64-unknown-unknown" }));
 const wasm64 = build.target.startsWith("wasm64");
 
+// A host that can't send the isolation headers (a static one: GitHub Pages...) gets them from a
+// service worker (coi.js) that adds them to this site's responses. Registered only when the page
+// isn't isolated, it serves the page once it controls it: the page reloads, once per tab.
+if (build.threads && !globalThis.crossOriginIsolated && globalThis.isSecureContext && "serviceWorker" in navigator) {
+  let tried = true;
+  try {
+    tried = sessionStorage.getItem("horizon-coi") === "1";
+    sessionStorage.setItem("horizon-coi", "1");
+  } catch {}
+  try {
+    await navigator.serviceWorker.register(new URL("coi.js", import.meta.url));
+    if (!tried) {
+      await navigator.serviceWorker.ready;
+      location.reload();
+      await new Promise(() => {});
+    }
+  } catch (e) {
+    console.warn("Horizon: the isolation service worker did not start:", e?.message ?? e);
+  }
+} else if (globalThis.crossOriginIsolated) {
+  try { sessionStorage.removeItem("horizon-coi"); } catch {}
+}
+
 // The threaded build's threads (web/README.md): Web Workers that instantiate the page's module
 // over its shared memory, each running the work the game hands it. A thread a worker starts is
 // started here too (worker.js forwards it): a worker's own workers would end with it.
@@ -168,7 +191,8 @@ async function checkBrowser() {
     checks.push([ok, ok ? `Threads: ${navigator.hardwareConcurrency || "?"} cores`
       : "This build uses threads, which need the page cross-origin isolated: serve it with the headers "
         + "Cross-Origin-Opener-Policy: same-origin and Cross-Origin-Embedder-Policy: require-corp "
-        + "(web/serve.py and web/apache.htaccess do), or build with --no-threads."]);
+        + "(web/serve.py and web/apache.htaccess do; elsewhere coi.js adds them on an HTTPS page), "
+        + "or build with --no-threads."]);
   }
   const list = $("checks");
   list.replaceChildren(...checks.map(([ok, text]) => {

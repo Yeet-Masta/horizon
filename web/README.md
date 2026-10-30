@@ -13,7 +13,7 @@ of Minecraft: Java Edition 26.3. The page never downloads game files.
 cargo install wasm-bindgen-cli --git https://github.com/wasm-bindgen/wasm-bindgen --rev 39ae823bbc14c9d0a4a2869361483b5453a9b133 --locked --force
 web/build.sh               # wasm64 with threads: nightly Rust and -Zbuild-std (rustup installs rust-src)
 web/build.sh --wasm32      # wasm32, for browsers without memory64 (Safari)
-web/build.sh --no-threads  # one thread: for servers that can't send the COOP/COEP headers
+web/build.sh --no-threads  # one thread: for browsers or hosts where web/coi.js can't isolate the page
 web/build.sh --fast        # the quicker-to-build `fast` profile instead of release (thin LTO)
 ```
 
@@ -183,7 +183,11 @@ which must stay private.
 - The threaded build (the default) needs a cross-origin isolated page: the
   server sends `Cross-Origin-Opener-Policy: same-origin` and
   `Cross-Origin-Embedder-Policy: require-corp`. `web/serve.py` does, and so does
-  `web/apache.htaccess` with `mod_headers`. Anywhere else, use `--no-threads`.
+  `web/apache.htaccess` with `mod_headers`. A host that can't send headers
+  (GitHub Pages, most static hosts) gets them from `coi.js`, a service worker
+  the page registers when it isn't isolated: it adds the headers to the site's
+  own responses, and the page reloads once. Service workers need HTTPS (or
+  `localhost`); without one, use `--no-threads`.
 
 The page checks all of these and says what is missing.
 

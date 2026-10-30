@@ -99,6 +99,7 @@ if errorlevel 1 (
 copy /y "%here%\index.html" "%dist%\" >nul || exit /b 1
 copy /y "%here%\horizon.js" "%dist%\" >nul || exit /b 1
 copy /y "%here%\worker.js" "%dist%\" >nul || exit /b 1
+copy /y "%here%\coi.js" "%dist%\" >nul || exit /b 1
 copy /y "%here%\apache.htaccess" "%dist%\.htaccess" >nul || exit /b 1
 copy /y "docs\media\brand\web\favicon.svg" "%dist%\" >nul || exit /b 1
 for %%f in (Geist-Regular.ttf PixelifySans-SemiBold.ttf OFL-Geist.txt OFL-PixelifySans.txt) do (
