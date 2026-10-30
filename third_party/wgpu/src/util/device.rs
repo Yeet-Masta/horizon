@@ -67,11 +67,11 @@ impl DeviceExt for crate::Device {
 
             let buffer = self.create_buffer(&wgt_descriptor);
 
+            // On WebGPU straight into the browser's mapping, not through a copy of it.
             buffer
                 .get_mapped_range_mut(..)
                 .expect("Failed to get mapped range for buffer created with mapped_at_creation")
-                .slice(..unpadded_size as usize)
-                .copy_from_slice(descriptor.contents);
+                .copy_from_slice_at(0, descriptor.contents);
             buffer.unmap();
 
             buffer

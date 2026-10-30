@@ -1044,7 +1044,30 @@ impl BufferViewMut {
     /// This method is equivalent to
     /// [`self.slice(..).copy_from_slice(src)`][WriteOnly::copy_from_slice].
     pub fn copy_from_slice(&mut self, src: &[u8]) {
-        self.slice(..).copy_from_slice(src)
+        assert_eq!(src.len(), self.len(), "source and destination lengths differ");
+        self.copy_from_slice_at(0, src)
+    }
+
+    /// Copies all elements from src into `self` from `offset` on: on WebGPU straight into
+    /// the browser's mapping, which can be MUCH faster than writing through
+    /// [`slice()`](Self::slice), which first copies the whole mapping into the Rust / wasm
+    /// heap and copies it back when the view drops.
+    ///
+    /// Elsewhere this is [`self.slice(offset..offset + src.len()).copy_from_slice(src)`].
+    pub fn copy_from_slice_at(&mut self, offset: usize, src: &[u8]) {
+        #[cfg(webgpu)]
+        if self.inner.as_webgpu_opt().is_some() {
+            let end = offset.checked_add(src.len());
+            assert!(end.is_some_and(|end| end <= self.len()), "write out of the view");
+            // SAFETY: nothing allocates between taking the view of wasm memory and the copy.
+            unsafe {
+                self.inner
+                    .as_uint8array()
+                    .set(&js_sys::Uint8Array::view(src), offset as u32);
+            }
+            return;
+        }
+        self.slice(offset..offset + src.len()).copy_from_slice(src)
     }
 }
 

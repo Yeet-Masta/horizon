@@ -46,9 +46,14 @@ impl Uploads {
             let mut view = slice
                 .get_mapped_range_mut()
                 .expect("staging belt slices are mapped");
-            for (i, src) in pixels.chunks(row).enumerate() {
-                view.slice(i * padded..i * padded + row)
-                    .copy_from_slice(src);
+            // copy_from_slice_at: on WebGPU straight into the browser's
+            // mapping, rather than through a copy of it in wasm memory.
+            if row == padded {
+                view.copy_from_slice_at(0, pixels);
+            } else {
+                for (i, src) in pixels.chunks(row).enumerate() {
+                    view.copy_from_slice_at(i * padded, src);
+                }
             }
         }
         encoder.copy_buffer_to_texture(
