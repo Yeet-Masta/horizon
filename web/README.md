@@ -230,7 +230,9 @@ The web build is the native game with the operating system swapped out
   boxes of sections that may be hidden in the shader, as on Metal (WebGPU
   can't force the depth test before it); on a tile-based GPU (Apple, ARM,
   Qualcomm) it starts from 1,600 sections in view. `?env=HORIZON_GPU_CULL=0`
-  turns it off, to compare. Far terrain (`lodDistance`) is off.
+  turns it off, to compare. Far terrain (LOD Distance, off by default as
+  natively) samples and meshes on workers of its own on the threaded build,
+  at most 2 sampling beside the mesher; the `--no-threads` build has none.
 - **Sound**: WebAudio. On the threaded build a worker runs the game's mixer
   about 43 ms ahead into shared memory and an AudioWorklet plays it on the
   browser's audio thread, so a long frame neither delays nor crackles it; the

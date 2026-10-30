@@ -51,7 +51,7 @@ fn distance((x, z): (i32, i32), center: [i32; 2]) -> i64 {
 struct Builder {
     shared: Arc<Shared>,
     results: mpsc::Receiver<LodDetail>,
-    thread: Option<thread::JoinHandle<()>>,
+    thread: Option<thread::ThreadHandle<()>>,
 }
 impl Builder {
     fn new(terrain: Arc<VanillaTerrain>) -> Self {
@@ -62,69 +62,67 @@ impl Builder {
         });
         let worker = shared.clone();
         let (tx, results) = mpsc::channel();
-        let thread = thread::Builder::new()
-            .name("Far decoration".into())
-            .spawn(move || {
-                // Structure pieces have mutable one-shot placement flags. Sharing
-                // gameplay's seeded pipeline would consume its chests/spawners.
-                let generator = match OverworldGenerator::for_dimension(
-                    terrain.generator.data().clone(),
-                    terrain.seed,
-                    &terrain.preset,
-                    &terrain.dimension,
-                ) {
-                    Ok(generator) => generator,
-                    Err(error) => {
-                        log::warn!("Horizon: far decoration unavailable: {error}");
-                        worker.stop.store(true, Ordering::Relaxed);
-                        return;
+        let thread = thread::spawn_thread("Far decoration", move || {
+            // Structure pieces have mutable one-shot placement flags. Sharing
+            // gameplay's seeded pipeline would consume its chests/spawners.
+            let generator = match OverworldGenerator::for_dimension(
+                terrain.generator.data().clone(),
+                terrain.seed,
+                &terrain.preset,
+                &terrain.dimension,
+            ) {
+                Ok(generator) => generator,
+                Err(error) => {
+                    log::warn!("Horizon: far decoration unavailable: {error}");
+                    worker.stop.store(true, Ordering::Relaxed);
+                    return;
+                }
+            };
+            let mut state = generator.worker();
+            loop {
+                let key = {
+                    let mut requests = worker.requests.lock().unwrap();
+                    while requests.chunks.is_empty() && !worker.stop.load(Ordering::Relaxed) {
+                        requests = worker.wake.wait(requests).unwrap();
                     }
+                    if worker.stop.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    let key = *requests
+                        .chunks
+                        .iter()
+                        .min_by_key(|&&key| (distance(key, requests.center), key))
+                        .unwrap();
+                    let origin = batch_origin(key);
+                    requests.chunks.retain(|&key| batch_origin(key) != origin);
+                    requests.current = Some(origin);
+                    origin
                 };
-                let mut state = generator.worker();
-                loop {
-                    let key = {
-                        let mut requests = worker.requests.lock().unwrap();
-                        while requests.chunks.is_empty() && !worker.stop.load(Ordering::Relaxed) {
-                            requests = worker.wake.wait(requests).unwrap();
-                        }
-                        if worker.stop.load(Ordering::Relaxed) {
-                            break;
-                        }
-                        let key = *requests
-                            .chunks
-                            .iter()
-                            .min_by_key(|&&key| (distance(key, requests.center), key))
-                            .unwrap();
-                        let origin = batch_origin(key);
-                        requests.chunks.retain(|&key| batch_origin(key) != origin);
-                        requests.current = Some(origin);
-                        origin
-                    };
-                    let result = decorated_batch(&mut state, key, BATCH, &worker.stop, |chunk| {
-                        let pos = chunk.position();
-                        let key = (pos.x, pos.z);
-                        worker.requests.lock().unwrap().finished.insert(key);
-                        let columns = columns(chunk, &terrain.biome_map, &terrain.dimension);
-                        if tx.send((key, columns)).is_err() {
-                            worker.stop.store(true, Ordering::Relaxed);
-                        }
-                    });
-                    worker.requests.lock().unwrap().current = None;
-                    match result {
-                        Ok(_) => {}
-                        Err(error) => {
-                            log::warn!(
-                                "Horizon: far decoration failed at {} {}: {error}",
-                                key.0,
-                                key.1
-                            );
-                            worker.stop.store(true, Ordering::Relaxed);
-                            break;
-                        }
+                let result = decorated_batch(&mut state, key, BATCH, &worker.stop, |chunk| {
+                    let pos = chunk.position();
+                    let key = (pos.x, pos.z);
+                    worker.requests.lock().unwrap().finished.insert(key);
+                    let columns = columns(chunk, &terrain.biome_map, &terrain.dimension);
+                    if tx.send((key, columns)).is_err() {
+                        worker.stop.store(true, Ordering::Relaxed);
+                    }
+                });
+                worker.requests.lock().unwrap().current = None;
+                match result {
+                    Ok(_) => {}
+                    Err(error) => {
+                        log::warn!(
+                            "Horizon: far decoration failed at {} {}: {error}",
+                            key.0,
+                            key.1
+                        );
+                        worker.stop.store(true, Ordering::Relaxed);
+                        break;
                     }
                 }
-            })
-            .expect("far decoration worker");
+            }
+        })
+        .expect("far decoration worker");
         Self {
             shared,
             results,

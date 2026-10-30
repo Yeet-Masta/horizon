@@ -29,8 +29,12 @@ const SAMPLE_JOBS: usize = 4;
 /// Threads that sample far tiles beside the mesher. Machines with 12 or more
 /// threads use up to 6 (measured: a cold 1024-chunk LoD loads about a quarter
 /// sooner than with 3); the rest keep a quarter of their threads, at most 3.
+/// The web build's Web Workers share the cores with the page's thread and
+/// the browser's: at most 2 there.
 fn sampling_threads(cores: usize) -> usize {
-    if cores >= 12 {
+    if horizon_platform::WEB {
+        (cores / 4).clamp(1, 2)
+    } else if cores >= 12 {
         (cores / 2).min(6)
     } else {
         (cores / 4).clamp(1, 3)
@@ -591,7 +595,7 @@ struct Shared {
 /// current view's quadtree and a bounded set of visited summaries are retained.
 pub struct Lod {
     shared: Arc<Shared>,
-    thread: Option<thread::JoinHandle<()>>,
+    thread: Option<thread::ThreadHandle<()>>,
     results: mpsc::Receiver<Done>,
     #[cfg(test)]
     context: Arc<WorkerContext>,
@@ -655,162 +659,150 @@ impl Lod {
         let worker = shared.clone();
         let mesh_context = context.clone();
         let (tx, results) = mpsc::channel();
-        let handle = thread::Builder::new()
-            .name("Far terrain".into())
-            .spawn(move || {
-                // Ticks and frames come first (horizon_threads).
-                horizon_threads::behind_server();
-                let mut sampler = source.sampler();
-                let count = sampling_threads(cores);
-                let mut sampling = Vec::new();
-                for _ in 0..count {
-                    let Some(mut sample) = sampler.fork() else {
-                        break;
-                    };
-                    let shared = worker.clone();
-                    let tx = tx.clone();
-                    sampling.push(
-                        thread::Builder::new()
-                            .name("Far sampling".into())
-                            .spawn(move || {
-                                horizon_threads::behind_server();
+        let handle = thread::spawn_thread("Far terrain", move || {
+            // Ticks and frames come first (horizon_threads).
+            horizon_threads::behind_server();
+            let mut sampler = source.sampler();
+            let count = sampling_threads(cores);
+            let mut sampling = Vec::new();
+            for _ in 0..count {
+                let Some(mut sample) = sampler.fork() else {
+                    break;
+                };
+                let shared = worker.clone();
+                let tx = tx.clone();
+                sampling.push(
+                    thread::spawn_thread("Far sampling", move || {
+                        horizon_threads::behind_server();
+                        loop {
+                            let key = {
+                                let mut jobs = shared.jobs.lock().unwrap();
                                 loop {
-                                    let key = {
-                                        let mut jobs = shared.jobs.lock().unwrap();
-                                        loop {
-                                            if shared.stop.load(Ordering::Relaxed) {
-                                                return;
-                                            }
-                                            if let Some(index) = jobs
-                                                .iter()
-                                                .position(|job| matches!(job, Job::Sample(_)))
-                                            {
-                                                let Some(Job::Sample(key)) = jobs.remove(index)
-                                                else {
-                                                    unreachable!()
-                                                };
-                                                break key;
-                                            }
-                                            jobs = shared.wake.wait(jobs).unwrap();
-                                        }
-                                    };
-                                    let [x, _, z] = key.origin();
-                                    sample.set_approximate(
-                                        shared.approximate.load(Ordering::Relaxed),
-                                    );
-                                    let samples =
-                                        sample.grid(x, z, key.size() / CELLS as i32, CELLS);
                                     if shared.stop.load(Ordering::Relaxed) {
                                         return;
                                     }
-                                    if tx.send(Done::Sample { key, samples }).is_err() {
-                                        return;
+                                    if let Some(index) =
+                                        jobs.iter().position(|job| matches!(job, Job::Sample(_)))
+                                    {
+                                        let Some(Job::Sample(key)) = jobs.remove(index) else {
+                                            unreachable!()
+                                        };
+                                        break key;
                                     }
+                                    jobs = shared.wake.wait(jobs).unwrap();
                                 }
-                            })
-                            .expect("far sampling worker"),
-                    );
-                }
-                let mut mesher = mesh::Mesher::default();
-                'work: loop {
-                    for (key, columns) in sampler.drain_details() {
-                        if tx
-                            .send(Done::Detail(key, ReducedColumns::new(columns)))
-                            .is_err()
-                        {
-                            break 'work;
-                        }
-                    }
-                    let job = {
-                        let mut jobs = worker.jobs.lock().unwrap();
-                        if (jobs.is_empty()
-                            || (!sampling.is_empty()
-                                && jobs.iter().all(|job| matches!(job, Job::Sample(_)))))
-                            && !worker.stop.load(Ordering::Relaxed)
-                        {
-                            jobs = worker
-                                .wake
-                                .wait_timeout(
-                                    jobs,
-                                    horizon_platform::time::Duration::from_millis(100),
-                                )
-                                .unwrap()
-                                .0;
-                        }
-                        if worker.stop.load(Ordering::Relaxed) {
-                            break;
-                        }
-                        if sampling.is_empty() {
-                            jobs.pop_front()
-                        } else {
-                            jobs.iter()
-                                .position(|job| !matches!(job, Job::Sample(_)))
-                                .and_then(|index| jobs.remove(index))
-                        }
-                    };
-                    let Some(job) = job else { continue };
-                    let done = match job {
-                        Job::Observe(key) => {
-                            let chunk = worker.observed.lock().unwrap().remove(&key);
-                            let (Some(chunk), Some(kinds)) = (chunk, worker.kinds.get()) else {
-                                continue;
                             };
-                            Done::Observed(key, ReducedColumns::new(summarize(&chunk, kinds)))
-                        }
-                        Job::RequestDetail { chunks, center } => {
-                            sampler.request_detail(&chunks, center);
-                            Done::DetailRequested
-                        }
-                        Job::Sample(key) => {
                             let [x, _, z] = key.origin();
-                            sampler.set_approximate(worker.approximate.load(Ordering::Relaxed));
-                            let samples = sampler.grid(x, z, key.size() / CELLS as i32, CELLS);
-                            Done::Sample { key, samples }
-                        }
-                        Job::Mesh {
-                            snapshot,
-                            keys,
-                            mut finer,
-                            covered,
-                            bounds,
-                        } => {
-                            let mut meshes = Vec::with_capacity(keys.len());
-                            for key in keys {
-                                if worker.stop.load(Ordering::Relaxed) {
-                                    break 'work;
-                                }
-                                let finer = finer.remove(&key).unwrap_or_default();
-                                let input = snapshot.mesh_input(key, finer);
-                                let mut mesh = mesher.mesh(
-                                    input.key,
-                                    &input.columns(),
-                                    &covered,
-                                    bounds,
-                                    &mesh_context,
-                                    &input.neighbors,
-                                    &input.finer,
-                                );
-                                mesh.sort_solid();
-                                meshes.push((input.key, mesh));
+                            sample.set_approximate(shared.approximate.load(Ordering::Relaxed));
+                            let samples = sample.grid(x, z, key.size() / CELLS as i32, CELLS);
+                            if shared.stop.load(Ordering::Relaxed) {
+                                return;
                             }
-                            Done::Mesh {
-                                active: snapshot.active,
-                                meshes,
-                                covered,
+                            if tx.send(Done::Sample { key, samples }).is_err() {
+                                return;
                             }
                         }
-                    };
-                    if tx.send(done).is_err() {
+                    })
+                    .expect("far sampling worker"),
+                );
+            }
+            let mut mesher = mesh::Mesher::default();
+            'work: loop {
+                for (key, columns) in sampler.drain_details() {
+                    if tx
+                        .send(Done::Detail(key, ReducedColumns::new(columns)))
+                        .is_err()
+                    {
+                        break 'work;
+                    }
+                }
+                let job = {
+                    let mut jobs = worker.jobs.lock().unwrap();
+                    if (jobs.is_empty()
+                        || (!sampling.is_empty()
+                            && jobs.iter().all(|job| matches!(job, Job::Sample(_)))))
+                        && !worker.stop.load(Ordering::Relaxed)
+                    {
+                        jobs = worker
+                            .wake
+                            .wait_timeout(jobs, horizon_platform::time::Duration::from_millis(100))
+                            .unwrap()
+                            .0;
+                    }
+                    if worker.stop.load(Ordering::Relaxed) {
                         break;
                     }
+                    if sampling.is_empty() {
+                        jobs.pop_front()
+                    } else {
+                        jobs.iter()
+                            .position(|job| !matches!(job, Job::Sample(_)))
+                            .and_then(|index| jobs.remove(index))
+                    }
+                };
+                let Some(job) = job else { continue };
+                let done = match job {
+                    Job::Observe(key) => {
+                        let chunk = worker.observed.lock().unwrap().remove(&key);
+                        let (Some(chunk), Some(kinds)) = (chunk, worker.kinds.get()) else {
+                            continue;
+                        };
+                        Done::Observed(key, ReducedColumns::new(summarize(&chunk, kinds)))
+                    }
+                    Job::RequestDetail { chunks, center } => {
+                        sampler.request_detail(&chunks, center);
+                        Done::DetailRequested
+                    }
+                    Job::Sample(key) => {
+                        let [x, _, z] = key.origin();
+                        sampler.set_approximate(worker.approximate.load(Ordering::Relaxed));
+                        let samples = sampler.grid(x, z, key.size() / CELLS as i32, CELLS);
+                        Done::Sample { key, samples }
+                    }
+                    Job::Mesh {
+                        snapshot,
+                        keys,
+                        mut finer,
+                        covered,
+                        bounds,
+                    } => {
+                        let mut meshes = Vec::with_capacity(keys.len());
+                        for key in keys {
+                            if worker.stop.load(Ordering::Relaxed) {
+                                break 'work;
+                            }
+                            let finer = finer.remove(&key).unwrap_or_default();
+                            let input = snapshot.mesh_input(key, finer);
+                            let mut mesh = mesher.mesh(
+                                input.key,
+                                &input.columns(),
+                                &covered,
+                                bounds,
+                                &mesh_context,
+                                &input.neighbors,
+                                &input.finer,
+                            );
+                            mesh.sort_solid();
+                            meshes.push((input.key, mesh));
+                        }
+                        Done::Mesh {
+                            active: snapshot.active,
+                            meshes,
+                            covered,
+                        }
+                    }
+                };
+                if tx.send(done).is_err() {
+                    break;
                 }
-                worker.stop.store(true, Ordering::Relaxed);
-                worker.wake.notify_all();
-                for handle in sampling {
-                    let _ = handle.join();
-                }
-            })
-            .expect("far terrain worker");
+            }
+            worker.stop.store(true, Ordering::Relaxed);
+            worker.wake.notify_all();
+            for handle in sampling {
+                let _ = handle.join();
+            }
+        })
+        .expect("far terrain worker");
         Self {
             shared,
             thread: Some(handle),
@@ -1589,7 +1581,12 @@ impl Drop for Lod {
     fn drop(&mut self) {
         self.shared.stop.store(true, Ordering::Relaxed);
         self.shared.wake.notify_all();
-        if let Some(thread) = self.thread.take() {
+        // The page's thread may not wait (a sample in progress takes a
+        // while): the web build's workers end on their own once they see
+        // `stop`.
+        if let Some(thread) = self.thread.take()
+            && thread::may_block()
+        {
             let _ = thread.join();
         }
     }

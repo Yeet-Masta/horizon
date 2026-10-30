@@ -13186,8 +13186,9 @@ impl Game<'_> {
         }
     }
     fn prepare_lod(&mut self) {
-        // Far terrain samples and meshes on threads of its own: the web build has none.
-        let enabled = !horizon_platform::WEB
+        // Far terrain samples and meshes on threads of its own: the
+        // one-thread web build has none.
+        let enabled = horizon_platform::THREADS
             && self.far_terrain_choice().0 > 0
             && self.renderer.is_some()
             && self.player.is_some()
