@@ -3,6 +3,8 @@
 //! a place to keep what the game writes, the console and randomness.
 #[cfg(target_feature = "atomics")]
 mod alloc;
+#[cfg(target_feature = "atomics")]
+mod blobs;
 pub mod https;
 pub mod rtc;
 pub mod socket;
@@ -33,6 +35,8 @@ extern "C" {
     /// Writes text to the system clipboard, where the browser lets the page.
     #[wasm_bindgen(catch, js_namespace = globalThis, js_name = horizonClipboardWrite)]
     fn horizon_clipboard_write(text: &str) -> Result<(), JsValue>;
+    #[wasm_bindgen(js_name = setTimeout)]
+    fn set_timeout(callback: &js_sys::Function, ms: i32) -> JsValue;
     #[wasm_bindgen(js_name = setInterval)]
     fn set_interval(callback: &Closure<dyn FnMut()>, ms: i32) -> i32;
     #[wasm_bindgen(js_namespace = console, js_name = error)]
@@ -95,6 +99,27 @@ pub fn horizon_clipboard_paste(text: String) {
     *CLIPBOARD.lock().unwrap() = Some(text);
 }
 
+/// Resolves after `ms` milliseconds, the page's event loop turning meanwhile.
+#[cfg(target_feature = "atomics")]
+async fn nap(ms: i32) {
+    let mut resolve = |resolve: js_sys::Function, _| {
+        set_timeout(&resolve, ms);
+    };
+    let _ = wasm_bindgen_futures::JsFuture::from(js_sys::Promise::new(&mut resolve)).await;
+}
+
+/// Bytes `start..end` of the page's Blob `id` (blobs.rs): the threaded
+/// build's, which alone keeps files there.
+pub(crate) fn read_blob(id: u32, start: u64, end: u64) -> std::io::Result<Vec<u8>> {
+    #[cfg(target_feature = "atomics")]
+    return blobs::read(id, start, end);
+    #[cfg(not(target_feature = "atomics"))]
+    {
+        let _ = (id, start, end);
+        Err(std::io::ErrorKind::Unsupported.into())
+    }
+}
+
 fn get(object: &JsValue, key: &str) -> JsValue {
     Reflect::get(object, &JsValue::from_str(key)).unwrap_or(JsValue::UNDEFINED)
 }
@@ -138,9 +163,26 @@ pub async fn boot() -> Result<(), String> {
             }
         }
     }
+    // The threaded build reads the resources zip and the game folder's larger
+    // files from the page's Blobs (blobs.rs), the page's thread through a
+    // worker that must run first.
+    #[cfg(target_feature = "atomics")]
+    blobs::start_reader().await;
     if let Ok(zip) = get(&boot, "resources").dyn_into::<Uint8Array>() {
         vfs::mount_zip(Path::new(RESOURCES), zip.to_vec(), Some(RESOURCES_MARKER))
             .map_err(|e| format!("the resources zip could not be read: {e}"))?;
+    }
+    if let (Some(id), Some(len)) = (
+        get(&boot, "resourcesBlob").as_f64(),
+        get(&boot, "resourcesSize").as_f64(),
+    ) {
+        vfs::mount_zip_blob(
+            Path::new(RESOURCES),
+            id as u32,
+            len as u64,
+            Some(RESOURCES_MARKER),
+        )
+        .map_err(|e| format!("the resources zip could not be read: {e}"))?;
     }
     // Loose files, `[path, bytes]`: a folder the player picked.
     if let Ok(files) = get(&boot, "resourceFiles").dyn_into::<Array>() {
@@ -157,7 +199,8 @@ pub async fn boot() -> Result<(), String> {
             }
         }
     }
-    // The kept game folder, `[path, kind, bytes, mtime]`.
+    // The kept game folder, `[path, kind, bytes, mtime]`, or for a file the
+    // page keeps as a Blob, `[path, "blob", id, mtime, size]`.
     if let Ok(files) = get(&boot, "files").dyn_into::<Array>() {
         for record in files.iter() {
             let record: Array = record.unchecked_into();
@@ -169,6 +212,12 @@ pub async fn boot() -> Result<(), String> {
                 Some("file") => match record.get(2).dyn_into::<Uint8Array>() {
                     Ok(bytes) => vfs::Kept::File(bytes.to_vec(), time(&record.get(3))),
                     Err(_) => continue,
+                },
+                Some("blob") => match (record.get(2).as_f64(), record.get(4).as_f64()) {
+                    (Some(id), Some(len)) => {
+                        vfs::Kept::Stored(id as u32, len as u64, time(&record.get(3)))
+                    }
+                    _ => continue,
                 },
                 _ => continue,
             };
@@ -211,6 +260,8 @@ pub fn flush() {
             vfs::Kept::Removed => {
                 record.push(&JsValue::from_str("removed"));
             }
+            // Only ever restored: what changed is read into memory first.
+            vfs::Kept::Stored(..) => continue,
         }
         records.push(&record);
     }

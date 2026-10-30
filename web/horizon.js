@@ -1,12 +1,15 @@
 // The web build's page (web/README.md): checks the browser, takes the player's prepared
 // resources (a zip or a folder, kept in IndexedDB for the next visit), keeps the game
-// folder (options, saves) in IndexedDB, and starts the game.
+// folder (options, saves) in the origin's private file system (else IndexedDB), and starts
+// the game.
 //
 // The game calls three functions here (crates/horizon-platform/src/web/mod.rs):
-//   horizonBoot()           -> Promise<{ args, env, resources, resourceFiles, files }>
+//   horizonBoot()           -> Promise<{ args, env, resources | resourcesBlob, resourceFiles, files }>
 //   horizonPersist(records) -> keeps [path, "file"|"dir"|"removed", bytes, mtime] records
 //   horizonStatus(text, error)
-// and sets globalThis.horizonFlush, called here as the page is hidden.
+// and sets globalThis.horizonFlush, called here as the page is hidden. On the threaded build
+// the resources zip and the game folder's larger files stay Blobs (horizonBlobs, given to every
+// worker), which the game reads as it opens them (blobs.rs).
 
 const DB_NAME = "horizon";
 const DB_VERSION = 2;
@@ -82,21 +85,114 @@ async function forgetResources() {
   tx.objectStore(RESOURCES).clear();
   await done(tx);
 }
-async function gameFiles() {
+// ---- The game folder's store ---------------------------------------------------------------
+
+// The origin's private file system (OPFS), a file per file, where the browser writes to it
+// from the page (createWritable); else IndexedDB, a record per path.
+const opfs = !!navigator.storage?.getDirectory && "createWritable" in (globalThis.FileSystemFileHandle?.prototype ?? {});
+const parts = (path) => path.split("/").filter(Boolean);
+async function opfsDir(names, create) {
+  let dir = await navigator.storage.getDirectory();
+  for (const name of names) dir = await dir.getDirectoryHandle(name, { create });
+  return dir;
+}
+async function opfsWrite(path, data) {
+  const names = parts(path);
+  const name = names.pop();
+  const dir = await opfsDir(names, true);
+  const out = await (await dir.getFileHandle(name, { create: true })).createWritable();
+  await out.write(data);
+  await out.close();
+}
+async function opfsRemove(path) {
+  const names = parts(path);
+  const name = names.pop();
+  try {
+    await (await opfsDir(names, false)).removeEntry(name, { recursive: true });
+  } catch {}
+}
+// Every [path, kind, File] under `dir`.
+async function opfsWalk(dir, path, out) {
+  for await (const [name, handle] of dir.entries()) {
+    const at = `${path}/${name}`;
+    if (handle.kind === "directory") {
+      out.push([at, "dir", null]);
+      await opfsWalk(handle, at, out);
+    } else {
+      out.push([at, "file", await handle.getFile()]);
+    }
+  }
+  return out;
+}
+// The first visit with the private file system moves what IndexedDB kept into it.
+let moved = null;
+function moveToOpfs() {
+  moved ??= (async () => {
+    const root = await navigator.storage.getDirectory();
+    const kept = await idbFiles();
+    if (!kept.length) return;
+    for await (const _ of root.keys()) return; // already moved
+    for (const [path, kind, data] of kept) {
+      if (kind === "dir") await opfsDir(parts(path), true);
+      else if (kind === "file") await opfsWrite(path, data ?? new Uint8Array());
+    }
+    const tx = (await db()).transaction(FILES, "readwrite");
+    tx.objectStore(FILES).clear();
+    await done(tx);
+  })().catch((e) => console.error("Horizon: the game folder stays in IndexedDB:", e));
+  return moved;
+}
+async function idbFiles() {
   const s = await store(FILES);
   const [keys, values] = await Promise.all([request(s.getAllKeys()), request(s.getAll())]);
   return keys.map((path, i) => [path, values[i].kind, values[i].data ?? null, values[i].mtime ?? 0]);
+}
+
+// The Blobs the threaded build's game reads as it opens them, by number: the same list goes to
+// every worker (horizonSpawnThread), so all are added before the game starts.
+globalThis.horizonBlobs = [];
+const blobId = (blob) => globalThis.horizonBlobs.push(blob) - 1;
+// Files this size or larger stay Blobs on the threaded build: worlds' region files, mostly.
+// Smaller ones (options, level.dat), read on the page's thread, come in memory.
+const LAZY = 64 << 10;
+
+// The kept game folder as the game takes it: [path, kind, bytes, mtime], or with `lazy`, for a
+// larger file, [path, "blob", id, mtime, size].
+async function gameFiles(lazy = false) {
+  let kept;
+  if (opfs) {
+    await moveToOpfs();
+    kept = (await opfsWalk(await navigator.storage.getDirectory(), "", []))
+      .map(([path, kind, file]) => [path, kind, file, file?.lastModified ?? 0]);
+  } else {
+    kept = await idbFiles();
+  }
+  return Promise.all(kept.map(async ([path, kind, data, mtime]) => {
+    if (kind !== "file" || !(data instanceof Blob)) return [path, kind, data, mtime];
+    if (lazy && data.size >= LAZY) return [path, "blob", blobId(data), mtime, data.size];
+    return [path, kind, new Uint8Array(await data.arrayBuffer()), mtime];
+  }));
 }
 
 // What the game wrote since the last call, in order; writes queue so none overtakes another.
 let persisting = Promise.resolve();
 globalThis.horizonPersist = (records) => {
   persisting = persisting.then(async () => {
+    if (opfs) {
+      await moveToOpfs();
+      for (const [path, kind, data] of records) {
+        if (kind === "removed") await opfsRemove(path);
+        else if (kind === "dir") await opfsDir(parts(path), true);
+        else await opfsWrite(path, data);
+      }
+      return;
+    }
     const tx = (await db()).transaction(FILES, "readwrite");
     const s = tx.objectStore(FILES);
     for (const [path, kind, data, mtime] of records) {
       if (kind === "removed") s.delete(path);
-      else s.put({ kind, data: kind === "file" ? data : null, mtime }, path);
+      // A Blob: the next visit's threaded game reads it as it opens it.
+      else s.put({ kind, data: kind === "file" ? new Blob([data]) : null, mtime }, path);
     }
     await done(tx);
   }).catch((e) => console.error("Horizon: could not keep the game folder:", e));
@@ -161,7 +257,7 @@ globalThis.horizonSpawnThread = (name, module, memory, work) => {
     if (data?.spawn) globalThis.horizonSpawnThread(data.spawn[0], threadModule, threadMemory, data.spawn[1]);
     if (data?.status) globalThis.horizonStatus(...data.status);
   };
-  worker.postMessage([module, memory, work]);
+  worker.postMessage([module, memory, work, globalThis.horizonBlobs]);
 };
 
 async function checkBrowser() {
@@ -395,6 +491,10 @@ $("wipe").addEventListener("click", async () => {
   const tx = (await db()).transaction(FILES, "readwrite");
   tx.objectStore(FILES).clear();
   await done(tx);
+  if (opfs) {
+    const root = await navigator.storage.getDirectory();
+    for (const name of await Array.fromAsync(root.keys())) await root.removeEntry(name, { recursive: true });
+  }
   setStatus("The game folder is empty.");
 });
 $("export").addEventListener("click", async () => {
@@ -487,10 +587,14 @@ globalThis.horizonBoot = async () => {
   if (chosen.files) {
     boot.resourceFiles = await Promise.all(
       chosen.files.map(async ([path, blob]) => [path, new Uint8Array(await blob.arrayBuffer())]));
+  } else if (build.threads) {
+    // Read in place: the game's workers read the entries they open.
+    boot.resourcesBlob = blobId(chosen.blob);
+    boot.resourcesSize = chosen.blob.size;
   } else {
     boot.resources = new Uint8Array(await chosen.blob.arrayBuffer());
   }
-  boot.files = await gameFiles();
+  boot.files = await gameFiles(!!build.threads);
   setStatus("Starting the game…", false, true);
   shell.hidden = true;
   $("horizon").focus();

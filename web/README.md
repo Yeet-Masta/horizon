@@ -201,8 +201,15 @@ The web build is the native game with the operating system swapped out
 
 - **Files**: an in-memory file system. The resources zip is mounted read-only at
   `/app/resources` and read in place; the game folder (`/home/horizon`: options,
-  saves, screenshots) is kept in IndexedDB, written back every two seconds and as
-  the page is hidden. Options → *Download the game folder* exports it as a zip.
+  saves, screenshots) is kept in the origin's private file system (OPFS; a
+  first visit there moves what IndexedDB kept), else in IndexedDB, written back
+  every two seconds and as the page is hidden. On the threaded build the
+  resources zip and the game folder's files of 64 KiB or more (region files,
+  mostly) stay in the browser's storage and are read as the game opens them,
+  rather than copied into memory as it starts: workers read them with
+  `FileReaderSync`, and the page's thread asks a worker that does
+  (`horizon-platform`'s `web/blobs.rs`). Options → *Download the game folder*
+  exports it as a zip.
 - **Threads**: chunk generation, lighting and meshing run on Web Workers that
   share the page's memory (`web/worker.js`), as the native game's workers do.
   A browser can't run them behind the page as the native game does, so there

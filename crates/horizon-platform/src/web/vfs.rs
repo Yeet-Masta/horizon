@@ -4,8 +4,12 @@
 //! folder and are read from it in place (`mount_zip`): a file is inflated
 //! when it is opened. Everything the game writes lives in the tree; a write
 //! under a mounted folder shadows the zip's file. The folders `persist` names
-//! (the game folder) are kept by the page in IndexedDB: `drain` hands it
-//! what changed since the last call.
+//! (the game folder) are kept by the page (in the origin's private file
+//! system, else IndexedDB): `drain` hands it what changed since the last call.
+//!
+//! On the threaded build the zip stays in the page's Blob (`mount_zip_blob`)
+//! and the kept folder's larger files do too until they are first opened
+//! (`Node::Stored`): their bytes are read from the page then (blobs.rs).
 use crate::sync::Mutex;
 use crate::time::SystemTime;
 use std::{
@@ -25,14 +29,51 @@ type Shared = Arc<Mutex<Data>>;
 enum Node {
     Dir(SystemTime),
     File(Shared),
+    /// A kept file still in the page's Blob.
+    Stored(Stored),
+}
+
+/// A kept file the page holds as Blob `blob`, `len` bytes.
+#[derive(Clone, Copy)]
+struct Stored {
+    blob: u32,
+    len: u64,
+    modified: SystemTime,
+}
+impl Stored {
+    fn data(&self) -> io::Result<Data> {
+        Ok(Data {
+            bytes: super::read_blob(self.blob, 0, self.len)?,
+            modified: self.modified,
+        })
+    }
+}
+
+/// Where a zip's bytes are: in memory, or in the page's Blob.
+#[derive(Clone)]
+enum Source {
+    Memory(Arc<[u8]>),
+    Blob(u32),
+}
+impl Source {
+    fn read(&self, start: usize, len: usize) -> Option<io::Result<std::borrow::Cow<'_, [u8]>>> {
+        Some(match self {
+            Source::Memory(bytes) => Ok(bytes.get(start..start + len)?.into()),
+            Source::Blob(id) => {
+                super::read_blob(*id, start as u64, (start + len) as u64).map(Into::into)
+            }
+        })
+    }
 }
 
 struct Mount {
     /// Where it is mounted, normalized.
     at: String,
-    archive: zip::ZipArchive<Cursor<Arc<[u8]>>>,
+    /// The archive read in memory; None for a Blob's, all of whose entries
+    /// are stored or deflated (`raw`).
+    archive: Option<zip::ZipArchive<Cursor<Arc<[u8]>>>>,
     /// The archive's bytes, and where each entry's lie in them (`unzip`).
-    bytes: Arc<[u8]>,
+    bytes: Source,
     raw: Vec<Option<Raw>>,
     /// The archive's files under `at`: entry index and size.
     files: HashMap<String, (usize, u64)>,
@@ -62,7 +103,7 @@ struct Raw {
 /// workers read sounds and models out of the resources while the page's
 /// thread opens files.
 struct Unzip {
-    bytes: Arc<[u8]>,
+    bytes: Source,
     raw: Raw,
     size: u64,
     modified: SystemTime,
@@ -71,11 +112,11 @@ impl Unzip {
     fn data(&self, path: &str) -> io::Result<Data> {
         let packed = self
             .bytes
-            .get(self.raw.start..self.raw.start + self.raw.len)
-            .ok_or_else(|| error(io::ErrorKind::InvalidData, path, "entry past the zip's end"))?;
+            .read(self.raw.start, self.raw.len)
+            .ok_or_else(|| error(io::ErrorKind::InvalidData, path, "entry past the zip's end"))??;
         let bytes = if self.raw.deflated {
             let mut bytes = Vec::with_capacity(self.size as usize);
-            flate2::read::DeflateDecoder::new(packed).read_to_end(&mut bytes)?;
+            flate2::read::DeflateDecoder::new(&packed[..]).read_to_end(&mut bytes)?;
             bytes
         } else {
             packed.to_vec()
@@ -93,6 +134,7 @@ enum Found {
     File(Shared),
     /// A file in mount `.0`, entry `.1`, `.2` bytes.
     Zipped(usize, usize, u64),
+    Stored(Stored),
 }
 
 pub(crate) struct Vfs {
@@ -186,6 +228,7 @@ impl Vfs {
         match self.nodes.get(path) {
             Some(Node::Dir(time)) => return Some(Found::Dir(*time)),
             Some(Node::File(data)) => return Some(Found::File(data.clone())),
+            Some(Node::Stored(stored)) => return Some(Found::Stored(*stored)),
             None => {}
         }
         for (i, mount) in self.mounts.iter().enumerate() {
@@ -224,8 +267,14 @@ impl Vfs {
     fn inflate(&mut self, mount: usize, index: usize, size: u64, path: &str) -> io::Result<Data> {
         let mount = &mut self.mounts[mount];
         let modified = mount.modified;
-        let mut entry = mount
-            .archive
+        let Some(archive) = &mut mount.archive else {
+            return Err(error(
+                io::ErrorKind::Unsupported,
+                path,
+                "neither stored nor deflated",
+            ));
+        };
+        let mut entry = archive
             .by_index(index)
             .map_err(|e| error(io::ErrorKind::InvalidData, path, &e.to_string()))?;
         let mut bytes = Vec::with_capacity(size as usize);
@@ -256,6 +305,13 @@ impl Vfs {
         self.nodes
             .insert(path.to_owned(), Node::Dir(SystemTime::now()));
         self.touch(path);
+    }
+    /// A stored file's bytes read into the tree (unchanged: not kept again).
+    fn load(&mut self, path: &str, stored: Stored) -> io::Result<Shared> {
+        let shared = Arc::new(Mutex::new(stored.data()?));
+        self.nodes
+            .insert(path.to_owned(), Node::File(shared.clone()));
+        Ok(shared)
     }
     fn put_file(&mut self, path: &str, data: Data) -> Shared {
         let shared = Arc::new(Mutex::new(data));
@@ -329,6 +385,14 @@ impl Vfs {
                 }
                 shared
             }
+            Some(Found::Stored(_)) if options.truncate && writes => self.put_file(
+                path,
+                Data {
+                    bytes: Vec::new(),
+                    modified: SystemTime::now(),
+                },
+            ),
+            Some(Found::Stored(stored)) => self.load(path, stored)?,
             Some(Found::Zipped(mount, index, size)) => {
                 let data = if options.truncate && writes {
                     Data {
@@ -391,12 +455,17 @@ impl Vfs {
                 len,
                 modified: self.mounts[mount].modified,
             }),
+            Some(Found::Stored(stored)) => Ok(Metadata {
+                dir: false,
+                len: stored.len,
+                modified: stored.modified,
+            }),
             None => Err(not_found(path)),
         }
     }
     fn remove_file(&mut self, path: &str) -> io::Result<()> {
         match self.nodes.get(path) {
-            Some(Node::File(_)) => {
+            Some(Node::File(_) | Node::Stored(_)) => {
                 self.nodes.remove(path);
                 self.touch(path);
                 Ok(())
@@ -428,7 +497,7 @@ impl Vfs {
                 self.put_file(to, data);
                 return Ok(());
             }
-            Some(Found::File(_)) => {
+            Some(Found::File(_) | Found::Stored(_)) => {
                 self.check_parent(to)?;
                 if self.is_dir(to) {
                     return Err(error(io::ErrorKind::IsADirectory, to, "is a directory"));
@@ -497,6 +566,54 @@ pub(crate) fn mount_zip(at: &Path, bytes: Vec<u8>, marker: Option<&str>) -> io::
     let bytes: Arc<[u8]> = bytes.into();
     let mut archive = zip::ZipArchive::new(Cursor::new(bytes.clone()))
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+    let index = index_zip(&mut archive, marker)?;
+    mount(at, Some(archive), Source::Memory(bytes), index);
+    Ok(())
+}
+
+/// [`mount_zip`] for a zip the page keeps as Blob `id`, `len` bytes: it is
+/// listed through a reader of the Blob, and its files read from it as they
+/// are opened.
+pub(crate) fn mount_zip_blob(at: &Path, id: u32, len: u64, marker: Option<&str>) -> io::Result<()> {
+    let mut archive = zip::ZipArchive::new(BlobReader::new(id, len))
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+    let index = index_zip(&mut archive, marker)?;
+    mount(at, None, Source::Blob(id), index);
+    Ok(())
+}
+
+/// A zip's entries as a mount holds them: where each one's bytes are, its
+/// files and its folders.
+type Index = (
+    Vec<Option<Raw>>,
+    HashMap<String, (usize, u64)>,
+    HashMap<String, BTreeSet<String>>,
+);
+
+fn mount(
+    at: &Path,
+    archive: Option<zip::ZipArchive<Cursor<Arc<[u8]>>>>,
+    bytes: Source,
+    (raw, files, dirs): Index,
+) {
+    let mut v = vfs();
+    let at = v.normalize(at);
+    v.mounts.retain(|m| m.at != at);
+    v.mounts.push(Mount {
+        at,
+        archive,
+        bytes,
+        raw,
+        files,
+        dirs,
+        modified: SystemTime::now(),
+    });
+}
+
+fn index_zip<R: Read + Seek>(
+    archive: &mut zip::ZipArchive<R>,
+    marker: Option<&str>,
+) -> io::Result<Index> {
     let mut names = Vec::with_capacity(archive.len());
     let mut raw = Vec::with_capacity(archive.len());
     for i in 0..archive.len() {
@@ -568,19 +685,58 @@ pub(crate) fn mount_zip(at: &Path, bytes: Vec<u8>, marker: Option<&str>) -> io::
             files.insert(rel.to_owned(), (i, size));
         }
     }
-    let mut v = vfs();
-    let at = v.normalize(at);
-    v.mounts.retain(|m| m.at != at);
-    v.mounts.push(Mount {
-        at,
-        archive,
-        bytes,
-        raw,
-        files,
-        dirs,
-        modified: SystemTime::now(),
-    });
-    Ok(())
+    Ok((raw, files, dirs))
+}
+
+/// A Blob read as a file, a megabyte at a time: what a zip in one is listed
+/// through.
+struct BlobReader {
+    id: u32,
+    len: u64,
+    pos: u64,
+    chunk: (u64, Vec<u8>),
+}
+impl BlobReader {
+    const CHUNK: u64 = 1 << 20;
+    fn new(id: u32, len: u64) -> Self {
+        Self {
+            id,
+            len,
+            pos: 0,
+            chunk: (0, Vec::new()),
+        }
+    }
+}
+impl Read for BlobReader {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if self.pos >= self.len || buf.is_empty() {
+            return Ok(0);
+        }
+        let (start, bytes) = &self.chunk;
+        if self.pos < *start || self.pos >= start + bytes.len() as u64 {
+            let start = self.pos - self.pos % Self::CHUNK;
+            let end = (start + Self::CHUNK).min(self.len);
+            self.chunk = (start, super::read_blob(self.id, start, end)?);
+        }
+        let (start, bytes) = &self.chunk;
+        let at = (self.pos - start) as usize;
+        let n = buf.len().min(bytes.len() - at);
+        buf[..n].copy_from_slice(&bytes[at..at + n]);
+        self.pos += n as u64;
+        Ok(n)
+    }
+}
+impl Seek for BlobReader {
+    fn seek(&mut self, to: SeekFrom) -> io::Result<u64> {
+        let pos = match to {
+            SeekFrom::Start(n) => Some(n),
+            SeekFrom::End(n) => self.len.checked_add_signed(n),
+            SeekFrom::Current(n) => self.pos.checked_add_signed(n),
+        };
+        self.pos =
+            pos.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "seek before 0"))?;
+        Ok(self.pos)
+    }
 }
 
 /// Keeps what changes under `root` for [`drain`].
@@ -595,6 +751,8 @@ pub(crate) enum Kept {
     Dir(SystemTime),
     File(Vec<u8>, SystemTime),
     Removed,
+    /// The page's Blob `.0`, `.1` bytes: restored only, never drained.
+    Stored(u32, u64, SystemTime),
 }
 /// What changed under the kept folders since the last call.
 pub(crate) fn drain() -> Vec<(String, Kept)> {
@@ -602,16 +760,31 @@ pub(crate) fn drain() -> Vec<(String, Kept)> {
     let changed = std::mem::take(&mut v.changed);
     changed
         .into_iter()
-        .map(|path| {
+        .filter_map(|path| {
             let kept = match v.nodes.get(&path) {
                 Some(Node::Dir(time)) => Kept::Dir(*time),
                 Some(Node::File(shared)) => {
                     let data = shared.lock().unwrap();
                     Kept::File(data.bytes.clone(), data.modified)
                 }
+                // Moved: kept again from memory, as the page lets go of the
+                // Blob's file where it was.
+                Some(Node::Stored(stored)) => {
+                    let stored = *stored;
+                    match v.load(&path, stored) {
+                        Ok(shared) => {
+                            let data = shared.lock().unwrap();
+                            Kept::File(data.bytes.clone(), data.modified)
+                        }
+                        Err(e) => {
+                            super::console(1, &format!("Horizon: {path} was not kept: {e}"));
+                            return None;
+                        }
+                    }
+                }
                 None => Kept::Removed,
             };
-            (path, kept)
+            Some((path, kept))
         })
         .collect()
 }
@@ -634,6 +807,16 @@ pub(crate) fn restore(path: &str, kept: Kept) {
             v.nodes.insert(
                 path,
                 Node::File(Arc::new(Mutex::new(Data { bytes, modified }))),
+            );
+        }
+        Kept::Stored(blob, len, modified) => {
+            v.nodes.insert(
+                path,
+                Node::Stored(Stored {
+                    blob,
+                    len,
+                    modified,
+                }),
             );
         }
         Kept::Removed => {
@@ -722,6 +905,12 @@ pub mod fs {
         let (mut v, p) = norm(path.as_ref());
         match v.find(&p) {
             Some(Found::File(shared)) => Ok(shared.lock().unwrap().bytes.clone()),
+            // Read without holding the file system; kept in memory once the
+            // game writes it.
+            Some(Found::Stored(stored)) => {
+                drop(v);
+                Ok(stored.data()?.bytes)
+            }
             Some(Found::Zipped(mount, index, size)) => match v.unzip(mount, index, size) {
                 Some(unzip) => {
                     drop(v);
@@ -756,7 +945,7 @@ pub mod fs {
                 v.touch(&p);
                 return Ok(());
             }
-            None => {}
+            Some(Node::Stored(_)) | None => {}
         }
         v.check_parent(&p)?;
         if v.is_dir(&p) {
@@ -1094,6 +1283,21 @@ impl OpenOptions {
             let p = v.normalize(path.as_ref());
             (v, p)
         };
+        // A stored file is read once the lock is let go, then put in the tree
+        // (unless something else was put there meanwhile).
+        if let Some(Found::Stored(stored)) = v.find(&p)
+            && !(self.truncate || self.create_new)
+        {
+            drop(v);
+            let data = stored.data()?;
+            v = vfs();
+            if let Some(Node::Stored(now)) = v.nodes.get(&p)
+                && now.blob == stored.blob
+            {
+                v.nodes
+                    .insert(p.clone(), Node::File(Arc::new(Mutex::new(data))));
+            }
+        }
         // A zipped file opened to read is read once the lock is let go.
         let reads_only = !(self.write || self.append || self.truncate || self.create_new);
         if reads_only
