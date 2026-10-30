@@ -1,0 +1,82 @@
+# The web build's checks (web/README.md, "Checks"): every merge of upstream brings native-only
+# calls that fail, panic or block in a browser, and they only show at run time.
+#   hazards: the wasm32 build linted for std's file system, clocks, environment and threads
+#            (tools/web_hazards.py), against the calls known to run only natively (web/hazards.json)
+#   build:   the one-thread wasm32 build checked, the threaded wasm64 build built (web/build.sh), and
+#            the page opened in Chromium (tools/web_smoke.py): the module loads, and with prepared
+#            resources (the HORIZON_WEB_RESOURCES_URL secret: a zip web/pack-resources.sh made, from
+#            the account's own game, kept private) a new world opens and keeps drawing.
+name: Web
+
+on:
+  push:
+    branches: [web]
+  pull_request:
+    branches: [web]
+  workflow_dispatch:
+
+concurrency:
+  group: web-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  hazards:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust with the wasm32 target and clippy
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy
+          rustup target add wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: web-hazards
+      - name: Native-only calls the web build would make
+        run: python3 tools/web_hazards.py
+
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust (stable for wasm32, nightly with std's source for threads and wasm64)
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup target add wasm32-unknown-unknown
+          rustup toolchain install nightly --profile minimal --component rust-src
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: web-build
+      - name: The wasm-bindgen CLI Cargo.lock pins
+        id: bindgen
+        run: |
+          rev=$(awk '/^name = "wasm-bindgen"$/ { getline; getline; if (match($0, /#[0-9a-f]+/)) print substr($0, RSTART + 1, RLENGTH - 1); exit }' Cargo.lock)
+          echo "rev=$rev" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        id: bindgen-cache
+        with:
+          path: ~/.cargo/bin/wasm-bindgen
+          key: wasm-bindgen-${{ steps.bindgen.outputs.rev }}
+      - if: steps.bindgen-cache.outputs.cache-hit != 'true'
+        run: cargo install wasm-bindgen-cli --git https://github.com/wasm-bindgen/wasm-bindgen --rev "${{ steps.bindgen.outputs.rev }}" --locked --force
+      - name: The one-thread wasm32 build compiles
+        run: cargo check --config web/simd.toml -p horizon-client --bin horizon-client --no-default-features --target wasm32-unknown-unknown
+      - name: Build the threaded wasm64 page
+        run: bash web/build.sh --fast
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install Playwright's Chromium
+        run: |
+          pip install playwright
+          python -m playwright install --with-deps chromium
+      - name: The prepared resources, when the repository has some
+        env:
+          RESOURCES_URL: ${{ secrets.HORIZON_WEB_RESOURCES_URL }}
+        run: |
+          if [ -n "$RESOURCES_URL" ]; then
+            curl -fsSL "$RESOURCES_URL" -o "$RUNNER_TEMP/resources.zip"
+            echo "SMOKE_ARGS=--resources $RUNNER_TEMP/resources.zip" >> "$GITHUB_ENV"
+          fi
+      - name: Smoke test in Chromium
+        run: xvfb-run -a python tools/web_smoke.py $SMOKE_ARGS

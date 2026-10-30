@@ -155,6 +155,25 @@ in), `streaming_unload_generate`, `streaming_schedule` (new jobs), `upload`
 `renderer`, `tick` and the rest. Several can go together:
 `?env=HORIZON_SPIKES=25,HORIZON_WEB_WORKERS=2`.
 
+## Checks
+
+Upstream code calls std's file system, clocks, environment and threads, which fail, panic
+or block in a browser, and that shows only when it runs. Two checks catch it
+(`.github/workflows/web.yml` runs both on the `web` branch):
+
+```sh
+python3 tools/web_hazards.py              # the wasm32 build linted for those calls (web/clippy-web)
+python3 tools/web_hazards.py --update     # accept the ones that run only natively (web/hazards.json)
+python3 tools/web_smoke.py --resources .local/horizon-web-resources.zip   # web/dist in Chromium
+```
+
+The smoke test (Playwright for Python: `pip install playwright`) serves `web/dist`, checks
+that the module loads, and with prepared resources opens a new world, waits for the player
+to join and checks that the page keeps drawing. It runs Chromium in a window (`xvfb-run`
+without a display): headless, SwiftShader's WebGPU device is lost. In CI it plays when the
+repository has a `HORIZON_WEB_RESOURCES_URL` secret pointing at your own prepared zip,
+which must stay private.
+
 ## Browsers
 
 - WebGPU: Chrome and Edge 113+, Firefox 141+ on Windows, Safari 26+.

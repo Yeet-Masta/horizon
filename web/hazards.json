@@ -1,0 +1,145 @@
+{
+ "crates/horizon-bench/src/hardware.rs": {
+  "std::fs::read_to_string": 3
+ },
+ "crates/horizon-bench/src/lib.rs": {
+  "std::fs::create_dir_all": 1,
+  "std::fs::write": 1,
+  "std::time::SystemTime::now": 1
+ },
+ "crates/horizon-client-render/src/crash.rs": {
+  "chrono::Local::now": 1
+ },
+ "crates/horizon-client-render/src/gfx/occlusion.rs": {
+  "std::sync::mpsc::Receiver::recv": 2
+ },
+ "crates/horizon-client-render/src/lod.rs": {
+  "std::sync::Condvar::wait": 1,
+  "std::sync::Condvar::wait_timeout": 1
+ },
+ "crates/horizon-client-render/src/logging.rs": {
+  "std::sync::mpsc::Receiver::recv_timeout": 1
+ },
+ "crates/horizon-client-render/src/telemetry.rs": {
+  "std::process::id": 1
+ },
+ "crates/horizon-client/build.rs": {
+  "std::env::var": 1
+ },
+ "crates/horizon-client/src/benchmark.rs": {
+  "std::process::id": 1,
+  "std::sync::mpsc::Receiver::recv_timeout": 2
+ },
+ "crates/horizon-client/src/control.rs": {
+  "std::process::id": 1,
+  "std::sync::mpsc::Receiver::recv": 1
+ },
+ "crates/horizon-client/src/discord_presence.rs": {
+  "std::process::id": 2,
+  "std::thread::park": 1,
+  "std::thread::park_timeout": 3
+ },
+ "crates/horizon-client/src/game.rs": {
+  "std::path::absolute": 2
+ },
+ "crates/horizon-client/src/game/dedicated.rs": {
+  "std::path::Path::canonicalize": 1,
+  "std::process::exit": 1,
+  "std::process::id": 1,
+  "std::thread::Builder::spawn": 1,
+  "std::thread::sleep": 2
+ },
+ "crates/horizon-client/src/lan/chunks.rs": {
+  "std::sync::Condvar::wait": 1
+ },
+ "crates/horizon-client/src/lan/conn.rs": {
+  "std::sync::mpsc::Receiver::recv_timeout": 1
+ },
+ "crates/horizon-client/src/mod_content.rs": {
+  "std::path::absolute": 2
+ },
+ "crates/horizon-client/src/save.rs": {
+  "std::sync::Condvar::wait": 1
+ },
+ "crates/horizon-client/src/vanillagen/lod.rs": {
+  "std::sync::Condvar::wait": 1
+ },
+ "crates/horizon-core/src/no_ai.rs": {
+  "std::fs::create_dir_all": 1,
+  "std::fs::read_to_string": 2,
+  "std::fs::write": 1
+ },
+ "crates/horizon-friends/src/direct.rs": {
+  "std::thread::Builder::spawn": 2,
+  "std::thread::sleep": 2,
+  "std::time::Instant::now": 3
+ },
+ "crates/horizon-friends/src/guest.rs": {
+  "std::sync::mpsc::Receiver::recv_timeout": 1,
+  "std::thread::Builder::spawn": 2,
+  "std::thread::sleep": 1,
+  "std::time::Instant::now": 4
+ },
+ "crates/horizon-friends/src/host.rs": {
+  "std::thread::Builder::spawn": 5,
+  "std::thread::sleep": 3,
+  "std::time::Instant::now": 4
+ },
+ "crates/horizon-friends/src/lib.rs": {
+  "std::env::var": 2,
+  "std::sync::mpsc::Receiver::recv_timeout": 1,
+  "std::thread::Builder::spawn": 3
+ },
+ "crates/horizon-friends/src/portmap.rs": {
+  "std::time::Instant::now": 7
+ },
+ "crates/horizon-friends/src/reach.rs": {
+  "std::thread::spawn": 1
+ },
+ "crates/horizon-friends/src/session.rs": {
+  "std::sync::mpsc::Receiver::recv_timeout": 2,
+  "std::thread::Builder::spawn": 2,
+  "std::time::Instant::now": 1
+ },
+ "crates/horizon-friends/src/stun.rs": {
+  "std::env::var": 1
+ },
+ "crates/horizon-platform/src/thread.rs": {
+  "std::thread::sleep": 1
+ },
+ "crates/horizon-protocol/src/connection.rs": {
+  "std::sync::Condvar::wait": 1,
+  "std::sync::Condvar::wait_timeout": 1,
+  "std::sync::mpsc::Receiver::recv": 1,
+  "std::sync::mpsc::Receiver::recv_timeout": 1
+ },
+ "crates/horizon-telemetry/src/consent.rs": {
+  "std::fs::read": 1
+ },
+ "crates/horizon-telemetry/src/lib.rs": {
+  "std::env::var": 1,
+  "std::fs::create_dir_all": 1,
+  "std::fs::rename": 1,
+  "std::fs::write": 1,
+  "std::time::SystemTime::now": 2
+ },
+ "crates/horizon-telemetry/src/outbox.rs": {
+  "std::fs::create_dir_all": 1,
+  "std::fs::read": 2,
+  "std::fs::read_dir": 1,
+  "std::fs::remove_dir_all": 1,
+  "std::fs::remove_file": 3
+ },
+ "crates/horizon-telemetry/src/scrub.rs": {
+  "std::env::var": 1
+ },
+ "crates/horizon-telemetry/src/system.rs": {
+  "std::env::var": 1,
+  "std::fs::read_dir": 4,
+  "std::fs::read_to_string": 4,
+  "std::path::Path::exists": 1
+ },
+ "crates/horizon-world/src/worldgen/generator_structures.rs": {
+  "std::sync::Condvar::wait": 1
+ }
+}
