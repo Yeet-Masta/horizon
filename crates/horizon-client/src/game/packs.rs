@@ -31,7 +31,19 @@ pub fn packs_dir() -> PathBuf {
         .join("resourcepacks")
 }
 /// `Util.getPlatform().openPath`: the system file manager on the folder.
+/// The web build has none: a file (a screenshot's link) is downloaded.
 pub fn open_folder(dir: &Path) {
+    #[cfg(target_family = "wasm")]
+    {
+        if horizon_platform::fs::metadata(dir).is_ok_and(|m| m.is_file())
+            && let Ok(bytes) = horizon_platform::fs::read(dir)
+        {
+            let name = dir.file_name().unwrap_or_default().to_string_lossy();
+            horizon_platform::web::save_file(&name, &bytes);
+        }
+        return;
+    }
+    #[allow(unreachable_code)]
     let program = if cfg!(target_os = "windows") {
         "explorer"
     } else if cfg!(target_os = "macos") {
@@ -45,6 +57,8 @@ pub fn open_folder(dir: &Path) {
 }
 /// `Util.getPlatform().openUri`: the system browser on the link.
 pub fn open_uri(uri: &str) {
+    #[cfg(target_family = "wasm")]
+    return horizon_platform::web::open_url(uri);
     // URLs need Windows' registered protocol handler, not Explorer's path
     // handling. ShellExecute also preserves the URL as one Unicode value,
     // without interpolating its query string into a command interpreter.
@@ -52,7 +66,7 @@ pub fn open_uri(uri: &str) {
     if let Err(error) = open::that_detached(uri) {
         log::warn!("Horizon: could not open URI {uri}: {error}");
     }
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_family = "wasm")))]
     open_folder(Path::new(uri));
 }
 /// The resource root to load from, given the vanilla root, the selection and

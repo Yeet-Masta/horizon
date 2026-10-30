@@ -24,6 +24,15 @@ extern "C" {
     /// Shows a message over the page (an error the game could not show itself).
     #[wasm_bindgen(js_namespace = globalThis, js_name = horizonStatus)]
     fn horizon_status(message: &str, error: bool);
+    /// Hands the page a file for the player to keep: a download.
+    #[wasm_bindgen(catch, js_namespace = globalThis, js_name = horizonSaveFile)]
+    fn horizon_save_file(name: &str, bytes: Uint8Array) -> Result<(), JsValue>;
+    /// Opens a web link in a new tab.
+    #[wasm_bindgen(catch, js_namespace = globalThis, js_name = horizonOpenUrl)]
+    fn horizon_open_url(url: &str) -> Result<(), JsValue>;
+    /// Writes text to the system clipboard, where the browser lets the page.
+    #[wasm_bindgen(catch, js_namespace = globalThis, js_name = horizonClipboardWrite)]
+    fn horizon_clipboard_write(text: &str) -> Result<(), JsValue>;
     #[wasm_bindgen(js_name = setInterval)]
     fn set_interval(callback: &Closure<dyn FnMut()>, ms: i32) -> i32;
     #[wasm_bindgen(js_namespace = console, js_name = error)]
@@ -53,6 +62,37 @@ pub fn console(level: u8, message: &str) {
 /// A message over the page, for what fails before the game can draw.
 pub fn status(message: &str, error: bool) {
     horizon_status(message, error);
+}
+
+/// A file for the player to keep, such as a screenshot: the browser's
+/// download. (The page's thread only: a worker has no page to ask.)
+pub fn save_file(name: &str, bytes: &[u8]) {
+    // A copy: a Blob can't hold a view of shared memory.
+    let _ = horizon_save_file(name, Uint8Array::from(bytes));
+}
+/// `Util.getPlatform().openUri`: a new tab on the link.
+pub fn open_url(url: &str) {
+    let _ = horizon_open_url(url);
+}
+
+/// The system clipboard as far as the page reaches it: a page reads it only
+/// in a paste event, so this is the text the last one gave
+/// ([`horizon_clipboard_paste`]: web/horizon.js holds Ctrl+V back from the
+/// game until then), or what the game copied since.
+static CLIPBOARD: crate::sync::Mutex<Option<String>> = crate::sync::Mutex::new(None);
+pub fn clipboard_text() -> Option<String> {
+    CLIPBOARD.lock().unwrap().clone()
+}
+/// Copies `text`, to the system clipboard where the browser lets the page
+/// write it (after the player's input, as Ctrl+C is).
+pub fn set_clipboard_text(text: &str) {
+    *CLIPBOARD.lock().unwrap() = Some(text.to_owned());
+    let _ = horizon_clipboard_write(text);
+}
+/// The text of a paste event, before the game sees the Ctrl+V that made it.
+#[wasm_bindgen]
+pub fn horizon_clipboard_paste(text: String) {
+    *CLIPBOARD.lock().unwrap() = Some(text);
 }
 
 fn get(object: &JsValue, key: &str) -> JsValue {

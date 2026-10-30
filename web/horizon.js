@@ -526,6 +526,80 @@ document.addEventListener("fullscreenchange", () => {
   else navigator.keyboard.unlock();
 });
 
+// A message over the game for a few seconds.
+let noticeTimer = 0;
+function notice(text, error) {
+  globalThis.horizonStatus(text, error);
+  clearTimeout(noticeTimer);
+  noticeTimer = setTimeout(() => { overlay.hidden = true; }, 6000);
+}
+
+// ---- Files, links and the clipboard (platform's web/mod.rs) ------------------------------------
+
+// A file for the player to keep (a screenshot, F2): a download.
+globalThis.horizonSaveFile = (name, bytes) => {
+  const type = name.endsWith(".png") ? "image/png" : "application/octet-stream";
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([bytes], { type }));
+  a.download = name;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 60_000);
+};
+// A link the player confirmed (chat, books, server links): a new tab, web links only.
+globalThis.horizonOpenUrl = (url) => {
+  try {
+    if (["http:", "https:"].includes(new URL(url).protocol)) window.open(url, "_blank", "noopener");
+  } catch {}
+};
+// Text the game copies, to the system clipboard where the browser lets the page write it.
+globalThis.horizonClipboardWrite = (text) => {
+  navigator.clipboard?.writeText(text).catch(() => {});
+};
+// A page reads the clipboard only in a paste event, which the game's own handling of Ctrl+V
+// (⌘V) would prevent: the key is held back from the game until the paste event has handed the
+// text over (or 100 ms passed, when the browser sends none), then given to it.
+let pasting = null;
+window.addEventListener("keydown", (e) => {
+  if (!e.isTrusted || !game || e.target !== $("horizon")) return;
+  if (pasting) pasting(null);
+  const v = e.key === "v" || e.key === "V" || e.code === "KeyV";
+  if (!v || !(e.ctrlKey || e.metaKey) || e.altKey || e.repeat) return;
+  e.stopImmediatePropagation();
+  const again = new KeyboardEvent(e.type, e);
+  const timer = setTimeout(() => pasting?.(null), 100);
+  pasting = (text) => {
+    pasting = null;
+    clearTimeout(timer);
+    if (text != null) game.horizon_clipboard_paste(text);
+    $("horizon").dispatchEvent(again);
+  };
+}, { capture: true });
+// The held key goes to the game before it is let go.
+window.addEventListener("keyup", (e) => { if (e.isTrusted && pasting) pasting(null); }, { capture: true });
+document.addEventListener("paste", (e) => {
+  if (!pasting) return;
+  e.preventDefault();
+  pasting(e.clipboardData?.getData("text/plain") ?? "");
+});
+
+// A world's or a resource pack's zip dropped on the game goes into its folder (web_files.rs).
+window.addEventListener("dragover", (e) => {
+  if (!shell.hidden || !game) return;
+  e.preventDefault();
+  e.dataTransfer.dropEffect = "copy";
+});
+window.addEventListener("drop", async (e) => {
+  if (!shell.hidden || !game) return;
+  e.preventDefault();
+  for (const file of e.dataTransfer.files) {
+    try {
+      notice(game.horizon_import(file.name, new Uint8Array(await file.arrayBuffer())), false);
+    } catch (error) {
+      notice(String(error?.message ?? error), true);
+    }
+  }
+});
+
 // Once the game runs, the browser asks before the tab closes or leaves: what was played since
 // the last save would go with it.
 const guardUnload = () => window.addEventListener("beforeunload", (e) => {

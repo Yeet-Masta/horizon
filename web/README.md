@@ -250,7 +250,13 @@ The web build is the native game with the operating system swapped out
   page locks the keyboard (Chrome and Edge), so Escape pauses without leaving
   fullscreen (hold it to leave) and the browser's shortcuts (Ctrl+W...) reach
   the game. Once the game runs, the browser asks before the tab closes.
-- **Off**: controllers, mods with code (content-only mods still load),
-  the system clipboard (copy and paste work inside the game), LAN discovery
+- **Files and the clipboard**: text the game copies goes to the system
+  clipboard, and Ctrl+V pastes from it: a page reads the clipboard only in a
+  paste event, so the page holds the key back from the game until the event
+  has handed the text over. A screenshot (F2) is downloaded as well as kept in
+  the game folder, and its link in chat downloads it again. Web links open in
+  a new tab. A world's zip (with its `level.dat`) or a resource pack's zip
+  dropped on the game goes into `saves` or `resourcepacks`.
+- **Off**: controllers, mods with code (content-only mods still load), LAN discovery
   and Open to LAN (no ports to open), chat signing (as natively), skin
   downloads and telemetry.

@@ -1277,6 +1277,12 @@ impl Game<'_> {
             Ok(_) => {
                 log::info!("Saved screenshot to {}", path.display());
                 let name = path.file_name().unwrap_or_default().to_string_lossy();
+                // A browser's game folder is out of the player's reach: the
+                // picture is downloaded too (its link downloads it again).
+                #[cfg(target_family = "wasm")]
+                if let Ok(bytes) = horizon_platform::fs::read(&path) {
+                    horizon_platform::web::save_file(&name, &bytes);
+                }
                 let link = Text::styled(
                     name,
                     Style {

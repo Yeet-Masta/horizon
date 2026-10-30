@@ -119,24 +119,28 @@ pub trait Clipboard {
     fn set(&mut self, text: &str);
 }
 
-/// The web build reaches no system clipboard (the page's is asynchronous and
-/// asks the player first): text copied in the game is pasted in the game.
+/// The web build's system clipboard is the page's (`horizon_platform::web`):
+/// text copied goes to it where the browser lets the page write it, and a
+/// paste is the text the browser's paste event gave (web/horizon.js holds
+/// Ctrl+V back from the game until then).
 #[cfg(target_family = "wasm")]
 mod arboard {
     pub struct Clipboard;
     pub enum Error {
         ContentNotAvailable,
+        #[allow(dead_code)]
         ClipboardNotSupported,
     }
     impl Clipboard {
         pub fn new() -> Result<Self, Error> {
-            Err(Error::ClipboardNotSupported)
+            Ok(Self)
         }
         pub fn get_text(&mut self) -> Result<String, Error> {
-            Err(Error::ContentNotAvailable)
+            horizon_platform::web::clipboard_text().ok_or(Error::ContentNotAvailable)
         }
-        pub fn set_text(&mut self, _: String) -> Result<(), Error> {
-            Err(Error::ClipboardNotSupported)
+        pub fn set_text(&mut self, text: String) -> Result<(), Error> {
+            horizon_platform::web::set_clipboard_text(&text);
+            Ok(())
         }
     }
 }
