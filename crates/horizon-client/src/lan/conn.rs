@@ -18,7 +18,7 @@ use horizon_platform::sync::Mutex;
 use horizon_platform::time::{Duration, Instant};
 use horizon_protocol::{
     PROTOCOL_VERSION,
-    connection::{ConnReader, ConnWriter, Connection},
+    connection::{Closer, ConnReader, ConnWriter, Connection},
     crypto::{offline_uuid, server_hash, uuid_string},
     packets::{
         Empty,
@@ -242,6 +242,8 @@ pub struct PlayerSender {
     held: Arc<Mutex<Vec<Vec<u8>>>>,
     /// What [`flush_all`] gave the post thread and it hasn't passed on yet.
     posted: Arc<AtomicUsize>,
+    /// A network connection's keep-alive clock (none for a test's channel).
+    watch: Option<Arc<KeepAliveWatch>>,
 }
 impl PlayerSender {
     pub fn new(tx: Sender<Out>, pending: Arc<AtomicUsize>) -> Self {
@@ -250,6 +252,19 @@ impl PlayerSender {
             pending,
             held: Arc::default(),
             posted: Arc::default(),
+            watch: None,
+        }
+    }
+    /// Whether the client has answered no keep-alive for too long, read
+    /// without the writer thread, which a client that stops reading blocks.
+    pub fn timed_out(&self) -> bool {
+        self.watch.as_ref().is_some_and(|w| w.timed_out())
+    }
+    /// Close the connection now: the writer and reader threads then end,
+    /// even blocked on it.
+    pub fn close(&self) {
+        if let Some(w) = &self.watch {
+            w.closer.close();
         }
     }
     fn held(&self) -> std::sync::MutexGuard<'_, Vec<Vec<u8>>> {
@@ -725,9 +740,11 @@ async fn serve_login(
         .as_ref()
         .map(|log| user_name(&hello.name, address, log))
         .unwrap_or_default();
-    // handleHello: online mode authenticates first; offline mode derives the
-    // profile from the name.
-    let (uuid, properties) = match &shared.config.online {
+    // handleHello: online mode authenticates first; offline mode, and the
+    // integrated server's own player through memory, derive the profile
+    // from the name.
+    let online = shared.config.online.as_ref().filter(|_| !c.is_memory());
+    let (uuid, properties) = match online {
         Some(online) => {
             match authenticate(&mut c, shared, online, &hello.name, address, &user).await {
                 Ok(Ok(profile)) => profile,
@@ -823,8 +840,9 @@ async fn login_and_configure(
             channel: "minecraft:brand".into(),
             data: {
                 let mut w = horizon_protocol::buf::Writer::new();
-                // MinecraftServer.getServerModName.
-                w.string("vanilla");
+                // MinecraftServer.getServerModName: "vanilla" there; a modded
+                // server names itself, and Horizon's says "horizon", as its client does.
+                w.string("horizon");
                 w.data
             },
         }),
@@ -881,6 +899,44 @@ async fn login_and_configure(
                 data: Vec::new(),
             }),
         )?;
+    }
+    if brand == "horizon"
+        && let Some(hash) = sync.content_identity
+    {
+        send(
+            c,
+            cfg::Clientbound::CustomPayload(cfg::CustomPayload {
+                channel: crate::content_identity::CHANNEL.into(),
+                data: hash.to_vec(),
+            }),
+        )?;
+        send(c, cfg::Clientbound::Ping(cfg::Ping { id: 0 }))?;
+        let mut content_match = false;
+        loop {
+            let (id, payload) = c.recv_async().await.map_err(e)?;
+            match cfg::Serverbound::decode(id, &payload).map_err(e)? {
+                cfg::Serverbound::CustomPayload(p)
+                    if p.channel == crate::content_identity::CHANNEL =>
+                {
+                    content_match = p.data == hash;
+                }
+                cfg::Serverbound::Pong(p) if p.id == 0 => break,
+                cfg::Serverbound::ClientInformation(i) => info = i,
+                _ => {}
+            }
+        }
+        if !content_match {
+            let reason = horizon_world::nbt::Tag::String(horizon_world::nbt::JavaString::from(
+                crate::content_identity::MISMATCH,
+            ));
+            let _ = send(c, cfg::Clientbound::Disconnect(cfg::Disconnect { reason }));
+            lost(
+                shared,
+                &format!("{name} ({})", uuid_string(uuid)),
+                crate::content_identity::MISMATCH,
+            );
+            return Ok(None);
+        }
     }
     for packet in sync.registry_packets(known_pack) {
         send(c, cfg::Clientbound::RegistryData(packet))?;
@@ -1011,7 +1067,15 @@ async fn play(c: Connection, shared: &Arc<Shared>, parts: Parts, address: std::n
     let pending = Arc::new(AtomicUsize::new(0));
     let latency = Arc::new(AtomicI32::new(0));
     let alive = Arc::new(AtomicI64::new(-1));
-    let sender = PlayerSender::new(tx.clone(), pending.clone());
+    let start = Instant::now();
+    let mut sender = PlayerSender::new(tx.clone(), pending.clone());
+    if let Ok(closer) = reader.closer() {
+        sender.watch = Some(Arc::new(KeepAliveWatch {
+            start,
+            alive: alive.clone(),
+            closer,
+        }));
+    }
     let writer_thread = {
         let (alive, latency, pending) = (alive.clone(), latency.clone(), pending.clone());
         let name = format!("horizon-lan-out-{conn_id}");
@@ -1020,7 +1084,7 @@ async fn play(c: Connection, shared: &Arc<Shared>, parts: Parts, address: std::n
             if !horizon_platform::WEB {
                 horizon_threads::behind_server();
             }
-            write_loop(writer, rx, alive, latency, pending).await
+            write_loop(writer, rx, start, alive, latency, pending).await
         };
         // The web build's page runs it beside its events (a friend's data
         // channel stays there); on a worker (the integrated server's player)
@@ -1170,7 +1234,10 @@ async fn read_loop(
                 return Ended::PackDeclined(r.id);
             }
             Ok(p) => {
-                if events.send(NetEvent::Packet(conn, Box::new(p))).is_err() {
+                if events
+                    .send(NetEvent::Packet(conn, Box::new(p), payload.len()))
+                    .is_err()
+                {
                     return Ended::Closed("server closed".to_owned());
                 }
             }
@@ -1278,14 +1345,33 @@ async fn next_out(rx: &mut Receiver<Out>, timeout: Duration) -> Result<Out, Recv
     }
 }
 
+/// The keep-alive clock of a play connection, shared by the writer thread
+/// (which sends the keep-alives) and the game thread (which watches them).
+struct KeepAliveWatch {
+    /// What keep-alive ids count from: an id is its sending time in ms.
+    start: Instant,
+    /// The id of the last keep-alive the client answered (-1: none yet).
+    alive: Arc<AtomicI64>,
+    closer: Closer,
+}
+impl KeepAliveWatch {
+    /// keepConnectionAlive sends a keep-alive 15 s after the last and drops
+    /// a client that has not answered it 15 s later: nothing answered of
+    /// what was sent in the last 30 s.
+    fn timed_out(&self) -> bool {
+        let answered = u64::try_from(self.alive.load(Ordering::Relaxed)).unwrap_or(0);
+        self.start.elapsed() > Duration::from_millis(answered) + 2 * KEEP_ALIVE_EVERY
+    }
+}
+
 async fn write_loop(
     mut writer: ConnWriter,
     mut rx: Receiver<Out>,
+    start: Instant,
     alive: Arc<AtomicI64>,
     latency: Arc<AtomicI32>,
     pending: Arc<AtomicUsize>,
 ) {
-    let start = Instant::now();
     let mut sent_at: Option<(i64, Instant)> = None;
     let mut next = Instant::now() + KEEP_ALIVE_EVERY;
     loop {
@@ -1314,22 +1400,16 @@ async fn write_loop(
             Err(RecvTimeoutError::Timeout) => {}
         }
         let now = Instant::now();
-        if let Some((id, at)) = sent_at {
-            if alive.load(Ordering::Relaxed) == id {
-                let ms = i32::try_from(at.elapsed().as_millis()).unwrap_or(i32::MAX);
-                let old = latency.load(Ordering::Relaxed);
-                latency.store((old * 3 + ms) / 4, Ordering::Relaxed);
-                sent_at = None;
-            } else if at.elapsed() >= KEEP_ALIVE_EVERY {
-                let _ = writer.send(
-                    &play::Clientbound::Disconnect(cfg::Disconnect {
-                        reason: translatable("disconnect.timeout", &[]),
-                    })
-                    .encode(),
-                );
-                break;
-            }
+        if let Some((id, at)) = sent_at
+            && alive.load(Ordering::Relaxed) == id
+        {
+            let ms = i32::try_from(at.elapsed().as_millis()).unwrap_or(i32::MAX);
+            let old = latency.load(Ordering::Relaxed);
+            latency.store((old * 3 + ms) / 4, Ordering::Relaxed);
+            sent_at = None;
         }
+        // The game thread times a client out ([`PlayerSender::timed_out`]):
+        // this thread may be blocked on a client that stopped reading.
         if sent_at.is_none() && now >= next {
             let id = i64::try_from(start.elapsed().as_millis()).unwrap_or(0);
             if writer
@@ -1474,6 +1554,31 @@ mod tests {
         sender.flush();
         assert_eq!(bodies(&rx), [vec![vec![5]], vec![b"disconnect".to_vec()]]);
         assert_eq!(sender.pending.load(Ordering::Relaxed), 5);
+    }
+
+    /// A client that answers no keep-alive is timed out 30 s after the last
+    /// one it answered was sent (or after joining), and closing ends a read
+    /// blocked on its connection.
+    #[test]
+    fn a_silent_client_times_out_and_closes() {
+        let (a, _b) = horizon_protocol::connection::Pipe::pair();
+        let (mut reader, _writer) = Connection::local(a).split();
+        let ago = |s| Instant::now().checked_sub(Duration::from_secs(s)).unwrap();
+        let watch = |start, answered| KeepAliveWatch {
+            start,
+            alive: Arc::new(AtomicI64::new(answered)),
+            closer: reader.closer().unwrap(),
+        };
+        assert!(!watch(ago(29), -1).timed_out());
+        assert!(watch(ago(31), -1).timed_out());
+        // Answered the keep-alive sent 15 s in: fine until 45 s.
+        assert!(!watch(ago(44), 15_000).timed_out());
+        assert!(watch(ago(46), 15_000).timed_out());
+        let closer = watch(ago(0), -1).closer;
+        let blocked = std::thread::spawn(move || reader.recv().is_err());
+        std::thread::sleep(Duration::from_millis(50));
+        closer.close();
+        assert!(blocked.join().unwrap(), "the read should end once closed");
     }
 
     #[test]

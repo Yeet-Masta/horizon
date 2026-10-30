@@ -4,7 +4,7 @@
 //! so stale work is dropped.
 use crate::fast_hash::{FxHashMap, FxHashSet};
 use crate::{
-    chunk::{Chunk, SECTIONS},
+    chunk::Chunk,
     light::{LightChanges, LightTables, apply_lighting, apply_relighting, light_chunk},
     mesher::{MeshTables, Mesher, Region, SectionMesh, borrow},
     world::World,
@@ -18,9 +18,13 @@ use std::{
     collections::{BinaryHeap, HashSet, VecDeque},
     sync::{
         Arc, Condvar, MutexGuard, TryLockError,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
 };
+
+/// How long a worker waits with nothing to do before it gives back its
+/// generator's scratch buffers ([`ChunkGenerator::idle`]).
+pub const IDLE_RELEASE: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// A chunk under generation, opaque to the streamer.
 pub type Proto = Box<dyn std::any::Any + Send>;
@@ -58,6 +62,9 @@ pub trait ChunkGenerator: Send + Sync + 'static {
     /// What a loaded chunk needs from the generator before the game uses it,
     /// on the worker that loaded it.
     fn prepare_loaded(&self, _worker: &mut Self::Worker, _chunk: &Chunk) {}
+    /// The worker has had nothing to do for [`IDLE_RELEASE`]: give back what
+    /// it keeps between jobs only to go faster.
+    fn idle(&self, _worker: &mut Self::Worker) {}
     fn proto(&self, worker: &mut Self::Worker, x: i32, z: i32) -> Proto;
     fn decorates(&self) -> bool {
         false
@@ -221,6 +228,14 @@ struct Shared {
     /// packs reload; each mesh job takes the current one.
     context: RwLock<Arc<WorkerContext>>,
     done: Mailbox,
+    /// Workers that have freed their buffers ([`IDLE_RELEASE`]) and taken no
+    /// job since: the last of them gives the freed memory back to the OS.
+    /// (The one-thread web build runs jobs between frames and never idles.)
+    #[cfg_attr(
+        all(target_family = "wasm", not(target_feature = "atomics")),
+        allow(dead_code)
+    )]
+    released: AtomicUsize,
 }
 /// Finished jobs, from the workers to the game thread, in the order they
 /// finished. Not an `mpsc` channel: its receiver waits for a sender it finds
@@ -294,7 +309,7 @@ impl Mailbox {
 /// Workers, as natively.
 #[cfg(all(target_family = "wasm", not(target_feature = "atomics")))]
 struct Inline {
-    run: Box<dyn FnMut(Job) -> Option<Done> + Send>,
+    run: Box<dyn FnMut(Option<Job>) -> Option<Done> + Send>,
 }
 /// How long the threaded web build's frame takes in finished jobs
 /// (`Streaming::update`).
@@ -380,6 +395,8 @@ pub struct Streaming {
     deferred: Vec<Done>,
     sequence: u64,
     pub center: (i32, i32),
+    /// The view distance around `center`; below 0, no area there (a dedicated
+    /// server nobody is on).
     pub radius: i32,
     /// `/forceload`ed chunks: kept loaded whatever the distance.
     pub forced: HashSet<(i32, i32)>,
@@ -583,7 +600,13 @@ impl Streaming {
             stop: AtomicBool::new(false),
             context: RwLock::new(context.clone()),
             done: Mailbox::default(),
+            released: AtomicUsize::new(0),
         });
+        #[cfg_attr(
+            all(target_family = "wasm", not(target_feature = "atomics")),
+            allow(unused_variables)
+        )]
+        let workers = threads.max(1);
         let light_tables = context.light.clone();
         let saves: Arc<dyn Saves> = generator.clone();
         // One worker's state and its job: what a pool thread runs natively,
@@ -596,7 +619,16 @@ impl Streaming {
                 // the worker across mesh jobs, like vanilla's per-thread cache:
                 // cloning it per job copied every state and face shape.
                 let mut faces: Option<(Arc<MeshTables>, FaceVisibility)> = None;
-                move |job: Job| {
+                // None: the worker has been idle for `IDLE_RELEASE`.
+                move |job: Option<Job>| {
+                    let Some(job) = job else {
+                        // A server nobody is on, a client standing still: free
+                        // the generator's buffers (and the mesher's face cache)
+                        // until the next job needs them.
+                        generator.idle(&mut worker);
+                        faces = None;
+                        return None;
+                    };
                     Some(match job {
                         Job::Generate(x, z) => match generator.load(x, z) {
                             Some(chunk) => {
@@ -687,17 +719,41 @@ impl Streaming {
                     loop {
                         let job = {
                             let mut queue = shared.queue.lock().unwrap();
+                            let mut released = false;
                             loop {
                                 if shared.stop.load(Ordering::Relaxed) {
                                     return;
                                 }
                                 if let Some(job) = queue.pop() {
+                                    if released {
+                                        shared.released.fetch_sub(1, Ordering::Relaxed);
+                                    }
                                     break job.job;
                                 }
-                                queue = shared.ready.wait(queue).unwrap();
+                                if released {
+                                    queue = shared.ready.wait(queue).unwrap();
+                                    continue;
+                                }
+                                let (woken, wait) =
+                                    shared.ready.wait_timeout(queue, IDLE_RELEASE).unwrap();
+                                queue = woken;
+                                if wait.timed_out() && queue.is_empty() {
+                                    drop(queue);
+                                    run(None);
+                                    released = true;
+                                    // The allocator keeps freed pages until memory
+                                    // runs short: once every worker has freed its own,
+                                    // hand them back.
+                                    if shared.released.fetch_add(1, Ordering::Relaxed) + 1
+                                        == workers
+                                    {
+                                        horizon_threads::release_free_memory();
+                                    }
+                                    queue = shared.queue.lock().unwrap();
+                                }
                             }
                         };
-                        if let Some(done) = run(job) {
+                        if let Some(done) = run(Some(job)) {
                             shared.done.send(done);
                         }
                     }
@@ -790,7 +846,7 @@ impl Streaming {
         self.meshing.clear();
         for &(x, z) in world.chunks.keys() {
             if self.lit.contains(&(x, z)) {
-                for sy in 0..SECTIONS as i32 {
+                for sy in 0..world.layout().sections() as i32 {
                     world.dirty_sections.insert((x, sy, z));
                 }
             }
@@ -808,7 +864,7 @@ impl Streaming {
         self.generated_total += 1;
         for dz in -1..=1 {
             for dx in -1..=1 {
-                for sy in 0..SECTIONS as i32 {
+                for sy in 0..world.layout().sections() as i32 {
                     world.dirty_sections.insert((key.0 + dx, sy, key.1 + dz));
                 }
             }
@@ -823,7 +879,7 @@ impl Streaming {
                 for dy in -1..=1 {
                     for dx in -1..=1 {
                         let s = sy as i32 + dy;
-                        if (0..SECTIONS as i32).contains(&s) {
+                        if (0..world.layout().sections() as i32).contains(&s) {
                             world.dirty_sections.insert((x + dx, s, z + dz));
                         }
                     }
@@ -849,7 +905,7 @@ impl Streaming {
         self.lighting.remove(&(x, z));
         // By key, not by a pass over every pending section: a moved or
         // shrunk storage forgets thousands of columns in one frame.
-        for sy in 0..SECTIONS as i32 {
+        for sy in 0..world.layout().sections() as i32 {
             self.meshing.remove(&(x, sy, z));
             self.waiting.remove(&(x, sy, z));
         }
@@ -967,7 +1023,7 @@ impl Streaming {
         world.chunks.insert(key, Arc::new(chunk));
         if loaded {
             self.lit.insert(key);
-            for sy in 0..SECTIONS as i32 {
+            for sy in 0..world.layout().sections() as i32 {
                 world.dirty_sections.insert((key.0, sy, key.1));
             }
         }
@@ -1168,7 +1224,7 @@ impl Streaming {
                         if first {
                             for dz in -1..=1 {
                                 for dx in -1..=1 {
-                                    for sy in 0..SECTIONS as i32 {
+                                    for sy in 0..world.layout().sections() as i32 {
                                         world.dirty_sections.insert((x + dx, sy, z + dz));
                                     }
                                 }
@@ -1238,7 +1294,9 @@ impl Streaming {
                 .iter()
                 .filter(|&(&(x, z), p)| {
                     p.is_some()
-                        && i64::from(x - center.0).pow(2) + i64::from(z - center.1).pow(2) > r4 * r4
+                        && (self.radius < 0
+                            || i64::from(x - center.0).pow(2) + i64::from(z - center.1).pow(2)
+                                > r4 * r4)
                         && !ranges.in_extra(x, z, 4)
                         && !ranges.in_band(x, z, 4)
                         && !ranges.forced.iter().any(|f| {
@@ -1466,7 +1524,7 @@ impl Streaming {
             }
             if !self.ranges().in_view(x, z) {
                 world.dirty_sections.take_column(x, z);
-                for sy in section_indexes(sections) {
+                for sy in sections.iter().map(|sy| sy as i32) {
                     self.waiting.insert((x, sy, z));
                 }
                 continue;
@@ -1490,7 +1548,7 @@ impl Streaming {
                 continue;
             };
             world.dirty_sections.take_column(x, z);
-            for sy in section_indexes(sections) {
+            for sy in sections.iter().map(|sy| sy as i32) {
                 let first = self.meshed.insert((x, z));
                 self.sequence += 1;
                 self.meshing.insert((x, sy, z), self.sequence);
@@ -1607,7 +1665,7 @@ impl Streaming {
     fn mark_light_changes(world: &mut World, changed: &LightChanges) {
         if let Some(log) = &mut world.light_log {
             for (x, sy, z) in changed.sections() {
-                *log.entry((x, z)).or_default() |= 1 << sy;
+                log.entry((x, z)).or_default().insert(sy as usize);
             }
         }
         changed.dirty_sections(|section| {
@@ -1712,7 +1770,7 @@ impl Streaming {
                 return None;
             }
             let queued = self.shared.queue.lock().unwrap().pop()?;
-            if let Some(done) = (self.inline.run)(queued.job) {
+            if let Some(done) = (self.inline.run)(Some(queued.job)) {
                 self.shared.done.send(done);
             }
         }
@@ -1755,7 +1813,7 @@ impl Streaming {
                 continue;
             }
             let at = Instant::now();
-            let done = (self.inline.run)(queued.job);
+            let done = (self.inline.run)(Some(queued.job));
             let took = at.elapsed().as_secs_f64();
             let cost = &mut self.job_costs[kind];
             *cost = if *cost == 0.0 {
@@ -1772,6 +1830,16 @@ impl Streaming {
     }
     fn in_range(&self, x: i32, z: i32, margin: i32) -> bool {
         self.ranges().in_range(x, z, margin)
+    }
+    /// Rank the 3x3 a chunk loaded to FULL decorates, in one generation
+    /// task's order (`ChunkGenerationTask`: x-outer, z-inner), after every
+    /// chunk ranked before.
+    pub fn rank_full_task(&mut self, x: i32, z: i32) {
+        for dx in -1..=1 {
+            for dz in -1..=1 {
+                self.decoration_order.rank_or_append(x + dx, z + dz);
+            }
+        }
     }
     pub fn band(&self) -> Option<Band> {
         self.band
@@ -2078,7 +2146,7 @@ impl Ranges<'_> {
         let (dx, dz) = (gap(x - self.center.0), gap(z - self.center.1));
         let r = i64::from(self.radius + 1);
         // The extra areas are squares: their finished square grown by `reach`.
-        dx * dx + dz * dz <= r * r
+        (self.radius >= 0 && dx * dx + dz * dz <= r * r)
             || self.in_extra(x, z, 1 + reach)
             || self.in_band(x, z, 1 + reach)
     }
@@ -2111,7 +2179,7 @@ impl Ranges<'_> {
     fn in_main_range(&self, x: i32, z: i32, margin: i32) -> bool {
         let r = i64::from(self.radius + margin);
         let (dx, dz) = (i64::from(x - self.center.0), i64::from(z - self.center.1));
-        if dx * dx + dz * dz <= r * r {
+        if self.radius >= 0 && dx * dx + dz * dz <= r * r {
             return true;
         }
         // A forced chunk holds a FORCED ticket at level 31
@@ -2147,16 +2215,6 @@ impl Drop for Streaming {
             let _ = t.join();
         }
     }
-}
-/// The section indexes set in a column's bits, lowest first.
-fn section_indexes(mut bits: u32) -> impl Iterator<Item = i32> {
-    std::iter::from_fn(move || {
-        (bits != 0).then(|| {
-            let sy = bits.trailing_zeros() as i32;
-            bits &= bits - 1;
-            sy
-        })
-    })
 }
 /// The queued jobs' priorities computed again from each one's column
 /// `distance` (`Streaming::submit`).
@@ -2745,6 +2803,34 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// An idle dedicated server keeps no area around its centre: only a spawn
+    /// search's chunk (FULL alone: its 3x3 decorated, 5x5 generated) and the
+    /// forced chunks.
+    #[test]
+    fn no_area_around_an_idle_servers_centre() {
+        let forced = HashSet::from([(30, 30)]);
+        let extra = [((5, -3), -1)];
+        let r = Ranges {
+            center: (5, -3),
+            radius: -1,
+            extra: &extra,
+            forced: &forced,
+            cover: None,
+            band: None,
+        };
+        for x in -5i32..=15 {
+            for z in -13i32..=7 {
+                let d = (x - 5).abs().max((z + 3).abs());
+                assert_eq!(r.in_range(x, z, 1), d == 0, "({x}, {z})");
+                assert_eq!(r.chunk_kept(x, z, true), d <= 2, "({x}, {z})");
+                assert_eq!(r.requested(x, z, true), d <= 2, "({x}, {z})");
+            }
+        }
+        assert!(r.in_range(30, 30, 1));
+        let idle = Ranges { extra: &[], ..r };
+        assert!(!idle.requested(5, -3, true) && idle.unloaded(5, -3, true));
     }
 
     /// A server player's area (`lan_update_streaming`: the server view
