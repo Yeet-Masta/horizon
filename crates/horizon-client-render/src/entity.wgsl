@@ -288,7 +288,10 @@ fn crumbling_uv(uv: vec2<f32>, packed_origin: vec2<f32>, sprite_size: vec2<f32>,
 // way terrain.wgsl marks a light source's, drawn again after the entities with
 // only alpha written, so its colour stays as blended.
 @fragment fn fs_hdr_mark(in: Out) -> @location(0) vec4<f32> {
-    if in.tier == 0u || textureSample(atlas, atlas_sampler, in.uv).a < 0.1 { discard; }
+    // Sampled first: WGSL samples in uniform control flow only, and `||`
+    // would skip the sample for tier 0 (browsers reject the shader).
+    let alpha = textureSample(atlas, atlas_sampler, in.uv).a;
+    if in.tier == 0u || alpha < 0.1 { discard; }
     return vec4(0.0, 0.0, 0.0, 0.7 * f32(4u - min(in.tier, 4u)) / 4.0);
 }
 

@@ -1120,7 +1120,7 @@ fn tables(base: &Path, plan: &Plan, overlay: &Overlay<'_>) -> Result<()> {
         overlay.write(name, &bytes)
     };
     let next = std::sync::atomic::AtomicUsize::new(0);
-    let threads = horizon_platform::thread::available_parallelism().map_or(1, |n| n.get());
+    let threads = horizon_platform::thread::scope_parallelism();
     horizon_platform::thread::scope(|scope| {
         let workers: Vec<_> = (0..threads.min(TABLE_THREADS))
             .map(|_| {

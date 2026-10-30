@@ -477,7 +477,7 @@ impl HudAtlas {
                 animated,
             ))
         };
-        let threads = horizon_platform::thread::available_parallelism().map_or(2, |n| n.get());
+        let threads = horizon_platform::thread::scope_parallelism();
         let chunk = files.len().div_ceil(threads).max(1);
         let decoded: Vec<_> = horizon_platform::thread::scope(|scope| {
             let handles: Vec<_> = files

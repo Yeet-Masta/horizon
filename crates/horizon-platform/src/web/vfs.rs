@@ -60,10 +60,48 @@ impl Source {
         Some(match self {
             Source::Memory(bytes) => Ok(bytes.get(start..start + len)?.into()),
             Source::Blob(id) => {
-                super::read_blob(*id, start as u64, (start + len) as u64).map(Into::into)
+                read_window(*id, start as u64, (start + len) as u64).map(Into::into)
             }
         })
     }
+}
+
+/// The last pieces of zips in Blobs read, 1 MiB each, shared by every thread:
+/// a zip in a Blob is read entry by entry, mostly in its order, and one read
+/// of the Blob per entry costs the browser far more than the entry.
+static WINDOWS: Mutex<Vec<(u32, u64, Arc<[u8]>)>> = Mutex::new(Vec::new());
+const WINDOW: u64 = 1 << 20;
+const WINDOWS_KEPT: usize = 16;
+
+/// Bytes `start..end` of Blob `id`, through [`WINDOWS`] when they lie in one.
+fn read_window(id: u32, start: u64, end: u64) -> io::Result<Vec<u8>> {
+    let at = start - start % WINDOW;
+    if end > at + WINDOW {
+        return super::read_blob(id, start, end);
+    }
+    let kept = WINDOWS
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|(blob, from, _)| (*blob, *from) == (id, at))
+        .map(|(_, _, bytes)| bytes.clone());
+    let window = match kept {
+        Some(window) => window,
+        None => {
+            // The Blob's end cuts the last window short.
+            let window: Arc<[u8]> = super::read_blob(id, at, at + WINDOW)?.into();
+            let mut windows = WINDOWS.lock().unwrap();
+            if windows.len() == WINDOWS_KEPT {
+                windows.remove(0);
+            }
+            windows.push((id, at, window.clone()));
+            window
+        }
+    };
+    window
+        .get((start - at) as usize..(end - at) as usize)
+        .map(<[u8]>::to_vec)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "past the Blob's end"))
 }
 
 struct Mount {
@@ -688,22 +726,25 @@ fn index_zip<R: Read + Seek>(
     Ok((raw, files, dirs))
 }
 
-/// A Blob read as a file, a megabyte at a time: what a zip in one is listed
-/// through.
+/// A Blob read as a file, 64 KiB at a time, keeping the last 32 pieces read:
+/// what a zip in one is listed through. Listing reads each entry's header,
+/// and the zip's order can jump between two ends of the file every entry.
 struct BlobReader {
     id: u32,
     len: u64,
     pos: u64,
-    chunk: (u64, Vec<u8>),
+    /// The pieces read, oldest first: where each starts, and its bytes.
+    chunks: Vec<(u64, Vec<u8>)>,
 }
 impl BlobReader {
-    const CHUNK: u64 = 1 << 20;
+    const CHUNK: u64 = 64 << 10;
+    const KEPT: usize = 32;
     fn new(id: u32, len: u64) -> Self {
         Self {
             id,
             len,
             pos: 0,
-            chunk: (0, Vec::new()),
+            chunks: Vec::new(),
         }
     }
 }
@@ -712,15 +753,22 @@ impl Read for BlobReader {
         if self.pos >= self.len || buf.is_empty() {
             return Ok(0);
         }
-        let (start, bytes) = &self.chunk;
-        if self.pos < *start || self.pos >= start + bytes.len() as u64 {
-            let start = self.pos - self.pos % Self::CHUNK;
-            let end = (start + Self::CHUNK).min(self.len);
-            self.chunk = (start, super::read_blob(self.id, start, end)?);
-        }
-        let (start, bytes) = &self.chunk;
+        let start = self.pos - self.pos % Self::CHUNK;
+        let index = match self.chunks.iter().position(|(at, _)| *at == start) {
+            Some(index) => index,
+            None => {
+                if self.chunks.len() == Self::KEPT {
+                    self.chunks.remove(0);
+                }
+                let end = (start + Self::CHUNK).min(self.len);
+                self.chunks
+                    .push((start, super::read_blob(self.id, start, end)?));
+                self.chunks.len() - 1
+            }
+        };
+        let bytes = &self.chunks[index].1;
         let at = (self.pos - start) as usize;
-        let n = buf.len().min(bytes.len() - at);
+        let n = buf.len().min(bytes.len().saturating_sub(at));
         buf[..n].copy_from_slice(&bytes[at..at + n]);
         self.pos += n as u64;
         Ok(n)

@@ -138,6 +138,18 @@ pub fn spawn_worker(name: &str, work: impl FnOnce() + Send + 'static) -> std::io
     crate::web::spawn_thread(name, Box::new(work));
     Ok(())
 }
+/// How many threads a [`scope`] may run its spawns on here, this one
+/// included: `available_parallelism` natively. On the threaded web build a
+/// worker's scopes run on a pool of workers (`web::pool`), the page's thread's
+/// where it is (it may not wait for them); without threads, 1.
+pub fn scope_parallelism() -> usize {
+    #[cfg(all(target_family = "wasm", target_feature = "atomics"))]
+    if may_block() {
+        return web::pool::size() + 1;
+    }
+    available_parallelism().map_or(1, |n| n.get())
+}
+
 /// How many [`spawn_worker`] threads make sense: natively the cores less the
 /// one the game runs on (its workers run behind it, `horizon_threads`). A
 /// browser can't put a worker behind the page, so the threaded web build
@@ -300,7 +312,14 @@ mod web {
         }
     }
 
+    /// `std::thread::Scope`. Without threads, and on the page's thread (which
+    /// may not wait for others), a spawn runs where it is spawned. On a
+    /// worker of the threaded build it runs on the scope pool (`pool`), and
+    /// the scope returns once every spawn has finished.
     pub struct Scope<'scope, 'env: 'scope> {
+        /// Spawns on the pool not finished yet.
+        #[cfg(target_feature = "atomics")]
+        running: std::sync::Arc<std::sync::atomic::AtomicUsize>,
         scope: PhantomData<&'scope mut &'scope ()>,
         env: PhantomData<&'env mut &'env ()>,
     }
@@ -310,25 +329,131 @@ mod web {
             F: FnOnce() -> T + Send + 'scope,
             T: Send + 'scope,
         {
-            ScopedJoinHandle(f(), PhantomData)
+            #[cfg(target_feature = "atomics")]
+            if super::may_block() {
+                use std::sync::{Arc, atomic::Ordering};
+                let slot = Arc::new(crate::sync::Mutex::new(None));
+                let (out, running) = (slot.clone(), self.running.clone());
+                running.fetch_add(1, Ordering::AcqRel);
+                let job: Box<dyn FnOnce() + Send + 'scope> = Box::new(move || {
+                    let value = f();
+                    *out.lock().unwrap() = Some(value);
+                    running.fetch_sub(1, Ordering::AcqRel);
+                });
+                // SAFETY: `scope` returns only once every spawn has run, so
+                // what `f` borrows outlives it; a panic aborts the web build
+                // rather than unwind past the scope.
+                let job: pool::Job = unsafe { std::mem::transmute(job) };
+                pool::submit(job);
+                return ScopedJoinHandle(Handle::Pending(slot), PhantomData);
+            }
+            ScopedJoinHandle(Handle::Done(f()), PhantomData)
         }
     }
-    pub struct ScopedJoinHandle<'scope, T>(T, PhantomData<&'scope ()>);
+    enum Handle<T> {
+        Done(T),
+        #[cfg(target_feature = "atomics")]
+        Pending(std::sync::Arc<crate::sync::Mutex<Option<T>>>),
+    }
+    pub struct ScopedJoinHandle<'scope, T>(Handle<T>, PhantomData<&'scope ()>);
     impl<T> ScopedJoinHandle<'_, T> {
         pub fn join(self) -> std::thread::Result<T> {
-            Ok(self.0)
+            match self.0 {
+                Handle::Done(value) => Ok(value),
+                #[cfg(target_feature = "atomics")]
+                Handle::Pending(slot) => loop {
+                    if let Some(value) = slot.lock().unwrap().take() {
+                        return Ok(value);
+                    }
+                    pool::wait();
+                },
+            }
         }
         pub fn is_finished(&self) -> bool {
-            true
+            match &self.0 {
+                Handle::Done(_) => true,
+                #[cfg(target_feature = "atomics")]
+                Handle::Pending(slot) => slot.lock().unwrap().is_some(),
+            }
         }
     }
     pub fn scope<'env, F, T>(f: F) -> T
     where
         F: for<'scope> FnOnce(&'scope Scope<'scope, 'env>) -> T,
     {
-        f(&Scope {
+        let scope = Scope {
+            #[cfg(target_feature = "atomics")]
+            running: Default::default(),
             scope: PhantomData,
             env: PhantomData,
-        })
+        };
+        let out = f(&scope);
+        #[cfg(target_feature = "atomics")]
+        while scope.running.load(std::sync::atomic::Ordering::Acquire) > 0 {
+            pool::wait();
+        }
+        out
+    }
+
+    /// The workers scopes spawn on (threaded build): started as a worker's
+    /// first scope spawns, then waiting for spawns. A thread waiting on a
+    /// scope runs queued spawns meanwhile, so scopes inside scopes never
+    /// wait on a pool all of whose workers wait too.
+    #[cfg(target_feature = "atomics")]
+    pub(super) mod pool {
+        use crate::sync::Mutex;
+        use std::{
+            collections::VecDeque,
+            sync::{
+                Condvar,
+                atomic::{AtomicBool, Ordering},
+            },
+            time::Duration,
+        };
+
+        pub(crate) type Job = Box<dyn FnOnce() + Send + 'static>;
+        static JOBS: Mutex<VecDeque<Job>> = Mutex::new(VecDeque::new());
+        static WAKE: Condvar = Condvar::new();
+        static STARTED: AtomicBool = AtomicBool::new(false);
+
+        /// The cores less the page's, at most 7: they work only while a
+        /// scope waits for them (loading, mostly), the chunk workers idle.
+        pub(crate) fn size() -> usize {
+            crate::web::hardware_concurrency()
+                .saturating_sub(1)
+                .clamp(1, 7)
+        }
+
+        pub(crate) fn submit(job: Job) {
+            if !STARTED.swap(true, Ordering::AcqRel) {
+                for _ in 0..size() {
+                    let _ = super::super::spawn_worker("Scope", || {
+                        loop {
+                            let job = {
+                                let mut jobs = JOBS.lock().unwrap();
+                                loop {
+                                    if let Some(job) = jobs.pop_front() {
+                                        break job;
+                                    }
+                                    jobs = WAKE.wait(jobs).unwrap();
+                                }
+                            };
+                            job();
+                        }
+                    });
+                }
+            }
+            JOBS.lock().unwrap().push_back(job);
+            WAKE.notify_one();
+        }
+
+        /// While a scope waits: a queued spawn run here, else a short nap.
+        pub(crate) fn wait() {
+            let job = JOBS.lock().unwrap().pop_front();
+            match job {
+                Some(job) => job(),
+                None => std::thread::sleep(Duration::from_micros(100)),
+            }
+        }
     }
 }

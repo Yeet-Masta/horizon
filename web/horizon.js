@@ -8,8 +8,9 @@
 //   horizonPersist(records) -> keeps [path, "file"|"dir"|"removed", bytes, mtime] records
 //   horizonStatus(text, error)
 // and sets globalThis.horizonFlush, called here as the page is hidden. On the threaded build
-// the resources zip and the game folder's larger files stay Blobs (horizonBlobs, given to every
-// worker), which the game reads as it opens them (blobs.rs).
+// with Options -> Game data "In browser storage", the resources zip and the game folder's larger
+// files stay Blobs (horizonBlobs, given to every worker), which the game reads as it opens them
+// (blobs.rs); "In memory" (the default) reads them all as it starts.
 
 const DB_NAME = "horizon";
 const DB_VERSION = 2;
@@ -152,8 +153,9 @@ async function idbFiles() {
 // every worker (horizonSpawnThread), so all are added before the game starts.
 globalThis.horizonBlobs = [];
 const blobId = (blob) => globalThis.horizonBlobs.push(blob) - 1;
-// Files this size or larger stay Blobs on the threaded build: worlds' region files, mostly.
-// Smaller ones (options, level.dat), read on the page's thread, come in memory.
+// Files this size or larger stay Blobs when the game data is kept in browser storage: worlds'
+// region files, mostly. Smaller ones (options, level.dat), read on the page's thread, come in
+// memory.
 const LAZY = 64 << 10;
 
 // The kept game folder as the game takes it: [path, kind, bytes, mtime], or with `lazy`, for a
@@ -559,6 +561,9 @@ function updatePlay() {
 const params = new URLSearchParams(location.search);
 $("args").value = params.get("args") ?? localStorageGet("horizon.args") ?? "";
 $("relay").value = params.get("relay") ?? localStorageGet("horizon.relay") ?? "";
+$("keep").value = localStorageGet("horizon.keep") === "storage" ? "storage" : "memory";
+// The one-thread build has no workers to read browser storage while it plays.
+if (!build.threads) $("keep").disabled = true;
 function localStorageGet(key) {
   try { return localStorage.getItem(key); } catch { return null; }
 }
@@ -581,20 +586,42 @@ globalThis.horizonBoot = async () => {
   const relay = $("relay").value.trim();
   localStorageSet("horizon.relay", relay);
   if (relay) boot.env.HORIZON_WEB_RELAY = relay;
+  // Game data in browser storage: only the threaded build reads it there (its workers can).
+  localStorageSet("horizon.keep", $("keep").value);
+  const inStorage = !!build.threads && $("keep").value === "storage";
   Object.assign(boot.env, urlEnv());
+  // How long each step before the game takes, in the console: a slow start says where it went.
+  const at = performance.now();
+  const step = (name) => {
+    const now = performance.now();
+    const ms = Math.round(now - (step.last ?? at));
+    step.last = now;
+    return `${name} ${ms} ms`;
+  };
+  const steps = [];
   // The signed-in account's session, before the game reads its options.
-  if (relay) await startSession(relay);
+  if (relay) {
+    await startSession(relay);
+    steps.push(step("Microsoft session"));
+  }
   if (chosen.files) {
     boot.resourceFiles = await Promise.all(
       chosen.files.map(async ([path, blob]) => [path, new Uint8Array(await blob.arrayBuffer())]));
-  } else if (build.threads) {
-    // Read in place: the game's workers read the entries they open.
+  } else if (inStorage) {
+    // Read in place: the game reads the entries it opens.
     boot.resourcesBlob = blobId(chosen.blob);
     boot.resourcesSize = chosen.blob.size;
   } else {
     boot.resources = new Uint8Array(await chosen.blob.arrayBuffer());
   }
-  boot.files = await gameFiles(!!build.threads);
+  steps.push(step(`resources (${chosen.files ? "folder" : inStorage ? "in storage" : "in memory"})`));
+  boot.files = await gameFiles(inStorage);
+  const bytes = boot.files.reduce((n, [, kind, data, , size]) =>
+    n + (kind === "blob" ? 0 : data?.byteLength ?? 0), 0);
+  const stored = boot.files.filter(([, kind]) => kind === "blob").length;
+  steps.push(step(`game folder (${boot.files.length} entries, ${(bytes / 2 ** 20).toFixed(1)} MB in memory`
+    + `${stored ? `, ${stored} files in storage` : ""}, ${opfs ? "OPFS" : "IndexedDB"})`));
+  console.info(`Horizon: the page's start took ${Math.round(performance.now() - at)} ms: ${steps.join(", ")}`);
   setStatus("Starting the game…", false, true);
   shell.hidden = true;
   $("horizon").focus();

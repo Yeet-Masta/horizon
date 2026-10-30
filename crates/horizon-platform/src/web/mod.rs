@@ -163,11 +163,17 @@ pub async fn boot() -> Result<(), String> {
             }
         }
     }
-    // The threaded build reads the resources zip and the game folder's larger
+    // With the game data in browser storage (the page's Options), the
+    // threaded build reads the resources zip and the game folder's larger
     // files from the page's Blobs (blobs.rs), the page's thread through a
     // worker that must run first.
     #[cfg(target_feature = "atomics")]
-    blobs::start_reader().await;
+    if get(&js_sys::global(), "horizonBlobs")
+        .dyn_into::<Array>()
+        .is_ok_and(|blobs| blobs.length() > 0)
+    {
+        blobs::start_reader().await;
+    }
     if let Ok(zip) = get(&boot, "resources").dyn_into::<Uint8Array>() {
         vfs::mount_zip(Path::new(RESOURCES), zip.to_vec(), Some(RESOURCES_MARKER))
             .map_err(|e| format!("the resources zip could not be read: {e}"))?;
