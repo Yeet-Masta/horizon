@@ -242,6 +242,12 @@ The web build is the native game with the operating system swapped out
   rather than on threads of their own (their sockets live on the page's
   thread); a shared world's writers look for packets every few milliseconds.
   Single player's connection through memory runs on workers, as natively.
+- **Input**: the pointer lock asks for raw movement (`unadjustedMovement`,
+  no system pointer acceleration, as natively) where the browser has it
+  (`?env=HORIZON_WEB_RAW_MOUSE=0` keeps the plain lock). In fullscreen the
+  page locks the keyboard (Chrome and Edge), so Escape pauses without leaving
+  fullscreen (hold it to leave) and the browser's shortcuts (Ctrl+W...) reach
+  the game. Once the game runs, the browser asks before the tab closes.
 - **Off**: controllers, mods with code (content-only mods still load),
   the system clipboard (copy and paste work inside the game), LAN discovery
   and Open to LAN (no ports to open), chat signing (as natively), skin

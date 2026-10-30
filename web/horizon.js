@@ -494,8 +494,44 @@ globalThis.horizonBoot = async () => {
   setStatus("Starting the game…", false, true);
   shell.hidden = true;
   $("horizon").focus();
+  guardUnload();
   return boot;
 };
+
+// ---- Input ---------------------------------------------------------------------------------------
+
+// Raw mouse movement, as the native game reads it: the pointer lock asks for unadjustedMovement,
+// which skips the system's pointer acceleration, and falls back to the plain lock where the
+// browser has no such thing. ?env=HORIZON_WEB_RAW_MOUSE=0 keeps the plain lock.
+const requestPointerLock = Element.prototype.requestPointerLock;
+if (requestPointerLock && urlEnv().HORIZON_WEB_RAW_MOUSE !== "0") {
+  Element.prototype.requestPointerLock = function (options) {
+    const plain = () => requestPointerLock.call(this, options);
+    let asked;
+    try {
+      asked = requestPointerLock.call(this, { ...options, unadjustedMovement: true });
+    } catch {
+      return plain();
+    }
+    return asked?.catch?.((e) => (e?.name === "NotSupportedError" ? plain() : Promise.reject(e))) ?? asked;
+  };
+}
+
+// Keyboard Lock in fullscreen: the browser's own shortcuts (Ctrl+W, Ctrl+T, Ctrl+N...) and Escape
+// reach the game as in a native window, so Escape pauses without leaving fullscreen. Holding
+// Escape still leaves it.
+document.addEventListener("fullscreenchange", () => {
+  if (!navigator.keyboard?.lock) return;
+  if (document.fullscreenElement) navigator.keyboard.lock().catch(() => {});
+  else navigator.keyboard.unlock();
+});
+
+// Once the game runs, the browser asks before the tab closes or leaves: what was played since
+// the last save would go with it.
+const guardUnload = () => window.addEventListener("beforeunload", (e) => {
+  e.preventDefault();
+  e.returnValue = "";
+});
 
 $("play").addEventListener("click", () => {
   if (navigator.storage?.persist) navigator.storage.persist().catch(() => {});
