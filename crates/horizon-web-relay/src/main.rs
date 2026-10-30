@@ -9,7 +9,9 @@
 //!
 //! Rooms (`?host`, `?join=CODE`) introduce browsers to each other over WebRTC;
 //! `--no-rooms` turns them off, `--max-rooms` (256) and `--max-guests` (16)
-//! bound them.
+//! bound them. Two browsers that can't connect directly have the relay pass
+//! their game's bytes (`?pipe=TOKEN`): `--max-pipes` (32) bounds those, and 0
+//! turns them off.
 //!
 //! A relay that reaches servers also passes their resource packs on to pages
 //! whose own download the pack's server refuses (`?download=URL`, from public
@@ -30,7 +32,7 @@ use std::{net::TcpListener, process::exit};
 fn usage() -> ! {
     eprintln!(
         "usage: horizon-web-relay [--listen ADDR:PORT] [--target HOST:PORT | --allow HOST:PORT|*:PORT ...] \
-         [--origin URL ...] [--max N] [--no-rooms] [--max-rooms N] [--max-guests N] \
+         [--origin URL ...] [--max N] [--no-rooms] [--max-rooms N] [--max-guests N] [--max-pipes N] \
          [--downloads | --no-downloads] [--no-accounts]"
     );
     exit(2);
@@ -76,6 +78,7 @@ fn main() {
             "--no-rooms" => config.rooms = false,
             "--max-rooms" => config.max_rooms = value().parse().unwrap_or_else(|_| usage()),
             "--max-guests" => config.max_guests = value().parse().unwrap_or_else(|_| usage()),
+            "--max-pipes" => config.max_pipes = value().parse().unwrap_or_else(|_| usage()),
             "--downloads" => downloads = Some(true),
             "--no-downloads" => downloads = Some(false),
             "--no-accounts" => config.accounts = false,
@@ -109,10 +112,11 @@ fn main() {
     };
     let on = |on: bool| if on { "on" } else { "off" };
     println!(
-        "horizon-web-relay {} on ws://{listen}/, reaching {reaches}; rooms {}, downloads {}, \
-         Microsoft sign-in {}",
+        "horizon-web-relay {} on ws://{listen}/, reaching {reaches}; rooms {} (pipes {}), \
+         downloads {}, Microsoft sign-in {}",
         env!("CARGO_PKG_VERSION"),
         on(config.rooms),
+        config.max_pipes,
         on(config.downloads),
         on(config.accounts),
     );

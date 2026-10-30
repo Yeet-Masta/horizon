@@ -131,15 +131,18 @@ A world played in the browser can be shared with friends in theirs. Pause,
 open *Play with Friends* (the friends icon) and *Start Sharing*: the world gets
 a code such as `K7QM-3XPD`. Friends type it on *Join a Friend* (Multiplayer),
 with the same relay set, and their browser connects straight to yours over
-WebRTC. The relay only introduces the two pages (`?host`, `?join=CODE`); the
+WebRTC. The relay introduces the two pages (`?host`, `?join=CODE`); the
 game's bytes go between the browsers, encrypted by WebRTC, and the host's
 world is the LAN server friends play on.
 
 The browsers find each other's addresses through STUN (Play with Friends'
-servers, or `HORIZON_STUN_SERVERS`; `none` for the local network only). Two
-networks that both block direct connections can't meet: there is no fallback
-through the relay yet. A native Horizon can't join a browser's world, nor a
-browser a native one's invite code.
+servers, or `HORIZON_STUN_SERVERS`; `none` for the local network only). When
+two networks both block direct connections, the friend's page asks the relay
+to pass the game's bytes instead: both pages connect a pipe there
+(`?pipe=TOKEN`), which the relay bounds with `--max-pipes` (32; 0 turns them
+off). Those bytes are the game's own protocol, unencrypted on the relay as
+on a LAN. A native Horizon can't join a browser's world, nor a browser a
+native one's invite code.
 
 The friend's terrain arrives at the speed of both games' frames: the host
 sends chunks in batches each tick, and every batch waits for the guest's

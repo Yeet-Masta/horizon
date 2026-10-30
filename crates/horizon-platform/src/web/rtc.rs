@@ -1,7 +1,9 @@
 //! WebRTC between two browsers: a world shared from one page and joined
 //! from another (web/README.md). A relay's rooms (`crates/horizon-web-relay`)
 //! carry each guest's offer and the host's answer; the game's bytes then go
-//! over a data channel between the two pages, as a [`Socket`].
+//! over a data channel between the two pages, as a [`Socket`]. When the two
+//! can't reach each other (both behind strict NATs, with no TURN server), the
+//! guest asks the relay to pass the bytes: both pages connect a pipe there.
 use super::socket::Socket;
 use crate::time::Duration;
 use js_sys::{Function, JSON, Promise};
@@ -192,12 +194,25 @@ pub async fn join(relay: &str, code: &str, ice: &[String]) -> Result<Socket, Str
     let answer = String::from_utf8_lossy(&answer);
     wait(pc.set_remote_description(&parse(&answer)?)).await?;
     let socket = Socket::adopt(channel, pc.into());
-    socket
-        .opened(CONNECT)
-        .await
-        .map_err(|_| "Couldn't reach your friend's browser directly".to_owned())?;
+    if socket.opened(CONNECT).await.is_ok() {
+        signal.close();
+        return Ok(socket);
+    }
+    socket.close();
+    // The browsers couldn't reach each other: the relay passes the bytes.
+    let direct = "Couldn't reach your friend's browser directly";
+    signal.write(b"relay").map_err(|e| e.to_string())?;
+    let reply = signal.message(CONNECT).await.ok_or(direct)?;
+    let reply = String::from_utf8_lossy(&reply);
+    let token = match reply.split_once(' ') {
+        Some(("pipe", token)) => token,
+        Some(("nopipe", reason)) => return Err(format!("{direct}, and {reason}")),
+        _ => return Err(direct.to_owned()),
+    };
+    let pipe = Socket::connect(&with_query(relay, &format!("pipe={token}")), CONNECT).await;
     signal.close();
-    Ok(socket)
+    super::console(3, "Horizon: your friend's world comes through the relay");
+    pipe
 }
 
 /// What a shared world hears from its relay room.
@@ -221,10 +236,10 @@ impl Host {
     pub fn start(relay: &str, ice: &[String]) -> Self {
         let events = Arc::new(Mutex::new(VecDeque::new()));
         let signal = Arc::new(Mutex::new((None, false)));
-        let (url, ice) = (with_query(relay, "host"), ice.to_vec());
+        let (relay, ice) = (relay.to_owned(), ice.to_vec());
         let (task_events, task_signal) = (events.clone(), signal.clone());
         wasm_bindgen_futures::spawn_local(async move {
-            let reason = match host(&url, &ice, &task_events, &task_signal).await {
+            let reason = match host(&relay, &ice, &task_events, &task_signal).await {
                 Ok(()) => "Stopped sharing".to_owned(),
                 Err(reason) => reason,
             };
@@ -255,12 +270,12 @@ impl Drop for Host {
 }
 
 async fn host(
-    url: &str,
+    relay: &str,
     ice: &[String],
     events: &Arc<Mutex<VecDeque<HostEvent>>>,
     shared_signal: &Arc<Mutex<(Option<Socket>, bool)>>,
 ) -> Result<(), String> {
-    let signal = Socket::connect(url, CONNECT).await?;
+    let signal = Socket::connect(&with_query(relay, "host"), CONNECT).await?;
     {
         let mut shared = shared_signal.lock().unwrap();
         // Stopped while the room opened.
@@ -281,6 +296,19 @@ async fn host(
                 .unwrap()
                 .push_back(HostEvent::Code(rest.to_owned())),
             "left" => {}
+            // A friend whose browser couldn't reach this one: its pipe.
+            "pipe" => {
+                let Some((_, token)) = rest.split_once(' ') else {
+                    continue;
+                };
+                let (url, events) = (with_query(relay, &format!("pipe={token}")), events.clone());
+                wasm_bindgen_futures::spawn_local(async move {
+                    match Socket::connect(&url, CONNECT).await {
+                        Ok(socket) => events.lock().unwrap().push_back(HostEvent::Guest(socket)),
+                        Err(e) => super::console(2, &format!("Horizon: a friend's pipe: {e}")),
+                    }
+                });
+            }
             id => {
                 let (id, offer, signal) = (id.to_owned(), rest.to_owned(), signal.clone());
                 let (events, ice) = (events.clone(), ice.to_vec());

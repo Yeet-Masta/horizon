@@ -81,6 +81,9 @@ pub struct Config {
     pub rooms: bool,
     pub max_rooms: usize,
     pub max_guests: usize,
+    /// Games passed between two pages that couldn't connect directly
+    /// (`?pipe=TOKEN`), at once; 0: none.
+    pub max_pipes: usize,
     /// Pass server resource packs on to pages (`?download=URL`): from public
     /// addresses only, at most [`MAX_DOWNLOAD`] bytes.
     pub downloads: bool,
@@ -98,6 +101,7 @@ impl Default for Config {
             rooms: true,
             max_rooms: 256,
             max_guests: 16,
+            max_pipes: 32,
             downloads: false,
             accounts: true,
         }
@@ -123,7 +127,11 @@ pub fn accept_key(key: &str) -> String {
 
 /// Serve WebSockets on `listener` until the process ends.
 pub fn serve(listener: TcpListener, config: Config) {
-    let rooms = Arc::new(rooms::Rooms::new(config.max_rooms, config.max_guests));
+    let rooms = Arc::new(rooms::Rooms::new(
+        config.max_rooms,
+        config.max_guests,
+        config.max_pipes,
+    ));
     let config = Arc::new(config);
     let open = Arc::new(AtomicUsize::new(0));
     for stream in listener.incoming() {
@@ -639,6 +647,10 @@ fn relay(mut client: TcpStream, config: &Config, rooms: &rooms::Rooms) -> io::Re
         }
         if let Some(code) = query(&request.path, "join") {
             return rooms.join(&code, reader, client);
+        }
+        if let Some(token) = query(&request.path, "pipe") {
+            client.set_nodelay(true)?;
+            return rooms.pipe(&token, reader, client);
         }
     }
     let asked = query(&request.path, "target");
