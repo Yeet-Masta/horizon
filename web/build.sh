@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 # Builds the web version of the game into web/dist (web/README.md).
 #
-#   web/build.sh                 wasm64 (memory64) with threads, the default
-#   web/build.sh --wasm32        wasm32: for browsers without memory64 (Safari)
+#   web/build.sh                 wasm32 with threads, the default
+#   web/build.sh --wasm64        wasm64 (memory64): up to 8 GiB of memory instead of 4, and slower
+#                                (wasm32 measured 7-14% faster: memory64 bounds-checks every access)
 #   web/build.sh --no-threads    one thread: no shared memory, so no COOP/COEP headers needed
 #   web/build.sh --fast          the quicker-to-build `fast` profile (no LTO) instead of release
+#   web/build.sh --config=FILE   adds a cargo config (rustflags, say), as web/simd.toml does
 #
-# Every build uses WebAssembly SIMD (web/simd.toml), which every browser with WebGPU has.
-# Threads and wasm64 build std here, with nightly Rust (rustup adds rust-src). Needs the
+# Every build uses WebAssembly SIMD and tail calls (web/simd.toml), which every browser with
+# WebGPU has. Threads and wasm64 build std here, with nightly Rust (rustup adds rust-src). Needs the
 # wasm-bindgen CLI from the commit Cargo.lock pins (the error says the command); wasm-opt
 # (binaryen) is used when it is on the PATH. Serve the result with web/serve.py.
 # HORIZON_MSA_CLIENT_ID in the environment builds in another Azure app for Microsoft sign-in
@@ -16,9 +18,10 @@ set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
 root="$(dirname "$here")"
-target=wasm64-unknown-unknown
+target=wasm32-unknown-unknown
 profile=release
 threads=1
+extra=()
 for arg in "$@"; do
   case "$arg" in
     --wasm32) target=wasm32-unknown-unknown ;;
@@ -27,6 +30,7 @@ for arg in "$@"; do
     --threads) threads=1 ;;
     --release) profile=release ;;
     --fast) profile=fast ;;
+    --config=*) extra+=(--config "${arg#--config=}") ;;
     -h|--help) sed -n '2,14p' "$0"; exit 0 ;;
     *) echo "unknown option: $arg" >&2; exit 2 ;;
   esac
@@ -48,7 +52,7 @@ fi
 
 # No sound, controllers or mod runtime in a browser (web/README.md).
 args=(-p horizon-client --bin horizon-client --no-default-features --target "$target" --profile "$profile"
-  --config web/simd.toml)
+  --config web/simd.toml "${extra[@]}")
 if [ "$threads" = 1 ] || [ "$target" = wasm64-unknown-unknown ]; then
   # wasm64 is a tier 3 target, and threads need std built with atomics: std is built here,
   # with the nightly toolchain. web/threads.toml adds shared memory and atomics.
@@ -71,7 +75,7 @@ if ! wasm-bindgen --target web --no-typescript --out-dir "$dist/pkg" "$wasm"; th
   exit 1
 fi
 if command -v wasm-opt >/dev/null; then
-  flags=(-O2 --enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext --enable-mutable-globals --enable-reference-types --enable-multivalue --enable-simd)
+  flags=(-O2 --enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext --enable-mutable-globals --enable-reference-types --enable-multivalue --enable-simd --enable-tail-call --enable-extended-const)
   [ "$target" = wasm64-unknown-unknown ] && flags+=(--enable-memory64)
   [ "$threads" = 1 ] && flags+=(--enable-threads)
   wasm-opt "${flags[@]}" "$dist/pkg/horizon-client_bg.wasm" -o "$dist/pkg/horizon-client_bg.wasm"
@@ -87,5 +91,5 @@ cp crates/horizon-theme/fonts/Geist-Regular.ttf crates/horizon-theme/fonts/Pixel
 commit="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
 threads_json=false
 [ "$threads" = 1 ] && threads_json=true
-printf '{"target":"%s","profile":"%s","threads":%s,"simd":true,"commit":"%s"}\n' "$target" "$profile" "$threads_json" "$commit" > "$dist/build.json"
+printf '{"target":"%s","profile":"%s","threads":%s,"simd":true,"tailCall":true,"commit":"%s"}\n' "$target" "$profile" "$threads_json" "$commit" > "$dist/build.json"
 echo "web/dist: $(du -sh "$dist/pkg/horizon-client_bg.wasm" | cut -f1) module ($target, $profile, $([ "$threads" = 1 ] && echo threads || echo one thread))"

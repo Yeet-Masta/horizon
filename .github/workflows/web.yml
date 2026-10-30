@@ -2,7 +2,8 @@
 # calls that fail, panic or block in a browser, and they only show at run time.
 #   hazards: the wasm32 build linted for std's file system, clocks, environment and threads
 #            (tools/web_hazards.py), against the calls known to run only natively (web/hazards.json)
-#   build:   the one-thread wasm32 build checked, the threaded wasm64 build built (web/build.sh), and
+#   build:   the one-thread wasm32 and the threaded wasm64 builds checked, the threaded wasm32 build
+#            built (web/build.sh), and
 #            the page opened in Chromium (tools/web_smoke.py): the module loads, and with prepared
 #            resources (the HORIZON_WEB_RESOURCES_URL secret: a zip web/pack-resources.sh made, from
 #            the account's own game, kept private) a new world opens and keeps drawing.
@@ -61,7 +62,9 @@ jobs:
         run: cargo install wasm-bindgen-cli --git https://github.com/wasm-bindgen/wasm-bindgen --rev "${{ steps.bindgen.outputs.rev }}" --locked --force
       - name: The one-thread wasm32 build compiles
         run: cargo check --config web/simd.toml -p horizon-client --bin horizon-client --no-default-features --target wasm32-unknown-unknown
-      - name: Build the threaded wasm64 page
+      - name: The threaded wasm64 build compiles (web/build.sh --wasm64)
+        run: cargo +nightly check -Zbuild-std=std,panic_abort -p horizon-client --bin horizon-client --no-default-features --target wasm64-unknown-unknown --profile fast --config web/simd.toml --config web/threads.toml
+      - name: Build the threaded wasm32 page
         run: bash web/build.sh --fast
       - uses: actions/setup-python@v5
         with:

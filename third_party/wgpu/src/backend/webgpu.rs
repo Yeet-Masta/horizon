@@ -1770,6 +1770,38 @@ impl Drop for ContextWebGpu {
     }
 }
 
+/// Chromium's multi-draw indirect (gpuweb#5175), behind its "WebGPU Developer Features" flag:
+/// requested whenever the adapter has it, after which `multi_draw_*indirect` issue one call for
+/// all their draws instead of one call per draw.
+const CHROMIUM_MULTI_DRAW: &str = "chromium-experimental-multi-draw-indirect";
+static MULTI_DRAW: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// `pass.multiDraw(Indexed)Indirect(buffer, offset, count)`, if the device has it.
+fn multi_draw(
+    pass: &webgpu_sys::GpuRenderPassEncoder,
+    method: &str,
+    buffer: &webgpu_sys::GpuBuffer,
+    offset: crate::BufferAddress,
+    count: u32,
+) -> bool {
+    if !MULTI_DRAW.load(core::sync::atomic::Ordering::Relaxed) {
+        return false;
+    }
+    let Ok(function) = js_sys::Reflect::get(pass, &wasm_bindgen::JsValue::from_str(method))
+        .and_then(|f| f.dyn_into::<js_sys::Function>().map_err(Into::into))
+    else {
+        return false;
+    };
+    function
+        .call3(
+            pass,
+            buffer,
+            &wasm_bindgen::JsValue::from_f64(offset as f64),
+            &wasm_bindgen::JsValue::from(count),
+        )
+        .is_ok()
+}
+
 impl dispatch::AdapterInterface for WebAdapter {
     fn request_device(
         &self,
@@ -1799,6 +1831,13 @@ impl dispatch::AdapterInterface for WebAdapter {
                 }
             })
             .collect::<Vec<js_sys::JsString>>();
+        let mut required_features = required_features;
+        let multi_draw = self.inner.features().has(CHROMIUM_MULTI_DRAW);
+        if multi_draw {
+            log::info!("WebGPU: {CHROMIUM_MULTI_DRAW} on: one call for each multi-draw");
+            required_features.push(js_sys::JsString::from(CHROMIUM_MULTI_DRAW));
+        }
+        MULTI_DRAW.store(multi_draw, core::sync::atomic::Ordering::Relaxed);
         mapped_desc.set_required_features(&required_features);
 
         if let Some(label) = desc.label {
@@ -3731,6 +3770,11 @@ impl dispatch::RenderPassInterface for WebRenderPassEncoder {
         count: u32,
     ) {
         let buffer = indirect_buffer.as_webgpu();
+        if count > 1
+            && multi_draw(&self.inner, "multiDrawIndirect", &buffer.inner, indirect_offset, count)
+        {
+            return;
+        }
 
         for i in 0..count {
             let offset = indirect_offset + i as crate::BufferAddress * 16;
@@ -3746,6 +3790,17 @@ impl dispatch::RenderPassInterface for WebRenderPassEncoder {
         count: u32,
     ) {
         let buffer = indirect_buffer.as_webgpu();
+        if count > 1
+            && multi_draw(
+                &self.inner,
+                "multiDrawIndexedIndirect",
+                &buffer.inner,
+                indirect_offset,
+                count,
+            )
+        {
+            return;
+        }
 
         for i in 0..count {
             let offset = indirect_offset + i as crate::BufferAddress * 20;

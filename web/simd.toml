@@ -1,9 +1,12 @@
-# The web build's SIMD (web/README.md): every browser with WebGPU runs WebAssembly's 128-bit
-# SIMD, so the compiler may vectorize the game's loops (noise, lighting, meshing) with it.
-# web/build.sh passes this with `--config web/simd.toml` for every build (it adds to
-# .cargo/config.toml's rustflags); std gets it too where the build makes std.
+# The web build's WebAssembly features (web/README.md), which every browser with WebGPU runs:
+# 128-bit SIMD, so the compiler may vectorize the game's loops (noise, lighting, meshing) with
+# it; tail calls (return_call), measured 6-10% faster to load and to generate a new world; and
+# extended constant expressions. web/build.sh passes this with `--config web/simd.toml` for
+# every build (it adds to .cargo/config.toml's rustflags); std gets it too where the build makes
+# std. Relaxed SIMD gave one instruction, and wasm exception handling (panic=unwind) needs
+# winit's and wgpu's JS callbacks unwind-safe: neither is here.
 [target.wasm64-unknown-unknown]
-rustflags = ["-Ctarget-feature=+simd128"]
+rustflags = ["-Ctarget-feature=+simd128,+tail-call,+extended-const"]
 
 [target.wasm32-unknown-unknown]
-rustflags = ["-Ctarget-feature=+simd128"]
+rustflags = ["-Ctarget-feature=+simd128,+tail-call,+extended-const"]

@@ -2,7 +2,7 @@
 
 The game compiled to WebAssembly and drawn with WebGPU, in a browser tab. It is
 the same `horizon-client` as the native game, built for
-`wasm64-unknown-unknown` (64-bit memory, the default) or `wasm32-unknown-unknown`.
+`wasm32-unknown-unknown` (the default) or `wasm64-unknown-unknown` (64-bit memory).
 Like the native game, it plays on the resources prepared from **your own copy**
 of Minecraft: Java Edition 26.3. The page never downloads game files.
 
@@ -11,8 +11,8 @@ of Minecraft: Java Edition 26.3. The page never downloads game files.
 ```sh
 # The wasm-bindgen CLI from the commit Cargo.lock pins (web/build.sh prints this command too):
 cargo install wasm-bindgen-cli --git https://github.com/wasm-bindgen/wasm-bindgen --rev 39ae823bbc14c9d0a4a2869361483b5453a9b133 --locked --force
-web/build.sh               # wasm64 with threads: nightly Rust and -Zbuild-std (rustup installs rust-src)
-web/build.sh --wasm32      # wasm32, for browsers without memory64 (Safari)
+web/build.sh               # wasm32 with threads: nightly Rust and -Zbuild-std (rustup installs rust-src)
+web/build.sh --wasm64      # wasm64: up to 8 GiB of memory instead of 4, 7-14% slower (memory64's bounds checks)
 web/build.sh --no-threads  # one thread: for browsers or hosts where web/coi.js can't isolate the page
 web/build.sh --fast        # the quicker-to-build `fast` profile instead of release (thin LTO)
 ```
@@ -179,9 +179,10 @@ which must stay private.
 
 ## Browsers
 
-- WebGPU: Chrome and Edge 113+, Firefox 141+ on Windows, Safari 26+.
-- The wasm64 build also needs memory64: Chrome and Edge 133+, Firefox 134+. Safari
-  needs the wasm32 build.
+- WebGPU: Chrome and Edge 113+, Firefox 141+ on Windows, Safari 26+. Every build
+  also uses WebAssembly SIMD and tail calls (`web/simd.toml`), which those have.
+- The wasm64 build (`--wasm64`) also needs memory64: Chrome and Edge 133+,
+  Firefox 134+.
 
 - The threaded build (the default) needs a cross-origin isolated page: the
   server sends `Cross-Origin-Opener-Policy: same-origin` and
@@ -236,7 +237,12 @@ The web build is the native game with the operating system swapped out
   the level loads; `HORIZON_WEB_WORK_MS` sets it), and a job that wouldn't fit
   what is left of a frame waits for the next. Region files are written as
   they are saved, and single player runs in the frame.
-- **Graphics**: WebGPU only. The device opens before the game starts. Block
+- **Graphics**: WebGPU only. The device opens before the game starts. WebGPU
+  has no multi-draw yet (gpuweb#5175), so each section's draw is a call of its
+  own; where Chrome offers its experimental one
+  (`chromium-experimental-multi-draw-indirect`, behind
+  chrome://flags/#enable-webgpu-developer-features), the vendored wgpu draws a
+  run of sections with one call. Block
   textures are split across texture arrays at the adapter's layer limit.
   Occlusion culling runs on the render thread. GPU occlusion culling tests the
   boxes of sections that may be hidden in the shader, as on Metal (WebGPU

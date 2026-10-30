@@ -2,12 +2,13 @@
 rem Builds the web version of the game into web\dist on Windows (web\README.md); web/build.sh
 rem is the same for Linux and macOS.
 rem
-rem   web\build.bat              wasm64 (memory64) with threads, the default
-rem   web\build.bat --wasm32     wasm32: for browsers without memory64 (Safari)
+rem   web\build.bat              wasm32 with threads, the default
+rem   web\build.bat --wasm64     wasm64 (memory64): up to 8 GiB of memory instead of 4, and slower
 rem   web\build.bat --no-threads one thread: no shared memory, so no COOP/COEP headers needed
 rem   web\build.bat --fast       the quicker-to-build `fast` profile (no LTO) instead of release
 rem
-rem Every build uses WebAssembly SIMD (web\simd.toml), which every browser with WebGPU has.
+rem Every build uses WebAssembly SIMD and tail calls (web\simd.toml), which every browser with
+rem WebGPU has.
 rem Threads and wasm64 build std here, with nightly Rust (rustup adds rust-src). Needs the
 rem wasm-bindgen CLI from the commit Cargo.lock pins (the error says the command); wasm-opt
 rem (binaryen) is used when it is on the PATH. Serve the result with: python web\serve.py
@@ -16,7 +17,7 @@ setlocal EnableExtensions
 set "here=%~dp0"
 set "here=%here:~0,-1%"
 for %%r in ("%here%\..") do set "root=%%~fr"
-set "target=wasm64-unknown-unknown"
+set "target=wasm32-unknown-unknown"
 set "profile=release"
 set "threads=1"
 
@@ -33,8 +34,8 @@ if /i "%~1"=="--help" goto usage
 echo unknown option: %~1 1>&2
 exit /b 2
 :usage
-echo web\build.bat [--wasm32] [--no-threads] [--fast]
-echo   default: wasm64 with threads on nightly Rust, release profile; --wasm32 for Safari;
+echo web\build.bat [--wasm64] [--no-threads] [--fast]
+echo   default: wasm32 with threads on nightly Rust, release profile; --wasm64 for up to 8 GiB;
 echo   --no-threads for servers without COOP/COEP headers; --fast to build quicker, without LTO
 exit /b 0
 :args_done
@@ -109,12 +110,12 @@ set "commit=unknown"
 for /f %%c in ('git rev-parse --short HEAD 2^>nul') do set "commit=%%c"
 set "threads_json=false"
 if "%threads%"=="1" set "threads_json=true"
->"%dist%\build.json" echo {"target":"%target%","profile":"%profile%","threads":%threads_json%,"simd":true,"commit":"%commit%"}
+>"%dist%\build.json" echo {"target":"%target%","profile":"%profile%","threads":%threads_json%,"simd":true,"tailCall":true,"commit":"%commit%"}
 for %%s in ("%dist%\pkg\horizon-client_bg.wasm") do set /a "mb=%%~zs / 1048576"
 echo web\dist: %mb% MB module (%target%, %profile%, threads %threads_json%)
 echo Serve it with: python web\serve.py   (then open http://localhost:8080/)
 exit /b 0
 
 :optimize
-wasm-opt -O2 --enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext --enable-mutable-globals --enable-reference-types --enable-multivalue --enable-simd %memory64% %atomics% "%dist%\pkg\horizon-client_bg.wasm" -o "%dist%\pkg\horizon-client_bg.wasm"
+wasm-opt -O2 --enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext --enable-mutable-globals --enable-reference-types --enable-multivalue --enable-simd --enable-tail-call --enable-extended-const %memory64% %atomics% "%dist%\pkg\horizon-client_bg.wasm" -o "%dist%\pkg\horizon-client_bg.wasm"
 exit /b %errorlevel%
